@@ -34,7 +34,6 @@ enum {
     CCEV_REUSEADDR   = 1u << 8,   /* SO_REUSEADDR */
     CCEV_REUSEPORT   = 1u << 9,   /* SO_REUSEPORT */
     CCEV_TCP_NODELAY = 1u << 10,  /* TCP_NODELAY  */
-    CCEV_IPV6_ONLY   = 1u << 11,  /* IPV6_V6ONLY  */
     CCEV_UDP         = 1u << 12,  /* Use UDP (datagram) in ccev_connect() */
 };
 ```
