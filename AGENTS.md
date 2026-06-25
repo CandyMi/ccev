@@ -48,6 +48,24 @@ CMake will print a clear error if they are missing.
 | windows-mingw32 | Windows | x86 | MinGW-w64 (GCC) | — |
 | windows-clangcl | Windows | x64 | ClangCL (VS 2022) | — |
 
+### File-content congruence
+
+Every public symbol MUST be defined in the file whose name matches its
+primary responsibility:
+
+| Symbol | File | Reason |
+|--------|------|--------|
+| `ccev_loop_create/destroy/run/stop`, `ccev_listen`, `ccev_connect`, `ccev_default_loop` | `ccev.c` | Core reactor lifecycle |
+| `ccev_timer_add/del/reset` | `ccev_timer.c` | Timer subsystem |
+| `ccev_conn_create/close/send/recv/sendall/sendfile` | `ccev_conn.c` | Connection I/O |
+| `ccev_dns_*` | `ccev_dns.c` | DNS resolver |
+| `ccev_icmp_echo` | `ccev_icmp.c` | ICMP echo |
+| `ccev_signal_handle/ignore` | `ccev_signal.c` | Signal handling |
+
+Do NOT put functions in `ccev.c` that belong to a sub-module, and vice
+versa.  When a sub-module needs read-access to a core primitive (e.g.
+`ccev__g_default_loop`), declare it `extern` in `ccev_internal.h`.
+
 ## Coding conventions
 
 ### Language

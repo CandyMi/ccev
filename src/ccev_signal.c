@@ -16,43 +16,6 @@
 
 #include <signal.h>
 
-/* Forward declarations */
-static void ccev__signal_dispatch(void *udata);
-
-/* ── Default loop singleton ─────────────────────────────────── */
-
-static ccev_loop_t *g_default_loop = NULL;
-
-ccev_loop_t *ccev_default_loop(void) {
-    if (g_default_loop) return g_default_loop;
-
-    g_default_loop = ccev_loop_create(64);
-    if (!g_default_loop) return NULL;
-
-    /* Create self-pipe for signal delivery */
-    if (ccsocket_pipe(g_default_loop->signal_pipe) < 0) {
-        ccev_loop_destroy(g_default_loop);
-        g_default_loop = NULL;
-        return NULL;
-    }
-    ccsocket_set_nonblock(g_default_loop->signal_pipe[0], true);
-    ccsocket_set_nonblock(g_default_loop->signal_pipe[1], true);
-
-    /* Wrap read end as a conn and register for EPOLLIN */
-    g_default_loop->signal_conn = ccev_conn_create(
-        g_default_loop, g_default_loop->signal_pipe[0], NULL);
-    if (!g_default_loop->signal_conn) {
-        ccev_loop_destroy(g_default_loop);
-        g_default_loop = NULL;
-        return NULL;
-    }
-    g_default_loop->signal_conn->recv_cb   = ccev__signal_dispatch;
-    g_default_loop->signal_conn->recv_udata = NULL;
-    ccev__conn_mod_internal(g_default_loop, g_default_loop->signal_conn, EPOLLIN);
-
-    return g_default_loop;
-}
-
 /* ── Signal-number translation ──────────────────────────────── */
 
 static int ccev__to_os_signum(int ccev_sig) {
@@ -90,14 +53,14 @@ static int ccev__to_os_signum(int ccev_sig) {
 static void ccev__sig_handler(int signum) {
     unsigned char byte = (unsigned char)signum;
     /* write() is async-signal-safe per POSIX */
-    int r = (int)write(g_default_loop->signal_pipe[1], &byte, 1);
+    int r = (int)write(ccev__g_default_loop->signal_pipe[1], &byte, 1);
     (void)r;  /* best-effort */
 }
 
 /* ── Dispatch callback (fired from loop on pipe readable) ───── */
 
 static void ccev__signal_dispatch(void *udata) {
-    ccev_loop_t *loop = g_default_loop;
+    ccev_loop_t *loop = ccev__g_default_loop;
     if (!loop) return;
 
     unsigned char byte;
@@ -115,7 +78,7 @@ static void ccev__signal_dispatch(void *udata) {
 /* ── Public API ─────────────────────────────────────────────── */
 
 int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
-    if (!g_default_loop) return CCEV_ERR;
+    if (!ccev__g_default_loop) return CCEV_ERR;
     if (signum < 1 || signum > 63) return CCEV_ERR;
     if (!cb) return CCEV_ERR;
 
@@ -123,12 +86,16 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
     if (os_sig < 0) return CCEV_ERR;  /* unsupported on this platform */
 
     /* Store callback */
-    g_default_loop->signals[signum].cb    = cb;
-    g_default_loop->signals[signum].udata = udata;
+    ccev__g_default_loop->signals[signum].cb    = cb;
+    ccev__g_default_loop->signals[signum].udata = udata;
+
+    /* Wire up the signal dispatch callback on first use */
+    if (ccev__g_default_loop->signal_conn)
+        ccev__g_default_loop->signal_conn->recv_cb = ccev__signal_dispatch;
 
     /* Ensure signal dispatch conn is registered */
-    if (g_default_loop->signal_conn && !g_default_loop->signal_conn->closed)
-        ccev__conn_mod_internal(g_default_loop, g_default_loop->signal_conn, EPOLLIN);
+    if (ccev__g_default_loop->signal_conn && !ccev__g_default_loop->signal_conn->closed)
+        ccev__conn_mod_internal(ccev__g_default_loop, ccev__g_default_loop->signal_conn, EPOLLIN);
 
     /* Install OS signal handler */
 #ifdef _WIN32
@@ -147,15 +114,15 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
 }
 
 int ccev_signal_ignore(int signum) {
-    if (!g_default_loop) return CCEV_ERR;
+    if (!ccev__g_default_loop) return CCEV_ERR;
     if (signum < 1 || signum > 63) return CCEV_ERR;
 
     int os_sig = ccev__to_os_signum(signum);
     if (os_sig < 0) return CCEV_ERR;
 
     /* Clear callback */
-    g_default_loop->signals[signum].cb    = NULL;
-    g_default_loop->signals[signum].udata = NULL;
+    ccev__g_default_loop->signals[signum].cb    = NULL;
+    ccev__g_default_loop->signals[signum].udata = NULL;
 
     /* Restore default disposition */
     signal(os_sig, SIG_DFL);

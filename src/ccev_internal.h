@@ -230,6 +230,9 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
 /* Monotonic clock in milliseconds */
 uint64_t ccev__now_ms(void);
 
+/* Default loop singleton (defined in ccev.c, shared with ccev_signal.c) */
+extern ccev_loop_t *ccev__g_default_loop;
+
 #ifdef __cplusplus
 }
 #endif
