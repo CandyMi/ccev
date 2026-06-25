@@ -70,6 +70,7 @@ set(CCEV_SOURCES
     src/ccev_conn.c
     src/ccev_dns.c
     src/ccev_icmp.c
+    src/ccev_signal.c
 )
 add_library(ccev STATIC ${CCEV_SOURCES})
 target_include_directories(ccev PUBLIC

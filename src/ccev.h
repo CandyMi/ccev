@@ -530,6 +530,52 @@ typedef void (*ccev_icmp_cb)(void *udata, ccev_icmp_result_t *result);
 int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
                     ccev_icmp_cb cb, void *udata);
 
+/* ════════════════════════════════════════════════════════════════
+ *  Signal handling (default loop only)
+ * ════════════════════════════════════════════════════════════════ */
+
+/** @brief Signal callback. Fired when a trapped signal arrives.
+ *  @param udata   User-provided context pointer.
+ *  @param signum  ccev signal number (CCEV_SIGINT, CCEV_SIGTERM, etc.). */
+typedef void (*ccev_signal_cb)(void *udata, int signum);
+
+/* ccev signal numbers (platform-independent; unsupported on the current
+ * platform are rejected at registration) */
+#define CCEV_SIGHUP   1
+#define CCEV_SIGINT   2
+#define CCEV_SIGQUIT  3
+#define CCEV_SIGUSR1  10
+#define CCEV_SIGUSR2  12
+#define CCEV_SIGPIPE  13
+#define CCEV_SIGALRM  14
+#define CCEV_SIGTERM  15
+
+/** @brief Get the default event-loop instance (singleton, not thread-safe).
+ *
+ *  The first call creates the loop and sets up the self-pipe for signal
+ *  delivery.  Only this loop may register signal handlers.  Do NOT call
+ *  ccev_loop_destroy() on the returned pointer — ccev manages its lifetime.
+ *  @return Default loop handle. */
+ccev_loop_t *ccev_default_loop(void);
+
+/** @brief Register a signal handler on the default loop.
+ *
+ *  The handler fires inside ccev_loop_run() via the self-pipe trick —
+ *  signal-safety is guaranteed.  Only one handler per signum; a second
+ *  call overwrites the previous one (the old callback is discarded).
+ *
+ *  @param signum  ccev signal number (e.g. CCEV_SIGINT).
+ *  @param cb      Callback to invoke when the signal arrives.
+ *  @param udata   User pointer passed to @p cb.
+ *  @return CCEV_OK on success, CCEV_ERR if the signal is unsupported
+ *          on this platform. */
+int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata);
+
+/** @brief Restore a signal to its default disposition.
+ *  @param signum  ccev signal number.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_signal_ignore(int signum);
+
 #ifdef __cplusplus
 }
 #endif

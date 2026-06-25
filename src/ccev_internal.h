@@ -192,6 +192,14 @@ struct ccev_loop_s {
 
     /* ── DNS state ── */
     ccev_dns_state_t    dns;
+
+    /* ── Signal handling (default loop only) ── */
+    ccsocket_t              signal_pipe[2]; /**< Self-pipe for signal delivery */
+    ccev_conn_t            *signal_conn;    /**< Wrapper for signal pipe read end */
+    struct {
+        ccev_signal_cb cb;
+        void          *udata;
+    } signals[64];                           /**< signum → callback table */
 };
 
 /* ════════════════════════════════════════════════════════════════
