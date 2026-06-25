@@ -170,6 +170,14 @@ void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
  */
 ccev_loop_t *ccev_loop_create(int max_events);
 
+/** @brief Get the default event-loop singleton (not thread-safe).
+ *
+ *  The first call creates the loop and sets up the self-pipe for signal
+ *  delivery.  Only this loop may register signal handlers.  Do NOT call
+ *  ccev_loop_destroy() on the returned pointer.
+ *  @return Default loop handle. */
+ccev_loop_t *ccev_default_loop(void);
+
 /** @brief Destroy an event-loop instance.
  *
  *  Closes all remaining connections, timers, and frees resources.
@@ -539,24 +547,25 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
  *  @param signum  ccev signal number (CCEV_SIGINT, CCEV_SIGTERM, etc.). */
 typedef void (*ccev_signal_cb)(void *udata, int signum);
 
-/* ccev signal numbers (platform-independent; unsupported on the current
- * platform are rejected at registration) */
-#define CCEV_SIGHUP   1
-#define CCEV_SIGINT   2
-#define CCEV_SIGQUIT  3
-#define CCEV_SIGUSR1  10
-#define CCEV_SIGUSR2  12
-#define CCEV_SIGPIPE  13
-#define CCEV_SIGALRM  14
-#define CCEV_SIGTERM  15
-
-/** @brief Get the default event-loop instance (singleton, not thread-safe).
- *
- *  The first call creates the loop and sets up the self-pipe for signal
- *  delivery.  Only this loop may register signal handlers.  Do NOT call
- *  ccev_loop_destroy() on the returned pointer — ccev manages its lifetime.
- *  @return Default loop handle. */
-ccev_loop_t *ccev_default_loop(void);
+/** @brief ccev signal numbers (platform-independent). */
+typedef enum {
+    CCEV_SIGHUP    =  1,  /**< Hangup / terminal disconnected.          */
+    CCEV_SIGINT    =  2,  /**< Ctrl+C / interactive interrupt.          */
+    CCEV_SIGQUIT   =  3,  /**< Ctrl+\ / core-dump quit.                 */
+    CCEV_SIGUSR1   = 10,  /**< User-defined signal 1.                   */
+    CCEV_SIGUSR2   = 12,  /**< User-defined signal 2.                   */
+    CCEV_SIGPIPE   = 13,  /**< Broken pipe (write to closed socket).    */
+    CCEV_SIGALRM   = 14,  /**< Alarm clock.                             */
+    CCEV_SIGTERM   = 15,  /**< Termination request (kill default).      */
+} ccev_signal_t;
+#define CCEV_SIGHUP   CCEV_SIGHUP   /**< @deprecated use ccev_signal_t */
+#define CCEV_SIGINT   CCEV_SIGINT
+#define CCEV_SIGQUIT  CCEV_SIGQUIT
+#define CCEV_SIGUSR1  CCEV_SIGUSR1
+#define CCEV_SIGUSR2  CCEV_SIGUSR2
+#define CCEV_SIGPIPE  CCEV_SIGPIPE
+#define CCEV_SIGALRM  CCEV_SIGALRM
+#define CCEV_SIGTERM  CCEV_SIGTERM
 
 /** @brief Register a signal handler on the default loop.
  *
@@ -564,7 +573,7 @@ ccev_loop_t *ccev_default_loop(void);
  *  signal-safety is guaranteed.  Only one handler per signum; a second
  *  call overwrites the previous one (the old callback is discarded).
  *
- *  @param signum  ccev signal number (e.g. CCEV_SIGINT).
+ *  @param signum  ccev signal number (ccev_signal_t, e.g. CCEV_SIGINT).
  *  @param cb      Callback to invoke when the signal arrives.
  *  @param udata   User pointer passed to @p cb.
  *  @return CCEV_OK on success, CCEV_ERR if the signal is unsupported
