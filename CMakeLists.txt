@@ -81,6 +81,12 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
     target_compile_definitions(ccev PRIVATE _GNU_SOURCE)
 endif()
 
+# MSVC: C11 mode for proper bool support + suppress deprecation warnings
+if(MSVC)
+    target_compile_options(ccev PRIVATE /std:c11 /wd4996)
+    target_compile_definitions(ccev PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
 # Suppress SOCKET redefinition warning (epoll.h and ccsocket.h both define it compatibly)
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(ccev PRIVATE -Wno-typedef-redefinition)

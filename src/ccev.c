@@ -227,7 +227,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                     int so_err = 0;
                     socklen_t errlen = sizeof(so_err);
                     getsockopt((int)(intptr_t)conn->fd, SOL_SOCKET,
-                                SO_ERROR, &so_err, &errlen);
+                                SO_ERROR, (char*)&so_err, &errlen);
                     if (so_err == 0 && conn->connector.cb) {
                         conn->type = CCEV_CONN_NORMAL;
                         conn->connector.cb(conn->connector.udata, conn, CCEV_OK);

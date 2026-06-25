@@ -1,5 +1,10 @@
 # ccev
 
+[![CI](https://img.shields.io/github/actions/workflow/status/CandyMi/ccev/ci.yml?branch=master&label=CI&logo=github&style=flat-square)](https://github.com/CandyMi/ccev/actions)
+[![License](https://img.shields.io/github/license/CandyMi/ccev?label=License&style=flat-square)](LICENSE)
+[![C](https://img.shields.io/badge/C-99-%23555555?logo=c&style=flat-square)](https://en.wikipedia.org/wiki/C99)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-%2344cc11?style=flat-square)]()
+
 A lightweight, cross-platform reactor event-driven library written in C99.
 
 ## Prerequisites

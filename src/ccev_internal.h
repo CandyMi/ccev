@@ -22,6 +22,8 @@
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <windows.h>
+/* Windows lacks socklen_t; define as int for getsockopt compat */
+typedef int socklen_t;
 #else
 #  include <sys/socket.h>
 #  include <sys/types.h>
@@ -30,6 +32,11 @@
 
 #include "epoll.h"
 #include "ccsocket.h"
+
+/* Linux timerfd — MUST be included outside struct definitions */
+#if defined(__linux__) || defined(__ANDROID__)
+#  include <sys/timerfd.h>
+#endif
 
 /* ccheap configuration: 4-ary heap (wider = shallower, fewer pops) */
 #define CCHEAP_ARITY 4
@@ -196,7 +203,6 @@ struct ccev_loop_s {
 
     /* ── Timerfd (Linux/Android only, for ns precision) ── */
 #if defined(__linux__) || defined(__ANDROID__)
-#  include <sys/timerfd.h>
     int                 timerfd;        /**< timerfd fd for hrtimer         */
 #endif
 
