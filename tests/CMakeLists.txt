@@ -1,0 +1,13 @@
+if(BUILD_TESTING)
+    enable_testing()
+
+    function(add_ccev_test name source)
+        add_executable(${name} ${source})
+        target_link_libraries(${name} PRIVATE ccev)
+        add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+
+    add_ccev_test(test_timer test_timer.c)
+    add_ccev_test(test_conn  test_conn.c)
+    add_ccev_test(test_dns  test_dns.c)
+endif()
