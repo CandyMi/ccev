@@ -8,21 +8,6 @@
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════
- *  cchashmap callbacks — keyed by fd
- * ════════════════════════════════════════════════════════════════ */
-
-static uint64_t conn_hash_fn(const cchashmap_node_t *n, size_t seed) {
-    (void)seed;
-    ccev_conn_t *conn = CCHASHMAP_CONTAINER(n, ccev_conn_t, hnode);
-    return (uint64_t)(intptr_t)conn->fd;
-}
-static bool conn_equal_fn(const cchashmap_node_t *a, const cchashmap_node_t *b) {
-    ccev_conn_t *ca = CCHASHMAP_CONTAINER(a, ccev_conn_t, hnode);
-    ccev_conn_t *cb = CCHASHMAP_CONTAINER(b, ccev_conn_t, hnode);
-    return ca->fd == cb->fd;
-}
-
-/* ════════════════════════════════════════════════════════════════
  *  Event flag conversion (internal only)
  * ════════════════════════════════════════════════════════════════ */
 
@@ -196,8 +181,6 @@ void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn) {
     epoll_ctl(loop->epfd, EPOLL_CTL_DEL, (int)(intptr_t)conn->fd, NULL);
     conn->reg_events = 0;
 
-    /* Remove from hashmap */
-    cchashmap_del(&loop->conns, &conn->hnode);
     loop->conn_count--;
 
     /* Add lnode (cclist_node_t) to closing list */
@@ -223,13 +206,6 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     /* Init intrusive links */
     /* cclink is a singly-linked list; init the head */
     cclink_init(&conn->wbuf_list);
-
-    /* Initialize hashmap on first use */
-    if (cchashmap_size(&loop->conns) == 0 && loop->conn_count == 0)
-        cchashmap_init(&loop->conns, conn_hash_fn, conn_equal_fn);
-
-    /* Add to hashmap (fd → conn lookup) — using fd as hash key */
-    cchashmap_set(&loop->conns, &conn->hnode, NULL);
 
     /* Add to all_conns list (iteration) */
     cclist_push_back(&loop->all_conns, &conn->lnode);
@@ -413,8 +389,8 @@ int ccev_conn_sendfile(ccev_conn_t *conn, int fd, ccev_send_cb cb, void *udata) 
     return CCEV_ERR;
 }
 
-int ccev_conn_fd(ccev_conn_t *conn) {
-    return conn ? (int)(intptr_t)conn->fd : CCEV_ERR;
+ccsocket_t ccev_conn_fd(ccev_conn_t *conn) {
+    return conn ? conn->fd : (ccsocket_t)-1;
 }
 
 int ccev_conn_count(ccev_loop_t *loop) {

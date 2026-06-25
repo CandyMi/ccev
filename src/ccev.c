@@ -58,6 +58,11 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     cclist_init(&loop->closing);
     ccheap_init(&loop->timers, NULL);
 
+    /* Init DNS state */
+    loop->dns.servers[0] = "1.1.1.1";
+    loop->dns.nservers   = 1;
+    loop->dns.port       = 53;
+
     /* Wakeup pipe */
     if (ccsocket_pipe(loop->wakefds) < 0) {
         loop->free_fn(loop->events);
@@ -114,9 +119,6 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
 
     /* Free timer heap internal array */
     ccheap_destroy(&loop->timers);
-
-    /* Free hashmap internal bucket array */
-    cchashmap_destroy(&loop->conns);
 
     loop->free_fn(loop->events);
     epoll_close(loop->epfd);

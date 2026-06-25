@@ -211,7 +211,7 @@ Set the close/error callback. Fired when the peer closes or an I/O error occurs.
 ```c
 void  *ccev_conn_get_udata(ccev_conn_t *conn);
 void   ccev_conn_set_udata(ccev_conn_t *conn, void *udata);
-int    ccev_conn_fd(ccev_conn_t *conn);
+ccsocket_t ccev_conn_fd(ccev_conn_t *conn);
 ```
 
 ### Timer
@@ -247,7 +247,7 @@ Re-schedule a timer. Uses `ccheap_update()` with embedded index for O(log n) rep
 #### `ccev_dns_set_server`
 
 ```c
-int ccev_dns_set_server(const char *servers[], int n, int port);
+int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int port);
 ```
 
 Set DNS server addresses and port. Default servers: `{"1.1.1.1"}`, port: `53`. Max 4 servers. @p port is ignored when <= 0.

@@ -45,7 +45,6 @@ typedef int socklen_t;
 
 /* ccalg data structures */
 #include "ccheap.h"
-#include "cchashmap.h"
 #include "cclist.h"
 #include "cclink.h"
 
@@ -79,7 +78,6 @@ typedef enum {
  * ════════════════════════════════════════════════════════════════ */
 
 struct ccev_conn_s {
-    cchashmap_node_t   hnode;          /**< Hashmap node (fd → conn)      */
     cclist_node_t      lnode;          /**< List node (all conns)          */
     ccev_loop_t       *loop;           /**< Owning event loop              */
     ccev_conn_type_t   type;           /**< Connection type tag            */
@@ -167,7 +165,9 @@ typedef struct ccev_buf_s {
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_dns_state_s {
-    int     nservers;                   /**< Number of servers             */
+    const char *servers[4];             /**< DNS server addresses          */
+    int         nservers;               /**< Number of servers             */
+    int         port;                   /**< DNS server port               */
 } ccev_dns_state_t;
 
 /* ════════════════════════════════════════════════════════════════
@@ -190,7 +190,6 @@ struct ccev_loop_s {
     ccev_conn_t        *wake_conn;      /**< Wrapper for wakeup fd         */
 
     /* ── Connection table (fd → conn) ── */
-    cchashmap_t         conns;          /**< fd → ccev_conn_t*             */
     cclist_t            all_conns;      /**< All conns (for iteration)     */
     int                 conn_count;     /**< Active connection count        */
 

@@ -22,21 +22,17 @@
 #include <stdlib.h>
 
 /* ════════════════════════════════════════════════════════════════
- *  Global DNS config (per-process)
+ *  DNS config — stored in per-loop state, initialized in loop_create
  * ════════════════════════════════════════════════════════════════ */
 
 #define CCEV_DNS_MAX_SERVERS 4
 
-static const char *g_dns_servers[CCEV_DNS_MAX_SERVERS] = { "1.1.1.1" };
-static int         g_dns_nservers = 1;
-static int         g_dns_port     = 53;
-
-int ccev_dns_set_server(const char *servers[], int n, int port) {
-    if (!servers || n <= 0 || n > CCEV_DNS_MAX_SERVERS) return CCEV_ERR;
-    g_dns_nservers = n;
-    g_dns_port     = port > 0 ? port : 53;
+int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int port) {
+    if (!loop || !servers || n <= 0 || n > CCEV_DNS_MAX_SERVERS) return CCEV_ERR;
+    loop->dns.nservers = n;
+    loop->dns.port     = port > 0 ? port : 53;
     for (int i = 0; i < n; i++)
-        g_dns_servers[i] = servers[i];
+        loop->dns.servers[i] = servers[i];
     return CCEV_OK;
 }
 
@@ -200,10 +196,10 @@ static int ccev__dns_send_to_all(ccev_loop_t *loop, ccev_conn_t *conn,
     if (qlen < 0) return CCEV_ERR;
 
     /* Send to all configured DNS servers */
-    for (int i = 0; i < g_dns_nservers; i++) {
+    for (int i = 0; i < loop->dns.nservers; i++) {
         int sent_dns = 0;
-    ccsocket_sendto(conn->fd, (const char*)buf, (size_t)qlen,
-                     g_dns_servers[i], (uint16_t)g_dns_port, &sent_dns);
+        ccsocket_sendto(conn->fd, (const char*)buf, (size_t)qlen,
+                        loop->dns.servers[i], (uint16_t)loop->dns.port, &sent_dns);
     }
     return CCEV_OK;
 }

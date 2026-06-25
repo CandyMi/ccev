@@ -24,13 +24,17 @@ static void on_resolved(void *udata, ccev_address_t *addr, int status) {
 /* ═══ Tests ═══ */
 
 TEST(dns_set_server_valid) {
+    ccev_loop_t *loop = ccev_loop_create(64);
     const char *servers[] = {"1.1.1.1", "8.8.8.8"};
-    ASSERT(ccev_dns_set_server(servers, 2, 53) == CCEV_OK);
+    ASSERT(ccev_dns_set_server(loop, servers, 2, 53) == CCEV_OK);
+    ccev_loop_destroy(loop);
 }
 
 TEST(dns_set_server_invalid) {
-    ASSERT(ccev_dns_set_server(NULL, 1, 53) == CCEV_ERR);
-    ASSERT(ccev_dns_set_server((const char*[]){"x"}, 0, 53) == CCEV_ERR);
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(ccev_dns_set_server(NULL, NULL, 1, 53) == CCEV_ERR);
+    ASSERT(ccev_dns_set_server(loop, (const char*[]){"x"}, 0, 53) == CCEV_ERR);
+    ccev_loop_destroy(loop);
 }
 
 TEST(dns_free_null) {

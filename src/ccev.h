@@ -390,7 +390,7 @@ void  *ccev_conn_get_udata(ccev_conn_t *conn);
 /** @brief Set the user-data pointer. */
 void   ccev_conn_set_udata(ccev_conn_t *conn, void *udata);
 /** @brief Get the underlying file descriptor (diagnostic use only). */
-int    ccev_conn_fd(ccev_conn_t *conn);
+ccsocket_t ccev_conn_fd(ccev_conn_t *conn);
 
 /* ════════════════════════════════════════════════════════════════
  *  Timer subsystem
@@ -453,7 +453,7 @@ int ccev_timer_reset(ccev_loop_t *loop, ccev_timer_t *timer,
  *  @param n        Number of servers in the array.
  *  @return CCEV_OK or CCEV_ERR.
  */
-int ccev_dns_set_server(const char *servers[], int n, int port);
+int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int port);
 
 /** @brief Resolve a domain name asynchronously.
  *
