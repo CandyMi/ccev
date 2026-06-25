@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
 3. On every incoming connection, `on_accept` is called with a new `ccev_conn_t*`.
 4. The user sets up callbacks and arms read events via `ccev_conn_recv()`.
 5. `ccev_loop_run(CCEV_RUN_FOREVER)` drives the event loop.
-6. All I/O uses **EPOLLONESHOT** internally — the library automatically re-arms events that were registered but not fired.
+6. All I/O uses **EPOLLONESHOT** internally — after each callback the library re-arms the connection for its next event.
 
 ## Quick Start: Timer Demo
 

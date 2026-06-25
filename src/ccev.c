@@ -219,14 +219,11 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                     continue;
                 }
 
-                /* DNS */
-                if (conn->type == CCEV_CONN_DNS && conn->recv_cb) {
+                /* DNS + normal recv: fire callback then re-arm */
+                if (conn->recv_cb) {
                     conn->recv_cb(conn->recv_udata);
-                    continue;
+                    ccev__conn_rearm(loop, conn);
                 }
-
-                /* Normal recv */
-                if (conn->recv_cb) conn->recv_cb(conn->recv_udata);
             }
 
             if (fired_write) {
@@ -239,6 +236,8 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                     if (so_err == 0 && conn->connector.cb) {
                         conn->type = CCEV_CONN_NORMAL;
                         conn->connector.cb(conn->connector.udata, conn, CCEV_OK);
+                        /* Connect succeeded — re-arm for I/O */
+                        ccev__conn_rearm(loop, conn);
                     } else if (conn->connector.cb) {
                         conn->connector.cb(conn->connector.udata, conn, CCEV_ERR);
                         ccev__conn_schedule_close(loop, conn);
@@ -246,25 +245,14 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                     continue;
                 }
 
-                /* Flush write buffer */
+                /* Flush write buffer (ccev__conn_flush re-arms internally) */
                 if (conn->pending_write) ccev__conn_flush(loop, conn);
             }
         }
 
-        /* 5. Re-arm connections — compensates ONESHOT unfired events.
-         *    Always re-arm wake_conn so that ccev_wakeup / ccev_loop_stop
-         *    can interrupt a subsequent epoll_wait. */
+        /* 5. Re-arm wake_conn for next ccev_wakeup / ccev_loop_stop */
         if (loop->wake_conn && !loop->wake_conn->closed)
             ccev__conn_mod_internal(loop, loop->wake_conn, EPOLLIN);
-        {
-            cclist_node_t *cn = cclist_begin(&loop->all_conns);
-            while (cn) {
-                ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
-                cclist_node_t *next = cclist_next(cn);
-                if (!conn->closed) ccev__conn_rearm(loop, conn);
-                cn = next;
-            }
-        }
 
         /* 6. Process closing queue */
         while (!cclist_empty(&loop->closing)) {
