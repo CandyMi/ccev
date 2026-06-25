@@ -131,8 +131,6 @@ enum {
     CCEV_REUSEPORT   = 1u << 9,
     /** Enable TCP_NODELAY — disable Nagle's algorithm. */
     CCEV_TCP_NODELAY = 1u << 10,
-    /** Restrict a dual-stack socket to IPv6 only. */
-    CCEV_IPV6_ONLY   = 1u << 11,
     /** Use UDP (datagram) instead of TCP (stream) for connect(). */
     CCEV_UDP         = 1u << 12,
 };

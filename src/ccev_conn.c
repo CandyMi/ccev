@@ -7,24 +7,6 @@
 #include "ccev_internal.h"
 #include <string.h>
 
-/* ════════════════════════════════════════════════════════════════
- *  Event flag conversion (internal only)
- * ════════════════════════════════════════════════════════════════ */
-
-int ccev__epoll_from_ccev(int flags) {
-    int e = 0;
-    if (flags & CCEV_INTERNAL_READ)  e |= EPOLLIN;
-    if (flags & CCEV_INTERNAL_WRITE) e |= EPOLLOUT;
-    return e;
-}
-
-int ccev__epoll_to_ccev(int epoll_events) {
-    int f = 0;
-    if (epoll_events & EPOLLIN)   f |= CCEV_INTERNAL_READ;
-    if (epoll_events & EPOLLOUT)  f |= CCEV_INTERNAL_WRITE;
-    return f;
-}
-
 int ccev__conn_mod_internal(ccev_loop_t *loop, ccev_conn_t *conn,
                              int events) {
     if (conn->closed) return CCEV_ERR;
@@ -57,7 +39,6 @@ void ccev__conn_rearm(ccev_loop_t *loop, ccev_conn_t *conn) {
     if (conn->recv_cb)        want |= EPOLLIN;
     if (conn->pending_write)  want |= EPOLLOUT;
 
-    conn->want_events = want;
 
     if (want && want != conn->reg_events) {
         ccev__conn_mod_internal(loop, conn, want);
@@ -83,6 +64,15 @@ static ccev_buf_t *ccev__buf_alloc(ccev_loop_t *loop, const void *data,
 static void ccev__buf_free(ccev_loop_t *loop, ccev_buf_t *buf) {
     if (buf->data) loop->free_fn(buf->data);
     loop->free_fn(buf);
+}
+
+static void ccev__invoke_send_cb(ccev_conn_t *conn) {
+    if (conn->send_cb) {
+        ccev_send_cb cb = conn->send_cb;
+        void *ud = conn->send_udata;
+        conn->send_cb = NULL;
+        cb(ud);
+    }
 }
 
 void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
@@ -131,13 +121,7 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
 
         if (cclink_empty(&conn->wbuf_list)) {
             conn->pending_write = false;
-            conn->batch_done    = false;
-            if (conn->send_cb) {
-                ccev_send_cb cb = conn->send_cb;
-                void *ud = conn->send_udata;
-                conn->send_cb = NULL;
-                cb(ud);
-            }
+            ccev__invoke_send_cb(conn);
         } else {
             /* Still data — re-arm */
             conn->pending_write = true;
@@ -269,12 +253,7 @@ int ccev_conn_send(ccev_conn_t *conn, const void *data, size_t len,
     if (rc == CC_OPCODE_OK || rc == CC_OPCODE_WAIT) {
         if (sent > 0 && (size_t)sent == len) {
             /* Fully written */
-            if (conn->send_cb) {
-                ccev_send_cb scb = conn->send_cb;
-                void *su = conn->send_udata;
-                conn->send_cb = NULL;
-                scb(su);
-            }
+            ccev__invoke_send_cb(conn);
             return (int)len;
         }
 
@@ -312,7 +291,6 @@ int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
     }
 
     /* done=true: flush */
-    conn->batch_done = true;
 
     if (data && len > 0) {
         ccev_buf_t *buf = ccev__buf_alloc(conn->loop, data, len);
@@ -324,11 +302,8 @@ int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
     if (!cclink_empty(&conn->wbuf_list)) {
         conn->pending_write = true;
         ccev__conn_flush(conn->loop, conn);
-    } else if (conn->send_cb) {
-        ccev_send_cb scb = conn->send_cb;
-        void *su = conn->send_udata;
-        conn->send_cb = NULL;
-        scb(su);
+    } else {
+        ccev__invoke_send_cb(conn);
     }
 
     return (int)len;
@@ -377,12 +352,7 @@ int ccev_conn_sendfile(ccev_conn_t *conn, int fd, ccev_send_cb cb, void *udata) 
     /* Use ccsocket_sendfile for zero-copy (kernel sendfile when supported) */
     ccsocket_sendf_state_t rc = ccsocket_sendfile(conn->fd, fd);
     if (rc == CC_SENDALL || rc == CC_SENDWAIT) {
-        if (conn->send_cb) {
-            ccev_send_cb scb = conn->send_cb;
-            void *su = conn->send_udata;
-            conn->send_cb = NULL;
-            scb(su);
-        }
+        ccev__invoke_send_cb(conn);
         return CCEV_OK;
     }
 

@@ -24,7 +24,6 @@ typedef struct {
     void           *udata;
     ccev_timer_t   *timer;       /**< Timeout timer */
     ccicmp_t        ping;         /**< ccicmp context */
-    int             sent;         /**< Non-zero after echo sent */
     char            reply_buf[64];
     size_t          reply_len;
 } ccev_ping_t;

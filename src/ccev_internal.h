@@ -49,13 +49,7 @@ typedef int socklen_t;
 #include "cclink.h"
 
 /*
- * Internal event flags — moved from ccev.h public API into internal header
- * because they are only used within the library dispatch machinery.
  */
-enum {
-    CCEV_INTERNAL_READ  = 1u << 0,
-    CCEV_INTERNAL_WRITE = 1u << 1,
-};
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,8 +81,6 @@ struct ccev_conn_s {
 
     /* ── Registered epoll events (internal ONESHOT tracking) ── */
     int                reg_events;     /**< Currently registered epoll events */
-    int                want_events;    /**< Events we want (for re-arm)      */
-
     /* ── Recv callback (one at a time, last set wins) ── */
     ccev_recv_cb       recv_cb;
     void              *recv_udata;
@@ -108,8 +100,6 @@ struct ccev_conn_s {
     cclink_t           wbuf_list;      /**< Linked list of pending buffers */
     size_t             wbuf_len;       /**< Total bytes buffered           */
     bool               pending_write;  /**< EPOLLOUT is currently armed    */
-    bool               batch_done;     /**< sendall batch complete flag    */
-
     /* ── Type-specific fields ── */
     union {
         struct {
@@ -123,11 +113,6 @@ struct ccev_conn_s {
             ccev_timer_t   *timer;      /**< Connection timeout timer     */
         } connector;
 
-        struct {
-            ccev_dns_cb    cb;
-            void          *udata;
-            int            query_type;
-        } dns;
     };
 };
 
@@ -214,8 +199,6 @@ struct ccev_loop_s {
  * ════════════════════════════════════════════════════════════════ */
 
 /* epoll event mask conversion */
-int         ccev__epoll_from_ccev(int flags);
-int         ccev__epoll_to_ccev(int epoll_events);
 
 /* Internal epoll_ctl wrapper (always ONESHOT) */
 int ccev__conn_mod_internal(ccev_loop_t *loop, ccev_conn_t *conn,
