@@ -67,3 +67,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# submodule build artifacts (in case cmake runs inside deps/)
+deps/*/build/
+deps/*/Build/

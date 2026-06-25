@@ -1,0 +1,9 @@
+[submodule "deps/epoll"]
+	path = deps/epoll
+	url = https://github.com/CandyMi/epoll.git
+[submodule "deps/ccalg"]
+	path = deps/ccalg
+	url = https://github.com/CandyMi/ccalg.git
+[submodule "deps/ccsocket"]
+	path = deps/ccsocket
+	url = https://github.com/CandyMi/ccsocket.git
