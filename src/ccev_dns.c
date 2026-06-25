@@ -26,14 +26,15 @@
  * ════════════════════════════════════════════════════════════════ */
 
 #define CCEV_DNS_MAX_SERVERS 4
-#define CCEV_DNS_PORT  "53"
 
 static const char *g_dns_servers[CCEV_DNS_MAX_SERVERS] = { "1.1.1.1" };
-static int g_dns_nservers = 1;
+static int         g_dns_nservers = 1;
+static int         g_dns_port     = 53;
 
-int ccev_dns_set_server(const char *servers[], int n) {
+int ccev_dns_set_server(const char *servers[], int n, int port) {
     if (!servers || n <= 0 || n > CCEV_DNS_MAX_SERVERS) return CCEV_ERR;
     g_dns_nservers = n;
+    g_dns_port     = port > 0 ? port : 53;
     for (int i = 0; i < n; i++)
         g_dns_servers[i] = servers[i];
     return CCEV_OK;
@@ -202,7 +203,7 @@ static int ccev__dns_send_to_all(ccev_loop_t *loop, ccev_conn_t *conn,
     for (int i = 0; i < g_dns_nservers; i++) {
         int sent_dns = 0;
     ccsocket_sendto(conn->fd, (const char*)buf, (size_t)qlen,
-                     g_dns_servers[i], 53, &sent_dns);
+                     g_dns_servers[i], (uint16_t)g_dns_port, &sent_dns);
     }
     return CCEV_OK;
 }

@@ -247,10 +247,10 @@ Re-schedule a timer. Uses `ccheap_update()` with embedded index for O(log n) rep
 #### `ccev_dns_set_server`
 
 ```c
-int ccev_dns_set_server(const char *servers[], int n);
+int ccev_dns_set_server(const char *servers[], int n, int port);
 ```
 
-Set DNS server addresses. Default: `{"1.1.1.1"}`. Max 4 servers.
+Set DNS server addresses and port. Default servers: `{"1.1.1.1"}`, port: `53`. Max 4 servers. @p port is ignored when <= 0.
 
 #### `ccev_dns_resolve`
 

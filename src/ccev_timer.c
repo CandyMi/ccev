@@ -11,7 +11,12 @@
 
 uint64_t ccev__now_ms(void) {
 #if defined(_WIN32)
-    return (uint64_t)GetTickCount64();
+    /* QueryPerformanceCounter — microsecond resolution vs GetTickCount64 (16ms) */
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER count;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&count);
+    return (uint64_t)((count.QuadPart * 1000LL) / freq.QuadPart);
 #elif defined(__APPLE__)
     /* macOS: mach_absolute_time() is monotonic */
     uint64_t ns = mach_absolute_time();
