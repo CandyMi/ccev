@@ -187,6 +187,10 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     conn->fd     = fd;
     conn->udata  = udata;
 
+    /* External fds should be non-blocking in a reactor */
+    ccsocket_set_nonblock(fd, true);
+    ccsocket_set_cloexec(fd, true);
+
     /* Init intrusive links */
     /* cclink is a singly-linked list; init the head */
     cclink_init(&conn->wbuf_list);
