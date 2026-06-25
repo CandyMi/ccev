@@ -73,10 +73,7 @@ static void on_accept(void *udata, ccev_conn_t *conn,
     ccev_conn_recv(conn, NULL, 0, on_recv, conn);
 }
 
-int main(int argc, char **argv) {
-    const char *host = argc > 2 ? argv[2] : "0.0.0.0";
-    const char *port = argc > 1 ? argv[1] : "8080";
-
+int main(void) {
     ccev_loop_t *loop = ccev_loop_create(1024);
     if (!loop) return 1;
 
@@ -84,7 +81,7 @@ int main(int argc, char **argv) {
                                    CCEV_REUSEADDR, on_accept, NULL);
     if (!l) { ccev_loop_destroy(loop); return 1; }
 
-    printf("echo server on %s:%s\n", host, port);
+    printf("echo server on 0.0.0.0:8080\n");
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
     ccev_loop_destroy(loop);
     return 0;

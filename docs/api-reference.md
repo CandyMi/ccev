@@ -122,7 +122,7 @@ ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                           ccev_accept_cb on_accept, void *udata);
 ```
 
-Start listening for TCP connections. Returns a listener handle that can be closed with `ccev_conn_close()`. Returns `NULL` on failure.
+Start listening for connections. Supports TCP, UDP (`CCEV_UDP` flag), and Unix domain sockets (`port=0`). Returns a listener handle that can be closed with `ccev_conn_close()`. Returns `NULL` on failure.
 
 ### Async Connection
 

@@ -200,7 +200,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode);
  *  High-level TCP listen / TCP+UDP connect
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Start listening for TCP connections.
+/** @brief Start listening for TCP, UDP, or Unix domain socket connections.
  *
  *  Creates a TCP socket, binds to @p host:@p port, and starts accepting.
  *  The returned handle can be closed with ccev_conn_close() to stop

@@ -33,7 +33,7 @@ endif()
 # ── Dependencies: epoll (cross-platform epoll ABI) ──
 # Each platform uses exactly one backend implementation
 add_library(epoll STATIC)
-target_include_directories(epoll PUBLIC deps/epoll)
+target_include_directories(epoll PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/epoll>)
 
 if(WIN32)
     target_sources(epoll PRIVATE deps/epoll/wepoll.c)
@@ -51,7 +51,7 @@ add_library(ccsocket STATIC
     deps/ccsocket/ccdns.c
     deps/ccsocket/ccicmp.c
 )
-target_include_directories(ccsocket PUBLIC deps/ccsocket)
+target_include_directories(ccsocket PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccsocket>)
 target_compile_definitions(ccsocket PRIVATE
     CCICMP_MAX_PAYLOAD=65500
     CCICMP_RECV_BUFSZ=65535)
@@ -61,7 +61,7 @@ endif()
 
 # ── ccalg (header-only, no compile) ──
 add_library(ccalg INTERFACE)
-target_include_directories(ccalg INTERFACE deps/ccalg/include)
+target_include_directories(ccalg INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccalg/include>)
 
 # ── ccev library ──
 set(CCEV_SOURCES
@@ -72,7 +72,10 @@ set(CCEV_SOURCES
     src/ccev_icmp.c
 )
 add_library(ccev STATIC ${CCEV_SOURCES})
-target_include_directories(ccev PUBLIC src)
+target_include_directories(ccev PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 target_include_directories(ccev PRIVATE deps/ccalg/include deps/epoll deps/ccsocket)
 target_link_libraries(ccev PUBLIC epoll ccsocket ccalg)
 
@@ -91,6 +94,20 @@ endif()
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(ccev PRIVATE -Wno-typedef-redefinition)
 endif()
+
+# ── Install (PUBLIC headers use $<INSTALL_INTERFACE> for relocatability) ──
+include(GNUInstallDirs)
+install(TARGETS ccev epoll ccsocket ccalg
+    EXPORT ccev-targets
+    ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(FILES src/ccev.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT ccev-targets
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ccev
+    NAMESPACE ccev::
+)
 
 # ── Tests ──
 if(BUILD_TESTING)
