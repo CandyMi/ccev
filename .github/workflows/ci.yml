@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+
+  # ── Linux: GCC + ASAN/UBSAN ────────────────────────────────
+  linux-gcc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: cmake configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
+      - name: cmake build
+        run: cmake --build build -j$(nproc)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
+  # ── Linux: Clang + ASAN/UBSAN ──────────────────────────────
+  linux-clang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: cmake configure
+        run: CC=clang CXX=clang++ cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
+      - name: cmake build
+        run: cmake --build build -j$(nproc)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
+  # ── Linux: 32-bit (via multilib) ───────────────────────────
+  linux-32bit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: install multilib
+        run: sudo apt-get update -qq && sudo apt-get install -y gcc-multilib g++-multilib
+      - name: cmake configure (32-bit)
+        run: cmake -B build -DCMAKE_C_FLAGS=-m32 -DCMAKE_BUILD_TYPE=Debug
+      - name: cmake build
+        run: cmake --build build -j$(nproc)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
+  # ── macOS: AppleClang + ASAN/UBSAN ────────────────────────
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: cmake configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
+      - name: cmake build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
+  # ── Windows: MSVC x64 ─────────────────────────────────────
+  windows-msvc-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: cmake configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+      - name: cmake build
+        run: cmake --build build --config Debug -j
+      - name: ctest
+        run: ctest --test-dir build -C Debug --output-on-failure
+
+  # ── Windows: MSVC x86 ─────────────────────────────────────
+  windows-msvc-x86:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: cmake configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A Win32
+      - name: cmake build
+        run: cmake --build build --config Debug -j
+      - name: ctest
+        run: ctest --test-dir build -C Debug --output-on-failure
+
+  # ── Windows: ClangCL (clang-cl frontend) ──────────────────
+  windows-clangcl:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: cmake configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+      - name: cmake build
+        run: cmake --build build --config Debug -j
+      - name: ctest
+        run: ctest --test-dir build -C Debug --output-on-failure
+
+  # ── Windows: MinGW-w64 x64 ────────────────────────────────
+  windows-mingw64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+      - name: cmake configure
+        run: cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
+      - name: cmake build
+        run: cmake --build build -j$(nproc)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
+  # ── Windows: MinGW-w64 x86 ────────────────────────────────
+  windows-mingw32:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          install: >-
+            mingw-w64-i686-gcc
+            mingw-w64-i686-cmake
+            mingw-w64-i686-make
+      - name: cmake configure
+        run: cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
+      - name: cmake build
+        run: cmake --build build -j$(nproc)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
