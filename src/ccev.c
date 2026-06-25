@@ -112,6 +112,12 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         loop->free_fn(t);
     }
 
+    /* Free timer heap internal array */
+    ccheap_destroy(&loop->timers);
+
+    /* Free hashmap internal bucket array */
+    cchashmap_destroy(&loop->conns);
+
     loop->free_fn(loop->events);
     epoll_close(loop->epfd);
     loop->free_fn(loop);
