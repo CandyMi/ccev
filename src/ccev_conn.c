@@ -170,6 +170,9 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
 
 void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn) {
     if (!conn) return;
+    /* DNS query state — allocated by ccev_dns_resolve, must free here */
+    if (conn->type == CCEV_CONN_DNS && conn->recv_udata)
+        loop->free_fn(conn->recv_udata);
     /* Close socket */
     if (conn->fd != (ccsocket_t)-1) ccsocket_close(conn->fd);
     conn->fd = (ccsocket_t)-1;

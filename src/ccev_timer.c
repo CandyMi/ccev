@@ -78,7 +78,9 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
     timer->active     = true;
     timer->heap_index = 0;
 
-    ccheap_init(&loop->timers, timer_cmp);
+    /* Initialize the heap on first use (loop_create sets data=NULL) */
+    if (!loop->timers.data)
+        ccheap_init(&loop->timers, timer_cmp);
     ccheap_insert(&loop->timers, &timer->node);
     loop->timer_count++;
 
