@@ -76,6 +76,11 @@ target_include_directories(ccev PUBLIC src)
 target_include_directories(ccev PRIVATE deps/ccalg/include deps/epoll deps/ccsocket)
 target_link_libraries(ccev PUBLIC epoll ccsocket ccalg)
 
+# Linux timerfd requires _GNU_SOURCE for CLOCK_MONOTONIC, TFD_NONBLOCK
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+    target_compile_definitions(ccev PRIVATE _GNU_SOURCE)
+endif()
+
 # Suppress SOCKET redefinition warning (epoll.h and ccsocket.h both define it compatibly)
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(ccev PRIVATE -Wno-typedef-redefinition)

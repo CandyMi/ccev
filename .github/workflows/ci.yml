@@ -15,12 +15,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: cmake configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
-      - name: cmake build
-        run: cmake --build build -j$(nproc)
-      - name: ctest
-        run: ctest --test-dir build --output-on-failure
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure
 
   # ── Linux: Clang + ASAN/UBSAN ──────────────────────────────
   linux-clang:
@@ -29,12 +26,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: cmake configure
-        run: CC=clang CXX=clang++ cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
-      - name: cmake build
-        run: cmake --build build -j$(nproc)
-      - name: ctest
-        run: ctest --test-dir build --output-on-failure
+      - run: CC=clang CXX=clang++ cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure
 
   # ── Linux: 32-bit (via multilib) ───────────────────────────
   linux-32bit:
@@ -43,14 +37,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: install multilib
-        run: sudo apt-get update -qq && sudo apt-get install -y gcc-multilib g++-multilib
-      - name: cmake configure (32-bit)
-        run: cmake -B build -DCMAKE_C_FLAGS=-m32 -DCMAKE_BUILD_TYPE=Debug
-      - name: cmake build
-        run: cmake --build build -j$(nproc)
-      - name: ctest
-        run: ctest --test-dir build --output-on-failure
+      - run: sudo apt-get update -qq && sudo apt-get install -y gcc-multilib g++-multilib
+      - run: cmake -B build -DCMAKE_C_FLAGS=-m32 -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure
 
   # ── macOS: AppleClang + ASAN/UBSAN ────────────────────────
   macos-arm64:
@@ -59,12 +49,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: cmake configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
-      - name: cmake build
-        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
-      - name: ctest
-        run: ctest --test-dir build --output-on-failure
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
+      - run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+      - run: ctest --test-dir build --output-on-failure
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
@@ -73,12 +60,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: cmake configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64
-      - name: cmake build
-        run: cmake --build build --config Debug -j
-      - name: ctest
-        run: ctest --test-dir build -C Debug --output-on-failure
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+      - run: ctest --test-dir build -C Debug --output-on-failure
 
   # ── Windows: MSVC x86 ─────────────────────────────────────
   windows-msvc-x86:
@@ -87,12 +74,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: cmake configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A Win32
-      - name: cmake build
-        run: cmake --build build --config Debug -j
-      - name: ctest
-        run: ctest --test-dir build -C Debug --output-on-failure
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+      - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+      - run: ctest --test-dir build -C Debug --output-on-failure
 
   # ── Windows: ClangCL (clang-cl frontend) ──────────────────
   windows-clangcl:
@@ -101,12 +88,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: cmake configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
-      - name: cmake build
-        run: cmake --build build --config Debug -j
-      - name: ctest
-        run: ctest --test-dir build -C Debug --output-on-failure
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+      - run: ctest --test-dir build -C Debug --output-on-failure
 
   # ── Windows: MinGW-w64 x64 ────────────────────────────────
   windows-mingw64:
@@ -124,13 +111,10 @@ jobs:
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-make
-      - name: cmake configure
-        run: cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
-      - name: cmake build
-        run: cmake --build build -j$(nproc)
-      - name: ctest
-        run: ctest --test-dir build --output-on-failure
+            make
+      - run: cmake -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure
 
   # ── Windows: MinGW-w64 x86 ────────────────────────────────
   windows-mingw32:
@@ -148,10 +132,7 @@ jobs:
           install: >-
             mingw-w64-i686-gcc
             mingw-w64-i686-cmake
-            mingw-w64-i686-make
-      - name: cmake configure
-        run: cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
-      - name: cmake build
-        run: cmake --build build -j$(nproc)
-      - name: ctest
-        run: ctest --test-dir build --output-on-failure
+            make
+      - run: cmake -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure

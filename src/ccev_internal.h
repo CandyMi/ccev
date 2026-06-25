@@ -196,6 +196,7 @@ struct ccev_loop_s {
 
     /* ── Timerfd (Linux/Android only, for ns precision) ── */
 #if defined(__linux__) || defined(__ANDROID__)
+#  include <sys/timerfd.h>
     int                 timerfd;        /**< timerfd fd for hrtimer         */
 #endif
 
