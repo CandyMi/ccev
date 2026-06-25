@@ -278,30 +278,30 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
  *  Listener
  * ════════════════════════════════════════════════════════════════ */
 
-ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *host, const char *port,
+ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                            int backlog, ccev_flag_t flags,
                            ccev_accept_cb on_accept, void *udata) {
-    if (!loop || !host || !port || !on_accept) return NULL;
+    if (!loop || !addr || !on_accept) return NULL;
 
-    /* Empty host means dual-stack (IPv6 with IPv4-mapped) */
-    if (host[0] == '\0') host = "::";
-
-    int family = CC_INET6;
-    ccsocket_t fd = ccsocket1(family, CC_TCP, CC_CLOEXEC | CC_NONBLOCK);
-    if (fd == (ccsocket_t)-1) {
-        family = CC_INET4;
-        fd = ccsocket1(family, CC_TCP, CC_CLOEXEC | CC_NONBLOCK);
-        if (fd == (ccsocket_t)-1) return NULL;
+    /* Determine address family from string format */
+    ccsocket_family_t family = ccsocket_get_version(addr);
+    if (family == CC_FAMILY_INVALID) return NULL;
+    if (family == CC_INET4 || family == CC_INET6) {
+        if (addr[0] == '\0') { addr = "::"; family = CC_INET6; }
     }
 
-    /* Apply flags */
-    if (flags & CCEV_REUSEADDR) ccsocket_set_reuseaddr(fd, true);
-    if (flags & CCEV_REUSEPORT) ccsocket_set_reuseport(fd, true);
-    if (flags & CCEV_TCP_NODELAY) ccsocket_set_nodelay(fd, true);
+    int proto = (flags & CCEV_UDP) ? CC_UDP : CC_TCP;
+    ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
+    if (fd == (ccsocket_t)-1) return NULL;
 
-    /* ccsocket_listen() does bind + listen in one call */
-    uint16_t port_num = (uint16_t)atoi(port);
-    if (!ccsocket_listen(fd, host, port_num)) { ccsocket_close(fd); return NULL; }
+    /* Apply flags (UDS ignores most socket options) */
+    if (family != CC_UNIX) {
+        if (flags & CCEV_REUSEADDR) ccsocket_set_reuseaddr(fd, true);
+        if (flags & CCEV_REUSEPORT) ccsocket_set_reuseport(fd, true);
+        if (flags & CCEV_TCP_NODELAY) ccsocket_set_nodelay(fd, true);
+    }
+
+    if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
 
     ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
     if (!conn) { ccsocket_close(fd); return NULL; }
@@ -327,22 +327,21 @@ static void connect_timeout_cb(void *udata) {
     }
 }
 
-int ccev_connect(ccev_loop_t *loop, const char *host, const char *port,
+int ccev_connect(ccev_loop_t *loop, const char *addr, uint16_t port,
                   unsigned int timeout_ms, ccev_flag_t flags,
                   ccev_connect_cb on_connect, void *udata) {
-    if (!loop || !host || !port || !on_connect) return CCEV_ERR;
+    if (!loop || !addr || !on_connect) return CCEV_ERR;
+
+    ccsocket_family_t family = ccsocket_get_version(addr);
+    if (family == CC_FAMILY_INVALID) return CCEV_ERR;
 
     int proto = (flags & CCEV_UDP) ? CC_UDP : CC_TCP;
-    ccsocket_t fd = ccsocket1(CC_INET4, proto, CC_CLOEXEC | CC_NONBLOCK);
-    if (fd == (ccsocket_t)-1) {
-        fd = ccsocket1(CC_INET6, proto, CC_CLOEXEC | CC_NONBLOCK);
-        if (fd == (ccsocket_t)-1) return CCEV_ERR;
-    }
-    uint16_t port_num = (uint16_t)atoi(port);
+    ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
+    if (fd == (ccsocket_t)-1) return CCEV_ERR;
 
-    /* For UDP, connect to associate the remote address */
-    if (proto == CC_UDP) {
-        if (ccsocket_connect(fd, host, port_num)) {
+    /* UDP / UDS datagram: immediate connect (non-blocking) */
+    if (proto == CC_UDP || family == CC_UNIX) {
+        if (ccsocket_connect(fd, addr, port)) {
             ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
             if (!conn) { ccsocket_close(fd); return CCEV_ERR; }
             conn->type = CCEV_CONN_NORMAL;
@@ -353,9 +352,8 @@ int ccev_connect(ccev_loop_t *loop, const char *host, const char *port,
     }
 
     /* TCP: non-blocking connect */
-    bool connected = ccsocket_connect(fd, host, port_num);
+    bool connected = ccsocket_connect(fd, addr, port);
     if (connected) {
-        /* Immediate success */
         ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
         if (!conn) { ccsocket_close(fd); return CCEV_ERR; }
         conn->type = CCEV_CONN_NORMAL;
@@ -363,7 +361,7 @@ int ccev_connect(ccev_loop_t *loop, const char *host, const char *port,
         return CCEV_OK;
     }
 
-    /* EINPROGRESS */
+    /* EINPROGRESS — wait for EPOLLOUT */
     ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
     if (!conn) { ccsocket_close(fd); return CCEV_ERR; }
 

@@ -14,6 +14,7 @@
 #include "ccev.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static void on_sent(void *udata) {
     (void)udata;  /* nothing to do — echo is fire-and-forget */
@@ -57,9 +58,9 @@ static void on_accept(void *udata, ccev_conn_t *conn,
 
 int main(int argc, char **argv) {
     const char *host = (argc > 2) ? argv[2] : "0.0.0.0";
-    const char *port = (argc > 1) ? argv[1] : "8080";
+    uint16_t port = (uint16_t)((argc > 1) ? atoi(argv[1]) : 8080);
 
-    printf("ccev echo server starting on %s:%s ...\n", host, port);
+    printf("ccev echo server starting on %s:%u ...\n", host, port);
 
     ccev_loop_t *loop = ccev_loop_create(1024);
     if (!loop) {
@@ -70,7 +71,7 @@ int main(int argc, char **argv) {
     ccev_conn_t *listener = ccev_listen(loop, host, port, 128,
                                          CCEV_REUSEADDR, on_accept, NULL);
     if (!listener) {
-        fprintf(stderr, "Failed to listen on %s:%s\n", host, port);
+        fprintf(stderr, "Failed to listen on %s:%u\n", host, port);
         ccev_loop_destroy(loop);
         return 1;
     }

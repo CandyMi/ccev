@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
     ccev_loop_t *loop = ccev_loop_create(1024);
     if (!loop) return 1;
 
-    ccev_conn_t *l = ccev_listen(loop, host, port, 128,
+    ccev_conn_t *l = ccev_listen(loop, "0.0.0.0", 8080, 128,
                                    CCEV_REUSEADDR, on_accept, NULL);
     if (!l) { ccev_loop_destroy(loop); return 1; }
 

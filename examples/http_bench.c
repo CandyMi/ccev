@@ -64,10 +64,10 @@ static void on_accept(void *udata, ccev_conn_t *conn,
 
 int main(int argc, char **argv) {
     const char *host = argc > 2 ? argv[2] : "0.0.0.0";
-    const char *port = argc > 1 ? argv[1] : "8080";
+    uint16_t port = (uint16_t)(argc > 1 ? atoi(argv[1]) : 8080);
     int backlog = argc > 3 ? atoi(argv[3]) : 4096;
 
-    printf("ccev benchmark HTTP server: %s:%s (backlog=%d)\n",
+    printf("ccev benchmark HTTP server: %s:%u (backlog=%d)\n",
            host, port, backlog);
 
     ccev_loop_t *loop = ccev_loop_create(1024);
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
     ccev_conn_t *l = ccev_listen(loop, host, port, backlog,
                                    CCEV_REUSEADDR, on_accept, NULL);
     if (!l) {
-        fprintf(stderr, "listen failed on %s:%s\n", host, port);
+        fprintf(stderr, "listen failed on %s:%u\n", host, port);
         ccev_loop_destroy(loop);
         return 1;
     }

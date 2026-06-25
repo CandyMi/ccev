@@ -207,15 +207,15 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode);
  *  listening.
  *
  *  @param loop       Event-loop handle.
- *  @param host       Bind address ("0.0.0.0", "::", "127.0.0.1", etc.).
- *  @param port       Port string ("8080", "https", etc.).
+ *  @param addr       Address ("0.0.0.0", "::", "/tmp/sock", etc.).
+ *  @param port       Port number (0 for Unix domain sockets).
  *  @param backlog    listen(2) backlog size.
  *  @param flags      OR-ed ccev_flag_t socket options.
  *  @param on_accept  Callback invoked for every new connection.
  *  @param udata      User pointer passed to on_accept.
  *  @return Connection handle (the listener itself), or NULL on failure.
  */
-ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *host, const char *port,
+ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                           int backlog, ccev_flag_t flags,
                           ccev_accept_cb on_accept, void *udata);
 
@@ -228,15 +228,15 @@ ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *host, const char *port,
  *  ccsocket_connect() to associate the remote address.
  *
  *  @param loop         Event-loop handle.
- *  @param host         Target hostname or IP.
- *  @param port         Target port.
+ *  @param addr         Target address (IP, hostname, or UDS path).
+ *  @param port         Target port (0 for Unix domain sockets).
  *  @param timeout_ms   Connection timeout in ms. 0 = no timeout.
  *  @param flags        OR-ed ccev_flag_t (CCEV_UDP for datagram).
  *  @param on_connect   Callback on connect finish or failure.
  *  @param udata        User pointer passed to on_connect.
  *  @return CCEV_OK on successful initiation, CCEV_ERR on error.
  */
-int ccev_connect(ccev_loop_t *loop, const char *host, const char *port,
+int ccev_connect(ccev_loop_t *loop, const char *addr, uint16_t port,
                  unsigned int timeout_ms, ccev_flag_t flags,
                  ccev_connect_cb on_connect, void *udata);
 

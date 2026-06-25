@@ -117,7 +117,7 @@ Run the event loop. In `CCEV_RUN_FOREVER` mode, does not return until `ccev_loop
 #### `ccev_listen`
 
 ```c
-ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *host, const char *port,
+ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                           int backlog, ccev_flag_t flags,
                           ccev_accept_cb on_accept, void *udata);
 ```
@@ -129,7 +129,7 @@ Start listening for TCP connections. Returns a listener handle that can be close
 #### `ccev_connect`
 
 ```c
-int ccev_connect(ccev_loop_t *loop, const char *host, const char *port,
+int ccev_connect(ccev_loop_t *loop, const char *addr, uint16_t port,
                  unsigned int timeout_ms, ccev_flag_t flags,
                  ccev_connect_cb on_connect, void *udata);
 ```

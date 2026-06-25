@@ -72,7 +72,7 @@ static void on_accept(void *udata, ccev_conn_t *conn,
 
 int main(void) {
     ccev_loop_t *loop = ccev_loop_create(1024);
-    ccev_listen(loop, "0.0.0.0", "8080", 128, CCEV_REUSEADDR, on_accept, NULL);
+    ccev_listen(loop, "0.0.0.0", 8080, 128, CCEV_REUSEADDR, on_accept, NULL);
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
     ccev_loop_destroy(loop);
     return 0;
