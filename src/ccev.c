@@ -184,9 +184,8 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         if (mode == CCEV_RUN_FOREVER) {
             ccheap_node_t *earliest = ccheap_peek(&loop->timers);
             if (earliest) {
-                ccev_timer_t *t = CCHEAP_CONTAINER(earliest, ccev_timer_t, node);
-                if (t->node.timeout > now) {
-                    uint64_t diff = t->node.timeout - now;
+                if (earliest->timeout > now) {
+                    uint64_t diff = earliest->timeout - now;
                     timeout = (diff > (uint64_t)INT_MAX) ? -1 : (int)diff;
                 } else {
                     timeout = 0;

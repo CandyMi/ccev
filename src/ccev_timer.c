@@ -91,10 +91,9 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
     if (loop->timerfd >= 0) {
         ccheap_node_t *earliest = ccheap_peek(&loop->timers);
         if (earliest) {
-            ccev_timer_t *t = CCHEAP_CONTAINER(earliest, ccev_timer_t, node);
             struct itimerspec its;
             memset(&its, 0, sizeof(its));
-            uint64_t rem = (t->node.timeout > ccev__now_ms()) ? t->node.timeout - ccev__now_ms() : 0;
+            uint64_t rem = (earliest->timeout > ccev__now_ms()) ? earliest->timeout - ccev__now_ms() : 0;
             its.it_value.tv_sec  = (time_t)(rem / 1000ULL);
             its.it_value.tv_nsec = (long)((rem % 1000ULL) * 1000000L);
             timerfd_settime(loop->timerfd, 0, &its, NULL);
