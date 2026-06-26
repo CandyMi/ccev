@@ -43,15 +43,8 @@ typedef struct ccev_conn_s  ccev_conn_t;
 /** Opaque timer handle. Created by ccev_timer_add(). */
 typedef struct ccev_timer_s ccev_timer_t;
 
-/** DNS resolution result — a singly-linked list of addresses. */
-typedef struct ccev_address_s {
-    char                    ip[64];   /**< Human-readable IP string.        */
-    int                     ttl;      /**< DNS TTL in seconds.              */
-    struct ccev_address_s  *next;     /**< Next address, NULL at end-of-list. */
-    /** @private Internal: allocator hook for freeing this node.
-     *  Set by the DNS subsystem; used by ccev_dns_free(). */
-    void                  (*_free_fn)(void*);
-} ccev_address_t;
+/* ccev_address_t was removed — address is now passed as const char* on the stack. */
+
 
 /* ════════════════════════════════════════════════════════════════
  *  Callback type definitions
@@ -95,12 +88,13 @@ typedef void (*ccev_accept_cb)(void *udata, ccev_conn_t *conn,
 typedef void (*ccev_connect_cb)(void *udata, ccev_conn_t *conn, int status);
 
 /** @brief DNS resolution callback.
- *  @param udata  User-provided context pointer.
- *  @param addr   Linked list of resolved addresses. NULL if resolution failed.
- *                Must be freed with ccev_dns_free().
- *  @param status CCEV_OK if at least one address was resolved,
- *                CCEV_ERR on total failure / timeout. */
-typedef void (*ccev_dns_cb)(void *udata, ccev_address_t *addr, int status);
+ *
+ *  @param udata    User-provided context pointer.
+ *  @param address  Resolved address string (IP or UDS path), or "" on failure.
+ *                  Points to a stack buffer — valid only during the callback.
+ *                  The caller must NOT free or store this pointer.
+ *  @param status   CCEV_OK if resolution succeeded, CCEV_ERR on timeout/error. */
+typedef void (*ccev_dns_cb)(void *udata, const char *address, int status);
 
 /* ════════════════════════════════════════════════════════════════
  *  Enumerations & flag constants
@@ -470,27 +464,30 @@ int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int por
 
 /** @brief Resolve a domain name asynchronously.
  *
- *  Sends UDP DNS queries to all configured servers simultaneously.
- *  The first successful response wins (race mode); remaining responses
- *  are discarded. If both CCEV_DNS_A and CCEV_DNS_AAAA are specified,
- *  both A and AAAA queries are issued independently.
+ *  If @p domain is already an IP address or a Unix socket path,
+ *  the callback fires immediately (synchronously) with the string
+ *  as-is.  Otherwise, sends UDP DNS queries to all configured
+ *  servers simultaneously.  If both CCEV_DNS_A and CCEV_DNS_AAAA
+ *  are specified, both queries are issued and the first valid
+ *  response wins.
+ *
+ *  Cache is checked before issuing a network query, and the result
+ *  is stored in the cache for subsequent lookups.
  *
  *  @param loop        Event-loop handle.
- *  @param domain      Domain name to resolve.
+ *  @param domain      Domain name, IP address, or UDS path to resolve.
  *  @param timeout_ms  Per-query timeout in ms. 0 = no timeout.
  *  @param type        CCEV_DNS_A, CCEV_DNS_AAAA, or bitwise OR for both.
- *  @param cb          Completion callback. Fires once when at least one
- *                     query completes or all queries have failed/timed out.
+ *  @param cb          Completion callback.  The @p address parameter
+ *                     contains the resolved IP string on success, or
+ *                     "" on timeout / error.  Do NOT free or store
+ *                     the pointer — it is valid only during the call.
  *  @param udata       User pointer for the callback.
  *  @return CCEV_OK on successful initiation, CCEV_ERR on error.
  */
 int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
                       unsigned int timeout_ms, ccev_dns_type_t type,
                       ccev_dns_cb cb, void *udata);
-
-/** @brief Free a DNS address list returned by ccev_dns_cb.
- *  @param addr  Head of the address list (NULL-safe). */
-void ccev_dns_free(ccev_address_t *addr);
 
 /** @brief Flush the DNS cache and reload from the OS hosts file.
  *

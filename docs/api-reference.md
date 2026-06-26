@@ -45,11 +45,7 @@ typedef struct ccev_loop_s  ccev_loop_t;   /* Event-loop handle. */
 typedef struct ccev_conn_s  ccev_conn_t;   /* Connection / I/O handle. */
 typedef struct ccev_timer_s ccev_timer_t;  /* Timer handle. */
 
-typedef struct ccev_address_s {
-    char                    ip[64];        /* Human-readable IP. */
-    int                     ttl;           /* DNS TTL in seconds. */
-    struct ccev_address_s  *next;          /* Next address (linked list). */
-} ccev_address_t;
+/* ccev_address_t was removed — see ccev_dns_cb for the new signature. */
 ```
 
 ## Callbacks
@@ -62,7 +58,7 @@ typedef void (*ccev_timer_cb)(void *udata);   /* Timer expired. */
 typedef void (*ccev_accept_cb)(void *udata, ccev_conn_t *conn,
                                 const char *ip, int port);
 typedef void (*ccev_connect_cb)(void *udata, ccev_conn_t *conn, int status);
-typedef void (*ccev_dns_cb)(void *udata, ccev_address_t *addr, int status);
+typedef void (*ccev_dns_cb)(void *udata, const char *address, int status);
 ```
 
 ## Function Reference
@@ -259,15 +255,21 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
                       ccev_dns_cb cb, void *udata);
 ```
 
-Resolve a domain name asynchronously. Sends UDP queries to all configured servers simultaneously (race mode — first response wins).
+Resolve a domain name asynchronously.
 
-#### `ccev_dns_free`
+If @p domain is already an IP address or Unix socket path, the callback fires
+immediately (synchronously) with the string as-is — no network activity.
 
-```c
-void ccev_dns_free(ccev_address_t *addr);
-```
+Otherwise, the DNS cache is checked first. On a cache hit, the callback fires
+synchronously with the cached address. On a miss, UDP queries are sent to all
+configured servers simultaneously (race mode — first valid response wins).
+The resolved address is written to the cache before the callback chain fires.
 
-Free a DNS address list. NULL-safe.
+The @p address passed to the callback points to a stack buffer valid only
+during the callback invocation — the caller must NOT free or store the
+pointer.
+
+<!-- ccev_dns_free removed — no heap allocation, no free needed. -->
 
 #### `ccev_dns_flush`
 

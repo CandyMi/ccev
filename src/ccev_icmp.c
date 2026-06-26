@@ -124,10 +124,10 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
 /* ── DNS resolution callback ──────────────────────────────────────── */
 /* Fires when the hostname has been resolved (or resolution failed). */
 
-static void ccev__icmp_dns_cb(void *udata, ccev_address_t *addr, int status) {
+static void ccev__icmp_dns_cb(void *udata, const char *address, int status) {
     ccev_ping_t *p = (ccev_ping_t *)udata;
 
-    if (status != CCEV_OK || !addr) {
+    if (status != CCEV_OK || !address || address[0] == '\0') {
         /* Resolution failed — fire error callback */
         if (p->timer) {
             ccev_timer_del(p->loop, p->timer);
@@ -140,30 +140,26 @@ static void ccev__icmp_dns_cb(void *udata, ccev_address_t *addr, int status) {
     }
 
     /* Initialise ccicmp with the resolved address family */
-    ccsocket_family_t af = ccsocket_get_version(addr->ip);
+    ccsocket_family_t af = ccsocket_get_version(address);
     if (af != CC_INET4 && af != CC_INET6) af = CC_INET4;
     if (!ccicmp_init(&p->ping, (int)af)) {
         if (af == CC_INET4) {
             /* Fall back to IPv6 */
             if (!ccicmp_init(&p->ping, CC_INET6)) {
-                ccev_dns_free(addr);
                 if (p->cb) p->cb(p->udata, NULL);
                 /* No conn yet; free directly. */
                 p->loop->free_fn(p);
                 return;
             }
         } else {
-            ccev_dns_free(addr);
             if (p->cb) p->cb(p->udata, NULL);
             p->loop->free_fn(p);
             return;
         }
     }
 
-    ccev_dns_free(addr);
-
-    /* Send echo to the resolved IP */
-    if (ccev__icmp_send_echo(p, p->host) != 0) {
+    /* Send echo to the resolved IP address (not the original hostname) */
+    if (ccev__icmp_send_echo(p, address) != 0) {
         ccicmp_close(&p->ping);
         if (p->cb) p->cb(p->udata, NULL);
         p->loop->free_fn(p);

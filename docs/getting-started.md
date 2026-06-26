@@ -182,7 +182,7 @@ ccev/
 - **Asynchronous send / synchronous recv**: `ccev_conn_send()` buffers data and manages EPOLLOUT internally. `ccev_conn_recv()` is a synchronous read (call it from within a recv callback).
 - **Speculative reads**: `ccev_conn_recv()` with a callback performs a non-blocking read first. If data is available immediately, the callback fires synchronously — avoiding a redundant epoll registration.
 - **D-ary heap timers**: 4-ary min-heap (ccheap) with O(log n) insert/pop and O(log n) update via embedded index.
-- **Race-mode DNS**: Queries are sent to all configured servers simultaneously via unconnected UDP sockets. The first valid response wins.
+- **Race-mode DNS**: Queries are sent to all configured servers simultaneously via unconnected UDP sockets. The first valid response wins. Results are returned as a stack-allocated string (`const char *`) via the callback — no heap allocation, no `free` needed. IP addresses and Unix socket paths are resolved synchronously without network activity.
 - **Deferred close**: Connections are moved to a closing list during dispatch; actual teardown happens after all callbacks return.
 - **sendfile**: `ccev_conn_sendfile()` delegates to kernel sendfile (zero-copy on Linux, macOS, FreeBSD).
 - **ICMP echo**: `ccev_icmp_echo()` integrates ccicmp with the reactor for privilege-free ping on modern kernels.

@@ -16,8 +16,9 @@ static int passed, failed;
 } while(0)
 #define RUN(name) do { printf("  %s\n", #name); fflush(stdout); test_##name(); } while(0)
 
-static void on_resolved(void *udata, ccev_address_t *addr, int status) {
-    if (addr) ccev_dns_free(addr);
+static void on_resolved(void *udata, const char *address, int status) {
+    (void)address;
+    (void)status;
     ccev_loop_stop((ccev_loop_t *)udata);
 }
 
@@ -35,11 +36,6 @@ TEST(dns_set_server_invalid) {
     ASSERT(ccev_dns_set_server(NULL, NULL, 1, 53) == CCEV_ERR);
     ASSERT(ccev_dns_set_server(loop, (const char*[]){"x"}, 0, 53) == CCEV_ERR);
     ccev_loop_destroy(loop);
-}
-
-TEST(dns_free_null) {
-    ccev_dns_free(NULL);
-    ASSERT(1);
 }
 
 TEST(dns_resolve_api_smoke) {
@@ -75,14 +71,11 @@ TEST(dns_resolve_null_loop) {
  * ════════════════════════════════════════════════════════════════ */
 
 static int cb_count;
-static ccev_address_t *last_addr;
 
-static void cache_cb(void *udata, ccev_address_t *addr, int status) {
+static void cache_cb(void *udata, const char *address, int status) {
+    (void)address;
     (void)status;
     cb_count++;
-    if (last_addr) ccev_dns_free(last_addr);
-    last_addr = addr ? NULL : NULL;  /* don't keep ref, just count */
-    if (addr) ccev_dns_free(addr);
     if (udata) ccev_loop_stop((ccev_loop_t *)udata);
 }
 
@@ -112,9 +105,10 @@ typedef struct { ccev_loop_t *loop; int id; } pending_ctx_t;
 static int pcnt[4];
 static int pexpected;
 
-static void pending_cb(void *udata, ccev_address_t *addr, int status) {
+static void pending_cb(void *udata, const char *address, int status) {
     pending_ctx_t *c = (pending_ctx_t *)udata;
-    if (addr) ccev_dns_free(addr);
+    (void)address;
+    (void)status;
     if (c && c->id >= 0 && c->id < 4) pcnt[c->id]++;
     pexpected--;
     if (pexpected <= 0 && c && c->loop)
@@ -163,17 +157,53 @@ TEST(dns_pending_different_domains) {
     ccev_loop_destroy(loop);
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  IP/UDS short-circuit tests
+ * ════════════════════════════════════════════════════════════════ */
+
+static int short_circuit_count;
+
+static void short_circuit_cb(void *udata, const char *address, int status) {
+    short_circuit_count++;
+    ASSERT(status == CCEV_OK);
+    ASSERT(address != NULL && address[0] != '\0');
+    if (udata) ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+TEST(dns_short_circuit_ip4) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    short_circuit_count = 0;
+    int rc = ccev_dns_resolve(loop, "127.0.0.1", 3000, CCEV_DNS_A, short_circuit_cb, loop);
+    ASSERT(rc == CCEV_OK);
+    ASSERT(short_circuit_count == 1);
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_short_circuit_ip6) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    short_circuit_count = 0;
+    int rc = ccev_dns_resolve(loop, "::1", 3000, CCEV_DNS_A, short_circuit_cb, NULL);
+    ASSERT(rc == CCEV_OK);
+    ASSERT(short_circuit_count == 1);
+    ccev_loop_destroy(loop);
+}
+
 /* ═══ Main ═══ */
 
 int main(void) {
     printf("dns tests:\n"); fflush(stdout);
     RUN(dns_set_server_valid);
     RUN(dns_set_server_invalid);
-    RUN(dns_free_null);
     RUN(dns_resolve_api_smoke);
     RUN(dns_resolve_null_domain);
     RUN(dns_resolve_null_cb);
     RUN(dns_resolve_null_loop);
+
+    printf("dns short circuit:\n");
+    RUN(dns_short_circuit_ip4);
+    RUN(dns_short_circuit_ip6);
 
     printf("dns cache:\n");
     RUN(dns_cache_hit_from_hosts);
