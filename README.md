@@ -33,17 +33,19 @@ ccev_loop_run(loop, mode)
  |
  +-- 4. epoll_wait(epfd, events, max_events, timeout)
  |
- +-- 5. Dispatch n fired events (each re-armed after callback):
- |       [wake pipe]    drain + re-arm EPOLLIN
+ +-- 5. Dispatch n fired events:
+ |       [wake pipe]    drain only (re-arm at step 6)
  |       [EPOLLERR/HUP] schedule close
- |       [listener]     accept2 --> conn_create --> on_accept_cb
+ |       [listener]     accept2 --> conn_create --> on_accept_cb + re-arm
  |       [connecting]   getsockopt SO_ERROR --> on_connect_cb + re-arm
- |       [EPOLLIN]      recv_cb(udata) + re-arm
+ |       [EPOLLIN]      recv_cb(udata) + ccev__conn_rearm
  |       [EPOLLOUT]     flush write buffer (re-arms internally)
  |
- +-- 6. Process closing queue (close_cb --> free conn)
+ +-- 6. Re-arm wake_conn for next ccev_wakeup / ccev_loop_stop
  |
- +-- 7. stop_flag set? --> return
+ +-- 7. Process closing queue (close_cb --> free conn)
+ |
+ +-- 8. stop_flag set? --> return
  |       mode ONCE  --> return
  |       FOREVER    --> goto 1
 ```
