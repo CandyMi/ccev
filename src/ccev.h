@@ -547,25 +547,7 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
  *  @param signum  ccev signal number (CCEV_SIGINT, CCEV_SIGTERM, etc.). */
 typedef void (*ccev_signal_cb)(void *udata, int signum);
 
-/** @brief ccev signal numbers (platform-independent). */
-typedef enum {
-    CCEV_SIGHUP    =  1,  /**< Hangup / terminal disconnected.          */
-    CCEV_SIGINT    =  2,  /**< Ctrl+C / interactive interrupt.          */
-    CCEV_SIGQUIT   =  3,  /**< Ctrl+\ / core-dump quit.                 */
-    CCEV_SIGUSR1   = 10,  /**< User-defined signal 1.                   */
-    CCEV_SIGUSR2   = 12,  /**< User-defined signal 2.                   */
-    CCEV_SIGPIPE   = 13,  /**< Broken pipe (write to closed socket).    */
-    CCEV_SIGALRM   = 14,  /**< Alarm clock.                             */
-    CCEV_SIGTERM   = 15,  /**< Termination request (kill default).      */
-} ccev_signal_t;
-#define CCEV_SIGHUP   CCEV_SIGHUP   /**< @deprecated use ccev_signal_t */
-#define CCEV_SIGINT   CCEV_SIGINT
-#define CCEV_SIGQUIT  CCEV_SIGQUIT
-#define CCEV_SIGUSR1  CCEV_SIGUSR1
-#define CCEV_SIGUSR2  CCEV_SIGUSR2
-#define CCEV_SIGPIPE  CCEV_SIGPIPE
-#define CCEV_SIGALRM  CCEV_SIGALRM
-#define CCEV_SIGTERM  CCEV_SIGTERM
+
 
 /** @brief Register a signal handler on the default loop.
  *
@@ -573,7 +555,7 @@ typedef enum {
  *  signal-safety is guaranteed.  Only one handler per signum; a second
  *  call overwrites the previous one (the old callback is discarded).
  *
- *  @param signum  ccev signal number (ccev_signal_t, e.g. CCEV_SIGINT).
+ *  @param signum  OS signal number (e.g. SIGINT, SIGTERM — from <signal.h>).
  *  @param cb      Callback to invoke when the signal arrives.
  *  @param udata   User pointer passed to @p cb.
  *  @return CCEV_OK on success, CCEV_ERR if the signal is unsupported

@@ -17,9 +17,6 @@
 #include "ccev_internal.h"
 #include <string.h>
 
-/* Default loop singleton (shared with ccev_signal.c) */
-ccev_loop_t *ccev__g_default_loop = NULL;
-
 /* Default allocator (libc) */
 static void *ccev_default_realloc(void *ptr, size_t sz) {
     if (sz == 0) { free(ptr); return NULL; }
@@ -129,33 +126,31 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
 }
 
 ccev_loop_t *ccev_default_loop(void) {
-    if (ccev__g_default_loop) return ccev__g_default_loop;
+    static ccev_loop_t *loop = NULL;
+    if (loop) return loop;
 
-    ccev__g_default_loop = ccev_loop_create(64);
-    if (!ccev__g_default_loop) return NULL;
+    loop = ccev_loop_create(64);
+    if (!loop) return NULL;
 
     /* Create self-pipe for signal delivery */
-    if (ccsocket_pipe(ccev__g_default_loop->signal_pipe) < 0) {
-        ccev_loop_destroy(ccev__g_default_loop);
-        ccev__g_default_loop = NULL;
+    if (ccsocket_pipe(loop->signal_pipe) < 0) {
+        ccev_loop_destroy(loop);
         return NULL;
     }
-    ccsocket_set_nonblock(ccev__g_default_loop->signal_pipe[0], true);
-    ccsocket_set_nonblock(ccev__g_default_loop->signal_pipe[1], true);
+    ccsocket_set_nonblock(loop->signal_pipe[0], true);
+    ccsocket_set_nonblock(loop->signal_pipe[1], true);
 
     /* Wrap read end as a conn so the loop dispatches it */
-    ccev_conn_t *sc = ccev_conn_create(
-        ccev__g_default_loop, ccev__g_default_loop->signal_pipe[0], NULL);
+    ccev_conn_t *sc = ccev_conn_create(loop, loop->signal_pipe[0], NULL);
     if (!sc) {
-        ccev_loop_destroy(ccev__g_default_loop);
-        ccev__g_default_loop = NULL;
+        ccev_loop_destroy(loop);
         return NULL;
     }
-    ccev__g_default_loop->signal_conn = sc;
+    loop->signal_conn = sc;
     /* recv_cb is set by ccev_signal.c during ccev_signal_handle() */
-    ccev__conn_mod_internal(ccev__g_default_loop, sc, EPOLLIN);
+    ccev__conn_mod_internal(loop, sc, EPOLLIN);
 
-    return ccev__g_default_loop;
+    return loop;
 }
 
 void ccev_loop_stop(ccev_loop_t *loop) {
