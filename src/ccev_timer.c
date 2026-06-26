@@ -42,7 +42,7 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
 
         if (!timer->active) {
             /* Already decremented by ccev_timer_del */
-            loop->free_fn(timer);
+            ccev__free_fn(timer);
             continue;
         }
 
@@ -52,7 +52,7 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
             ccheap_node_set(&timer->node, timeout, now_ms + timer->interval);
             ccheap_insert(&loop->timers, &timer->node);
         } else {
-            loop->free_fn(timer);
+            ccev__free_fn(timer);
             loop->timer_count--;
         }
     }
@@ -63,7 +63,7 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
                                ccev_timer_cb cb, void *udata) {
     if (!loop || !cb) return NULL;
 
-    ccev_timer_t *timer = (ccev_timer_t *)loop->realloc_fn(NULL, sizeof(ccev_timer_t));
+    ccev_timer_t *timer = (ccev_timer_t *)ccev__realloc_fn(NULL, sizeof(ccev_timer_t));
     if (!timer) return NULL;
 
     timer->loop       = loop;

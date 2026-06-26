@@ -65,7 +65,7 @@ static ccev_buf_t *ccev__buf_alloc(ccev_loop_t *loop, const void *data,
                                     size_t len) {
     /* Single allocation: ccev_buf_t header + data payload contiguous.
      * buf->data points into the same block, avoiding a second malloc. */
-    ccev_buf_t *buf = (ccev_buf_t *)loop->realloc_fn(
+    ccev_buf_t *buf = (ccev_buf_t *)ccev__realloc_fn(
         NULL, sizeof(ccev_buf_t) + len);
     if (!buf) return NULL;
     buf->data = (char*)buf + sizeof(ccev_buf_t);
@@ -77,8 +77,7 @@ static ccev_buf_t *ccev__buf_alloc(ccev_loop_t *loop, const void *data,
 
 static void ccev__buf_free(ccev_loop_t *loop, ccev_buf_t *buf) {
     (void)loop;
-    /* data is part of the same allocation — single free */
-    loop->free_fn(buf);
+    ccev__free_fn(buf);
 }
 
 static void ccev__invoke_send_cb(ccev_conn_t *conn) {
@@ -152,7 +151,7 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
  *  Closing lifecycle
  * ════════════════════════════════════════════════════════════════ */
 
-void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn) {
+void ccev__conn_free(ccev_conn_t *conn) {
     if (!conn) return;
     /* Close sendfile file fd if still in progress */
     if (conn->sendfile.sendfile_fd >= 0) {
@@ -160,10 +159,9 @@ void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn) {
         conn->sendfile.sendfile_fd = -1;
     }
     /* DNS query state — allocated by ccev_dns_resolve, must free here */
-    /* Free internal per-connection state for subsystem-owned conns */
     if (conn->recv_udata &&
         (conn->type == CCEV_CONN_DNS || conn->type == CCEV_CONN_ICMP))
-        loop->free_fn(conn->recv_udata);
+        ccev__free_fn(conn->recv_udata);
     /* Close socket */
     if (conn->fd != (ccsocket_t)-1) ccsocket_close(conn->fd);
     conn->fd = (ccsocket_t)-1;
@@ -173,9 +171,9 @@ void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn) {
         cclink_node_t *bn = cclink_begin(&conn->wbuf_list);
         cclink_remove(&conn->wbuf_list, bn);
         ccev_buf_t *b = (ccev_buf_t *)((char*)bn - offsetof(ccev_buf_t, node));
-        loop->free_fn(b);
+        ccev__free_fn(b);
     }
-    loop->free_fn(conn);
+    ccev__free_fn(conn);
 }
 
 void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn) {
@@ -203,7 +201,7 @@ void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn) {
 ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     if (!loop || fd == (ccsocket_t)-1) return NULL;
 
-    ccev_conn_t *conn = (ccev_conn_t *)loop->realloc_fn(NULL, sizeof(ccev_conn_t));
+    ccev_conn_t *conn = (ccev_conn_t *)ccev__realloc_fn(NULL, sizeof(ccev_conn_t));
     if (!conn) return NULL;
 
     memset(conn, 0, sizeof(ccev_conn_t));
@@ -217,9 +215,7 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     ccsocket_set_cloexec(fd, true);
 
     /* Init intrusive links */
-    /* cclink is a singly-linked list; init the head */
     cclink_init(&conn->wbuf_list);
-    /* Sendfile state: no file in progress */
     conn->sendfile.sendfile_fd = -1;
 
     /* Add to all_conns list (iteration) */

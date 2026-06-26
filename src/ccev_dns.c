@@ -99,7 +99,7 @@ static ccev_dns_cache_t *cache_lookup(ccev_loop_t *loop, const char *domain) {
     uint64_t now = ccev__now_ms();
     if (e->cached_at + (uint64_t)e->ttl * 1000ULL <= now) {
         cchashmap_del(&loop->dns_cache, n);
-        loop->free_fn(e);
+        ccev__free_fn(e);
         return NULL;
     }
     return e;
@@ -110,9 +110,9 @@ static void cache_insert(ccev_loop_t *loop, const char *domain,
     if (!loop->dns_cache.buckets)
         cchashmap_init(&loop->dns_cache, cache_hash, cache_equal);
     ccev_dns_cache_t *old = cache_lookup(loop, domain);
-    if (old) { cchashmap_del(&loop->dns_cache, &old->node); loop->free_fn(old); }
+    if (old) { cchashmap_del(&loop->dns_cache, &old->node); ccev__free_fn(old); }
     ccev_dns_cache_t *e = (ccev_dns_cache_t *)
-        loop->realloc_fn(NULL, sizeof(ccev_dns_cache_t));
+        ccev__realloc_fn(NULL, sizeof(ccev_dns_cache_t));
     if (!e) return;
     memset(e, 0, sizeof(*e));
     size_t dlen = strlen(domain);
@@ -134,7 +134,7 @@ void ccev_dns_flush(ccev_loop_t *loop) {
             while (n) {
                 cchashmap_node_t *next = n->next;
                 ccev_dns_cache_t *e = CCHASHMAP_CONTAINER(n, ccev_dns_cache_t, node);
-                loop->free_fn(e);
+                ccev__free_fn(e);
                 n = next;
             }
             loop->dns_cache.buckets[i] = NULL;
@@ -166,11 +166,11 @@ void ccev_dns_flush(ccev_loop_t *loop) {
             domain[dpos] = '\0';
             if (dpos == 0) continue;
             ccev_dns_cache_t *old = cache_lookup(loop, domain);
-            if (old) { cchashmap_del(&loop->dns_cache, &old->node); loop->free_fn(old); }
+            if (old) { cchashmap_del(&loop->dns_cache, &old->node); ccev__free_fn(old); }
             if (!loop->dns_cache.buckets)
                 cchashmap_init(&loop->dns_cache, cache_hash, cache_equal);
             ccev_dns_cache_t *e = (ccev_dns_cache_t *)
-                loop->realloc_fn(NULL, sizeof(ccev_dns_cache_t));
+                ccev__realloc_fn(NULL, sizeof(ccev_dns_cache_t));
             if (!e) break;
             memset(e, 0, sizeof(*e));
             memcpy(e->domain, domain, (size_t)dpos);
@@ -204,7 +204,7 @@ static ccev_dns_pending_t *pending_add(ccev_loop_t *loop, const char *domain) {
     if (!loop->dns_pending.buckets)
         cchashmap_init(&loop->dns_pending, pending_hash, pending_equal);
     ccev_dns_pending_t *p = (ccev_dns_pending_t *)
-        loop->realloc_fn(NULL, sizeof(ccev_dns_pending_t));
+        ccev__realloc_fn(NULL, sizeof(ccev_dns_pending_t));
     if (!p) return NULL;
     memset(p, 0, sizeof(*p));
     size_t dlen = strlen(domain);
@@ -214,14 +214,14 @@ static ccev_dns_pending_t *pending_add(ccev_loop_t *loop, const char *domain) {
     cclink_init(&p->waiters);
     if (cchashmap_set(&loop->dns_pending, &p->node, NULL))
         return p;
-    loop->free_fn(p);  /* duplicate (shouldn't happen) */
+    ccev__free_fn(p);  /* duplicate (shouldn't happen) */
     return NULL;
 }
 
 /* Remove and free a pending entry (does NOT free waiters — caller handles) */
 static void pending_remove(ccev_loop_t *loop, ccev_dns_pending_t *p) {
     cchashmap_del(&loop->dns_pending, &p->node);
-    loop->free_fn(p);
+    ccev__free_fn(p);
 }
 
 /* Pop-front distribution — safe for re-entrant push_back from callbacks.
@@ -232,7 +232,7 @@ static void pending_distribute(ccev_loop_t *loop, ccev_dns_pending_t *p,
         cclink_node_t *wn = cclink_pop_front(&p->waiters);
         ccev_dns_waiter_t *w = CCLINK_CONTAINER(wn, ccev_dns_waiter_t, node);
         if (w->cb) w->cb(w->udata, address, status);
-        loop->free_fn(w);
+        ccev__free_fn(w);
     }
 }
 
@@ -403,7 +403,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     ccev_dns_pending_t *pending = pending_lookup(loop, domain);
     if (pending) {
         ccev_dns_waiter_t *w = (ccev_dns_waiter_t *)
-            loop->realloc_fn(NULL, sizeof(ccev_dns_waiter_t));
+            ccev__realloc_fn(NULL, sizeof(ccev_dns_waiter_t));
         if (!w) return CCEV_ERR;
         w->cb = cb; w->udata = udata;
         cclink_push_back(&pending->waiters, &w->node);
@@ -416,7 +416,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     if (!pending) return CCEV_ERR;
 
     ccev_dns_query_t *q = (ccev_dns_query_t *)
-        loop->realloc_fn(NULL, sizeof(ccev_dns_query_t));
+        ccev__realloc_fn(NULL, sizeof(ccev_dns_query_t));
     if (!q) { pending_remove(loop, pending); return CCEV_ERR; }
     memset(q, 0, sizeof(*q));
     q->loop = loop; q->cb = cb; q->udata = udata;
@@ -430,11 +430,11 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     ccdns_init(&q->ctx_aaaa);
 
     ccsocket_t fd = ccsocket(CC_INET4, CC_UDP);
-    if (fd == (ccsocket_t)-1) { pending_remove(loop, pending); loop->free_fn(q); return CCEV_ERR; }
+    if (fd == (ccsocket_t)-1) { pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
     ccsocket_set_nonblock(fd, true);
 
     ccev_conn_t *conn = ccev_conn_create(loop, fd, q);
-    if (!conn) { ccsocket_close(fd); pending_remove(loop, pending); loop->free_fn(q); return CCEV_ERR; }
+    if (!conn) { ccsocket_close(fd); pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
     conn->type = CCEV_CONN_DNS; q->conn = conn;
     conn->recv_cb = dns_recv_cb; conn->recv_udata = q;
     ccev__conn_mod_internal(loop, conn, EPOLLIN);

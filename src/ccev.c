@@ -24,13 +24,13 @@ static void *ccev_default_realloc(void *ptr, size_t sz) {
 }
 static void ccev_default_free(void *ptr) { free(ptr); }
 
-static void *(*g_realloc_fn)(void*, size_t) = ccev_default_realloc;
-static void  (*g_free_fn)(void*)            = ccev_default_free;
+void *(*ccev__realloc_fn)(void*, size_t) = ccev_default_realloc;
+void  (*ccev__free_fn)(void*)            = ccev_default_free;
 
 void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
                         void  (*free_fn)(void*)) {
-    if (realloc_fn) g_realloc_fn = realloc_fn;
-    if (free_fn)    g_free_fn    = free_fn;
+    if (realloc_fn) ccev__realloc_fn = realloc_fn;
+    if (free_fn)    ccev__free_fn    = free_fn;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -38,22 +38,20 @@ void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
  * ════════════════════════════════════════════════════════════════ */
 
 ccev_loop_t *ccev_loop_create(int max_events) {
-    ccev_loop_t *loop = (ccev_loop_t *)g_realloc_fn(NULL, sizeof(ccev_loop_t));
+    ccev_loop_t *loop = (ccev_loop_t *)ccev__realloc_fn(NULL, sizeof(ccev_loop_t));
     if (!loop) return NULL;
 
     memset(loop, 0, sizeof(ccev_loop_t));
     loop->wakefds[0] = loop->wakefds[1]     = (ccsocket_t)-1;
     loop->signal_pipe[0] = loop->signal_pipe[1] = (ccsocket_t)-1;
-    loop->realloc_fn = g_realloc_fn;
-    loop->free_fn    = g_free_fn;
     loop->max_events = max_events > 0 ? max_events : 64;
 
     loop->epfd = epoll_create(1);
-    if ((intptr_t)loop->epfd < 0) { g_free_fn(loop); return NULL; }
+    if ((intptr_t)loop->epfd < 0) { ccev__free_fn(loop); return NULL; }
 
-    loop->events = (struct epoll_event *)loop->realloc_fn(
+    loop->events = (struct epoll_event *)ccev__realloc_fn(
         NULL, (size_t)loop->max_events * sizeof(struct epoll_event));
-    if (!loop->events) { epoll_close(loop->epfd); g_free_fn(loop); return NULL; }
+    if (!loop->events) { epoll_close(loop->epfd); ccev__free_fn(loop); return NULL; }
 
     /* Init data structures */
     cclist_init(&loop->all_conns);
@@ -69,9 +67,9 @@ ccev_loop_t *ccev_loop_create(int max_events) {
 
     /* Wakeup pipe */
     if (ccsocket_pipe(loop->wakefds) < 0) {
-        loop->free_fn(loop->events);
+        ccev__free_fn(loop->events);
         epoll_close(loop->epfd);
-        g_free_fn(loop);
+        ccev__free_fn(loop);
         return NULL;
     }
 
@@ -100,7 +98,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
         conn->in_closing = false;
         if (conn->close_cb) conn->close_cb(conn->close_udata);
-        ccev__conn_free(loop, conn);
+        ccev__conn_free(conn);
     }
 
     /* Free remaining connections via the all_conns list */
@@ -108,7 +106,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         cclist_node_t *n = cclist_pop_front(&loop->all_conns);
         if (n) {
             ccev_conn_t *conn = (ccev_conn_t *)((char*)n - offsetof(ccev_conn_t, lnode));
-            ccev__conn_free(loop, conn);
+            ccev__conn_free(conn);
         }
     }
 
@@ -118,7 +116,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         if (!min) break;
         ccheap_pop(&loop->timers);
         ccev_timer_t *t = CCHEAP_CONTAINER(min, ccev_timer_t, node);
-        loop->free_fn(t);
+        ccev__free_fn(t);
     }
 
     /* Free timer heap internal array */
@@ -131,7 +129,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
             while (_n) {
                 cchashmap_node_t *_next = _n->next;
                 ccev_dns_cache_t *_e = CCHASHMAP_CONTAINER(_n, ccev_dns_cache_t, node);
-                loop->free_fn(_e);
+                ccev__free_fn(_e);
                 _n = _next;
             }
         }
@@ -152,10 +150,10 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
                 while (_wn) {
                     cclink_node_t *_wnext = cclink_next(_wn);
                     ccev_dns_waiter_t *_w = CCLINK_CONTAINER(_wn, ccev_dns_waiter_t, node);
-                    loop->free_fn(_w);
+                    ccev__free_fn(_w);
                     _wn = _wnext;
                 }
-                loop->free_fn(_p);
+                ccev__free_fn(_p);
                 _n = _next;
             }
             /* Null the bucket to prevent stale pointer after destroy */
@@ -166,9 +164,9 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     cchashmap_destroy(&loop->dns_pending);
 
 
-    loop->free_fn(loop->events);
+    ccev__free_fn(loop->events);
     epoll_close(loop->epfd);
-    loop->free_fn(loop);
+    ccev__free_fn(loop);
 }
 
 ccev_loop_t *ccev_default_loop(void) {
@@ -347,7 +345,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
             ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
             conn->in_closing = false;
             if (conn->close_cb) conn->close_cb(conn->close_udata);
-            ccev__conn_free(loop, conn);
+            ccev__conn_free(conn);
         }
 
         if (loop->stop_flag) break;

@@ -49,7 +49,7 @@ static void ping_timeout_cb(void *udata) {
     if (p->conn) {
         ccev__conn_schedule_close(p->loop, p->conn);
     } else {
-        p->loop->free_fn(p);
+        ccev__free_fn(p);
     }
 }
 
@@ -86,7 +86,7 @@ static void ping_recv_ready(void *udata) {
         if (p->conn)
             ccev__conn_schedule_close(p->loop, p->conn);
         else
-            p->loop->free_fn(p);
+            ccev__free_fn(p);
     }
 }
 
@@ -136,7 +136,7 @@ static void ccev__icmp_dns_cb(void *udata, const char *address, int status) {
         }
         if (p->cb) p->cb(p->udata, NULL);
         /* No conn was created yet; free ping state directly. */
-        p->loop->free_fn(p);
+        ccev__free_fn(p);
         return;
     }
 
@@ -149,12 +149,12 @@ static void ccev__icmp_dns_cb(void *udata, const char *address, int status) {
             if (!ccicmp_init(&p->ping, CC_INET6)) {
                 if (p->cb) p->cb(p->udata, NULL);
                 /* No conn yet; free directly. */
-                p->loop->free_fn(p);
+                ccev__free_fn(p);
                 return;
             }
         } else {
             if (p->cb) p->cb(p->udata, NULL);
-            p->loop->free_fn(p);
+            ccev__free_fn(p);
             return;
         }
     }
@@ -163,7 +163,7 @@ static void ccev__icmp_dns_cb(void *udata, const char *address, int status) {
     if (ccev__icmp_send_echo(p, address) != 0) {
         ccicmp_close(&p->ping);
         if (p->cb) p->cb(p->udata, NULL);
-        p->loop->free_fn(p);
+        ccev__free_fn(p);
     }
 }
 
@@ -176,7 +176,7 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
                     ccev_icmp_cb cb, void *udata) {
     if (!loop || !host || !cb) return CCEV_ERR;
 
-    ccev_ping_t *p = (ccev_ping_t *)loop->realloc_fn(NULL, sizeof(ccev_ping_t));
+    ccev_ping_t *p = (ccev_ping_t *)ccev__realloc_fn(NULL, sizeof(ccev_ping_t));
     if (!p) return CCEV_ERR;
     memset(p, 0, sizeof(*p));
 
@@ -194,13 +194,13 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
     if (af == CC_INET4 || af == CC_INET6) {
         /* Direct IP path — initialise ccicmp and send */
         if (!ccicmp_init(&p->ping, (int)af)) {
-            loop->free_fn(p);
+            ccev__free_fn(p);
             return CCEV_ERR;
         }
 
         if (ccev__icmp_send_echo(p, host) != 0) {
             ccicmp_close(&p->ping);
-            loop->free_fn(p);
+            ccev__free_fn(p);
             return CCEV_ERR;
         }
         return CCEV_OK;
@@ -214,7 +214,7 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
 
     if (ccev_dns_resolve(loop, host, dns_timeout, CCEV_DNS_A | CCEV_DNS_AAAA,
                           ccev__icmp_dns_cb, p) != CCEV_OK) {
-        loop->free_fn(p);
+        ccev__free_fn(p);
         return CCEV_ERR;
     }
 

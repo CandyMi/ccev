@@ -38,6 +38,16 @@ typedef int socklen_t;
 #include "epoll/epoll.h"
 #include "ccsocket.h"
 
+/* ── Global allocator (set via ccev_set_allocator, visible to all .c files) ── */
+extern void *(*ccev__realloc_fn)(void*, size_t);
+extern void  (*ccev__free_fn)(void*);
+
+/* Route ccheap / cchashmap internal allocations through ccev's allocator */
+#define CCHEAP_REALLOC(ptr, sz)     ccev__realloc_fn((ptr), (sz))
+#define CCHEAP_FREE(ptr)            ccev__free_fn((ptr))
+#define CCHASHMAP_REALLOC(ptr, sz)  ccev__realloc_fn((ptr), (sz))
+#define CCHASHMAP_FREE(ptr)         ccev__free_fn((ptr))
+
 /* ccheap configuration: 4-ary heap (wider = shallower, fewer pops) */
 #define CCHEAP_ARITY 4
 /* Enable ccheap update with embedded index (BEFORE including ccheap.h) */
@@ -194,10 +204,6 @@ typedef struct ccev_dns_pending_s {
  * ════════════════════════════════════════════════════════════════ */
 
 struct ccev_loop_s {
-    /* ── Allocator hooks ── */
-    void *(*realloc_fn)(void*, size_t);
-    void  (*free_fn)(void*);
-
     /* ── epoll instance ── */
     HANDLE              epfd;           /**< epoll fd (per epoll.h types)  */
     int                 max_events;     /**< epoll_wait() event cap         */
@@ -256,7 +262,7 @@ void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn);
 void ccev__conn_sendfile_continue(ccev_loop_t *loop, ccev_conn_t *conn);
 
 /* Connection cleanup (internal, frees memory) */
-void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn);
+void ccev__conn_free(ccev_conn_t *conn);
 
 /* Timer dispatch */
 void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
