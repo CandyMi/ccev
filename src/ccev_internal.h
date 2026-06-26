@@ -123,7 +123,7 @@ struct ccev_conn_s {
 struct ccev_timer_s {
     ccheap_node_t       node;           /**< Heap node (embed, not pointer) */
     ccev_loop_t        *loop;           /**< Owning event loop              */
-    uint64_t            expiry;         /**< Absolute expiry (monotonic ms) */
+
     uint64_t            interval;       /**< Repeat interval (0 for ONCE)   */
     ccev_timer_mode_t   mode;           /**< ONCE or REPEAT                 */
     ccev_timer_cb       cb;             /**< Expiry callback                */

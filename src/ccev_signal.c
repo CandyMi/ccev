@@ -19,8 +19,7 @@ static void ccev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
     unsigned char byte = (unsigned char)signum;
-    int r = (int)write(loop->signal_pipe[1], &byte, 1);
-    (void)r;
+    ccsocket_send(loop->signal_pipe[1], &byte, 1, NULL);
 }
 
 /* ── Dispatch callback (fired from loop on pipe readable) ───── */
