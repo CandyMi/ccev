@@ -251,6 +251,300 @@ TEST(sendfile_smoke) {
 #endif
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  Stream reader tests
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    ccev_loop_t *loop;
+    char         data[256];
+    size_t       len;
+    int          status;
+    int          called;
+} stream_ctx_t;
+
+static void stream_on_data(void *udata, const char *data, size_t len, int status) {
+    stream_ctx_t *ctx = (stream_ctx_t *)udata;
+    ctx->called = 1;
+    ctx->status = status;
+    ctx->len    = len;
+    if (data && len > 0) {
+        size_t cp = len < sizeof(ctx->data) ? len : sizeof(ctx->data) - 1;
+        memcpy(ctx->data, data, cp);
+        ctx->data[cp] = '\0';
+    }
+    if (ctx->loop) ccev_loop_stop(ctx->loop);
+}
+
+/* ── NULL guards ── */
+
+TEST(stream_read_until_null_conn) {
+    ASSERT(ccev_conn_read_until(NULL, '\n', 1024, stream_on_data, NULL) == CCEV_ERR);
+    passed++;
+}
+
+TEST(stream_read_until_null_cb) {
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ASSERT(ccev_conn_read_until(conn, '\n', 1024, NULL, NULL) == CCEV_ERR);
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+}
+
+TEST(stream_read_n_null_conn) {
+    ASSERT(ccev_conn_read_n(NULL, 5, stream_on_data, NULL) == CCEV_ERR);
+    passed++;
+}
+
+TEST(stream_read_n_null_cb) {
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ASSERT(ccev_conn_read_n(conn, 5, NULL, NULL) == CCEV_ERR);
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+}
+
+TEST(stream_read_stop_null) {
+    /* Must not crash */
+    ccev_conn_read_stop(NULL);
+    passed++;
+}
+
+/* ── Functional tests (socketpair) ── */
+
+TEST(stream_read_until_delim) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+
+    stream_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.loop = loop;
+
+    /* Safety timer */
+    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+
+    ASSERT(ccev_conn_read_until(conn, '\n', 1024, stream_on_data, &ctx) == CCEV_OK);
+
+    /* Write data from other end */
+    write(sv[1], "hello\n", 6);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(ctx.called == 1);
+    ASSERT(ctx.status == CCEV_OK);
+    ASSERT(ctx.len == 6);
+    ASSERT(strcmp(ctx.data, "hello\n") == 0);
+
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_read_n_exact) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+
+    stream_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.loop = loop;
+
+    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+
+    ASSERT(ccev_conn_read_n(conn, 5, stream_on_data, &ctx) == CCEV_OK);
+    write(sv[1], "hello", 5);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(ctx.called == 1);
+    ASSERT(ctx.status == CCEV_OK);
+    ASSERT(ctx.len == 5);
+    ASSERT(strcmp(ctx.data, "hello") == 0);
+
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_read_until_multi) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+
+    stream_ctx_t ctx1, ctx2;
+    memset(&ctx1, 0, sizeof(ctx1));
+    memset(&ctx2, 0, sizeof(ctx2));
+    ctx1.loop = loop;
+    ctx2.loop = loop;
+
+    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+
+    ASSERT(ccev_conn_read_until(conn, '\n', 1024, stream_on_data, &ctx1) == CCEV_OK);
+    write(sv[1], "a\nb\n", 4);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ASSERT(ctx1.called == 1);
+    ASSERT(ctx1.status == CCEV_OK);
+    ASSERT(ctx1.len == 2);
+    ASSERT(strcmp(ctx1.data, "a\n") == 0);
+
+    /* Read next line — should consume from remaining buffer */
+    ctx1.called = 0;
+    ASSERT(ccev_conn_read_until(conn, '\n', 1024, stream_on_data, &ctx2) == CCEV_OK);
+    ASSERT(ctx2.called == 1);
+    ASSERT(ctx2.status == CCEV_OK);
+    ASSERT(ctx2.len == 2);
+    ASSERT(strcmp(ctx2.data, "b\n") == 0);
+
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_read_until_max_len_exceeded) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+
+    stream_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.loop = loop;
+
+    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+
+    /* max_len=4, no newline — should fire with CCEV_ERR after 4 bytes */
+    ASSERT(ccev_conn_read_until(conn, '\n', 4, stream_on_data, &ctx) == CCEV_OK);
+    write(sv[1], "12345", 5);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(ctx.called == 1);
+    ASSERT(ctx.status == CCEV_ERR);
+    ASSERT(ctx.len == 4);
+
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_read_stop_while_active) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+
+    stream_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    ASSERT(ccev_conn_read_until(conn, '\n', 1024, stream_on_data, &ctx) == CCEV_OK);
+    ccev_conn_read_stop(conn);
+
+    /* Write data — should NOT trigger callback */
+    write(sv[1], "hello\n", 6);
+
+    /* Run loop briefly to ensure no spurious callback */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ASSERT(ctx.called == 0);
+
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_read_replaces_active) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(conn != NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+
+    stream_ctx_t ctx1, ctx2;
+    memset(&ctx1, 0, sizeof(ctx1));
+    memset(&ctx2, 0, sizeof(ctx2));
+    ctx2.loop = loop;
+
+    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+
+    /* Start first read, then replace with second */
+    ASSERT(ccev_conn_read_n(conn, 3, stream_on_data, &ctx1) == CCEV_OK);
+    ASSERT(ccev_conn_read_n(conn, 5, stream_on_data, &ctx2) == CCEV_OK);
+
+    write(sv[1], "hello", 5);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    /* ctx1 should NOT have fired (was cancelled) */
+    ASSERT(ctx1.called == 0);
+    ASSERT(ctx2.called == 1);
+    ASSERT(ctx2.status == CCEV_OK);
+    ASSERT(ctx2.len == 5);
+
+    ccev_conn_close(conn);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ═══ ccev_conn_close ──────────────────────────────────── */
 
 TEST(close_twice_returns_err) {
@@ -552,6 +846,19 @@ int main(void) {
 
     /* sendfile */
     RUN(sendfile_smoke);
+
+    /* stream reader */
+    RUN(stream_read_until_null_conn);
+    RUN(stream_read_until_null_cb);
+    RUN(stream_read_n_null_conn);
+    RUN(stream_read_n_null_cb);
+    RUN(stream_read_stop_null);
+    RUN(stream_read_until_delim);
+    RUN(stream_read_n_exact);
+    RUN(stream_read_until_multi);
+    RUN(stream_read_until_max_len_exceeded);
+    RUN(stream_read_stop_while_active);
+    RUN(stream_read_replaces_active);
 
     /* close */
     RUN(close_twice_returns_err);

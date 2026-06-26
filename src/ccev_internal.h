@@ -86,6 +86,12 @@ typedef enum {
 } ccev_conn_type_t;
 
 /* ════════════════════════════════════════════════════════════════
+ *  Stream reader (forward declaration for conn struct)
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct ccev_stream_reader_s ccev_stream_reader_t;
+
+/* ════════════════════════════════════════════════════════════════
  *  Connection structure
  * ════════════════════════════════════════════════════════════════ */
 
@@ -115,6 +121,9 @@ struct ccev_conn_s {
     bool               closed;         /**< true once close initiated      */
     bool               in_closing;     /**< true if in the closing list    */
     bool               pending_write;  /**< EPOLLOUT is currently armed    */
+
+    /* ── Stream reader (optional) ── */
+    ccev_stream_reader_t *reader;   /**< Active stream reader, or NULL.    */
 
     /* ── Type-specific fields ── */
     union {
@@ -162,6 +171,24 @@ typedef struct ccev_buf_s {
     size_t        len;                  /**< Data length                   */
     size_t        offset;               /**< Consumed bytes (for iovec)    */
 } ccev_buf_t;
+
+/* ════════════════════════════════════════════════════════════════
+ *  Stream reader (read-until / read-n)
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct ccev_stream_reader_s {
+    char            *buf;           /**< Dynamic accumulation buffer.          */
+    size_t           cap;           /**< Allocated capacity.                   */
+    size_t           len;           /**< Valid bytes in @p buf.               */
+    size_t           want;          /**< max_len (read_until) or n (read_n).  */
+    char             delim;         /**< 0 = read_n, otherwise delimiter byte.*/
+    bool             is_n;          /**< true = read_n, false = read_until.   */
+    ccev_stream_cb   cb;            /**< User completion callback.            */
+    void            *udata;         /**< User data for @p cb.                 */
+    ccev_recv_cb     old_recv_cb;   /**< Saved recv_cb while reader active.  */
+    void            *old_recv_udata;/**< Saved recv_udata while reader active.*/
+    ccev_conn_t         *conn;          /**< Owning connection (back-pointer). */
+} ccev_stream_reader_t;
 
 /* ════════════════════════════════════════════════════════════════
  *  DNS state + cache

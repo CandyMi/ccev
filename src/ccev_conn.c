@@ -173,6 +173,12 @@ void ccev__conn_free(ccev_conn_t *conn) {
         ccev_buf_t *b = (ccev_buf_t *)((char*)bn - offsetof(ccev_buf_t, node));
         ccev__free_fn(b);
     }
+    /* Free stream reader if active */
+    if (conn->reader) {
+        ccev__free_fn(conn->reader->buf);
+        ccev__free_fn(conn->reader);
+        conn->reader = NULL;
+    }
     ccev__free_fn(conn);
 }
 

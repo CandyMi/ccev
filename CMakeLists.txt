@@ -45,6 +45,7 @@ set(CCEV_SOURCES
     src/ccev.c
     src/ccev_timer.c
     src/ccev_conn.c
+    src/ccev_stream.c
     src/ccev_dns.c
     src/ccev_icmp.c
     src/ccev_signal.c

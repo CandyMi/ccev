@@ -305,6 +305,58 @@ Entries loaded from hosts are marked `cached=true` — they never expire. Networ
 
 Automatically called during `ccev_default_loop()` initialization.
 
+### Stream Reader
+
+#### `ccev_stream_cb`
+
+```c
+typedef void (*ccev_stream_cb)(void *udata, const char *data,
+                                size_t len, int status);
+```
+
+Completion callback for `ccev_conn_read_until()` and `ccev_conn_read_n()`.
+`data` points to the accumulated segment and is valid only during the
+callback — do NOT free or store the pointer.
+
+| `status` | Meaning |
+|---|---|
+| `CCEV_OK` | Delimiter found (read_until) or N bytes collected (read_n). |
+| `CCEV_ERR` | `max_len` exceeded (read_until) or connection closed. |
+
+#### `ccev_conn_read_until`
+
+```c
+int ccev_conn_read_until(ccev_conn_t *conn, char delim, size_t max_len,
+                          ccev_stream_cb cb, void *udata);
+```
+
+Read data until `delim` is encountered (delimiter included in the
+callback data), or until `max_len` bytes have been accumulated without
+finding the delimiter (fires callback with `CCEV_ERR`).  Fires exactly
+once, then deactivates — call again for subsequent reads.
+
+Only one stream reader may be active per connection at a time.  Calling
+read_until or read_n while another reader is active cancels the previous
+one.
+
+#### `ccev_conn_read_n`
+
+```c
+int ccev_conn_read_n(ccev_conn_t *conn, size_t n,
+                      ccev_stream_cb cb, void *udata);
+```
+
+Read exactly `n` bytes.  Fires exactly once, then deactivates.
+
+#### `ccev_conn_read_stop`
+
+```c
+void ccev_conn_read_stop(ccev_conn_t *conn);
+```
+
+Cancel the active stream reader, if any.  The user callback will NOT be
+fired.  Safe to call when no reader is active.
+
 ### Utilities
 
 ```c

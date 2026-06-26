@@ -10,6 +10,7 @@
  *   - Automatic write buffering with iovec scatter/gather
  *   - kernel sendfile (zero-copy on Linux/macOS/FreeBSD)
  *   - ICMP echo (ping) with privilege-free path on modern kernels
+ *   - Stream reader: read-until-delimiter / read-N-bytes state machine
  *   - Replaceable memory allocator hooks
  *
  * License: MIT
@@ -65,6 +66,16 @@ typedef void (*ccev_send_cb)(void *udata);
  *  point — the user must call ccev_conn_close() to release resources.
  *  @param udata  User-provided context pointer. */
 typedef void (*ccev_close_cb)(void *udata);
+
+/** @brief Stream read completion callback.
+ *  @param udata  User-provided context pointer.
+ *  @param data   Full data segment (delimiter-inclusive for read_until).
+ *                Valid only during the callback — do NOT free or store.
+ *  @param len    Length of @p data.
+ *  @param status CCEV_OK on success, CCEV_ERR on max_len exceeded or
+ *                connection closed. */
+typedef void (*ccev_stream_cb)(void *udata, const char *data,
+                                size_t len, int status);
 
 /** @brief Timer expiry callback.
  *  @param udata  User-provided context pointer. */
@@ -392,6 +403,52 @@ int ccev_conn_close(ccev_conn_t *conn);
  *  @param udata User pointer for the callback.
  */
 void ccev_conn_set_close_cb(ccev_conn_t *conn, ccev_close_cb cb, void *udata);
+
+/* ════════════════════════════════════════════════════════════════
+ *  Stream reader API (read-until / read-N-byte)
+ * ════════════════════════════════════════════════════════════════ */
+
+/** @brief Read data until @p delim is found (delimiter inclusive).
+ *
+ *  Once the delimiter (or @p max_len bytes) is received, the callback
+ *  fires exactly once and the internal reader is deactivated. The user
+ *  must call ccev_conn_read_until() again for subsequent reads.
+ *
+ *  Only one stream reader may be active at a time — calling this while
+ *  another reader is active will cancel the previous one.
+ *
+ *  @param conn    Connection handle.
+ *  @param delim   Delimiter byte to search for (e.g. '\\n').
+ *  @param max_len Maximum bytes to accumulate before yielding CCEV_ERR.
+ *  @param cb      Completion callback.
+ *  @param udata   User pointer for @p cb.
+ *  @return CCEV_OK on success, CCEV_ERR on NULL/invalid params.
+ */
+int ccev_conn_read_until(ccev_conn_t *conn, char delim, size_t max_len,
+                          ccev_stream_cb cb, void *udata);
+
+/** @brief Read exactly @p n bytes.
+ *
+ *  Once @p n bytes have been accumulated the callback fires exactly
+ *  once.  Same single-reader semantics as ccev_conn_read_until().
+ *
+ *  @param conn  Connection handle.
+ *  @param n     Exact number of bytes to read (must be > 0).
+ *  @param cb    Completion callback.
+ *  @param udata User pointer for @p cb.
+ *  @return CCEV_OK on success, CCEV_ERR on NULL/invalid params.
+ */
+int ccev_conn_read_n(ccev_conn_t *conn, size_t n,
+                      ccev_stream_cb cb, void *udata);
+
+/** @brief Cancel the active stream reader (if any).
+ *
+ *  Restores the original recv callback.  Any buffered data is freed.
+ *  Safe to call when no reader is active.
+ *
+ *  @param conn  Connection handle.
+ */
+void ccev_conn_read_stop(ccev_conn_t *conn);
 
 /* ════════════════════════════════════════════════════════════════
  *  Connection metadata & diagnostics
