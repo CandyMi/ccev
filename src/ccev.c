@@ -274,21 +274,29 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
             conn->reg_events = 0;
 
             if (fired_read) {
-                /* Listener */
+                /* Listener — batch accept to reduce syscall overhead.
+                 * Accept at most 128 connections per EPOLLIN dispatch.
+                 * ccsocket_accept2 returns 0 on EAGAIN (no more). */
                 if (conn->type == CCEV_CONN_LISTENER) {
-                    ccsocket_t afd;
-                    char addr_buf[64];
-                    uint16_t port = 0;
-                    afd = ccsocket_accept2(conn->fd, addr_buf, &port, 0);
-                    if (afd != (ccsocket_t)0 && afd != (ccsocket_t)-1
-                        && conn->listener.cb) {
-                        ccev_conn_t *new_conn = ccev_conn_create(loop, afd, NULL);
-                        if (new_conn) {
-                            conn->listener.cb(conn->listener.udata,
-                                               new_conn, addr_buf, (int)port);
+                    int count = 0;
+                    while (count < 128) {
+                        char addr_buf[64];
+                        uint16_t port = 0;
+                        ccsocket_t afd = ccsocket_accept2(conn->fd, addr_buf, &port, 0);
+                        if (afd == (ccsocket_t)0) break;   /* EAGAIN */
+                        if (afd == (ccsocket_t)-1) break;  /* error */
+                        if (conn->listener.cb) {
+                            ccev_conn_t *new_conn = ccev_conn_create(loop, afd, NULL);
+                            if (new_conn) {
+                                conn->listener.cb(conn->listener.udata,
+                                                   new_conn, addr_buf, (int)port);
+                            } else {
+                                ccsocket_close(afd);
+                            }
                         } else {
                             ccsocket_close(afd);
                         }
+                        count++;
                     }
                     ccev__conn_mod_internal(loop, conn, EPOLLIN);
                     continue;
@@ -382,6 +390,10 @@ ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     }
 
     if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
+
+    /* Apply deferred accept when requested */
+    if ((flags & CCEV_ACCEPT_DEFER) && family != CC_UNIX)
+        ccsocket_enable_accept_defer(fd);
 
     ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
     if (!conn) { ccsocket_close(fd); return NULL; }

@@ -128,8 +128,12 @@ enum {
     CCEV_REUSEPORT   = 1u << 9,
     /** Enable TCP_NODELAY — disable Nagle's algorithm. */
     CCEV_TCP_NODELAY = 1u << 10,
+    /** Enable TCP_DEFER_ACCEPT (Linux) / SO_ACCEPTFILTER (FreeBSD).
+     *  Delays accept() until the client has sent data, avoiding
+     *  wakeups from connection scans.  Only meaningful for listen(). */
+    CCEV_ACCEPT_DEFER = 1u << 11,
     /** Use UDP (datagram) instead of TCP (stream) for connect(). */
-    CCEV_UDP         = 1u << 12,
+    CCEV_UDP          = 1u << 12,
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -216,6 +220,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode);
  *  @param port       Port number (0 for Unix domain sockets).
  *  @param backlog    listen(2) backlog size.
  *  @param flags      OR-ed ccev_flag_t socket options.
+ *                   CCEV_ACCEPT_DEFER enables TCP_DEFER_ACCEPT / SO_ACCEPTFILTER.
  *  @param on_accept  Callback invoked for every new connection.
  *  @param udata      User pointer passed to on_accept.
  *  @return Connection handle (the listener itself), or NULL on failure.
