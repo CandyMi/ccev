@@ -8,6 +8,11 @@
 #include <string.h>
 #include <fcntl.h>
 
+#ifdef _WIN32
+/* open/close for sendfile path */
+#include <io.h>
+#endif
+
 /* Maximum iovec entries for scatter/gather sendv.
  * IOV_MAX from <limits.h> / <sys/uio.h> on POSIX; fallback for portability. */
 #ifndef IOV_MAX
