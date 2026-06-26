@@ -91,33 +91,31 @@ typedef enum {
 
 struct ccev_conn_s {
     cclist_node_t      lnode;          /**< List node (all conns)          */
+
+    /* ── 8-byte fields first (pointers / size_t) ── */
     ccev_loop_t       *loop;           /**< Owning event loop              */
-    ccev_conn_type_t   type;           /**< Connection type tag            */
-    ccsocket_t         fd;             /**< Underlying file descriptor     */
-    bool               closed;         /**< true once close initiated      */
-    bool               in_closing;     /**< true if in the closing list    */
-
-    /* ── Registered epoll events (internal ONESHOT tracking) ── */
-    int                reg_events;     /**< Currently registered epoll events */
-    /* ── Recv callback (one at a time, last set wins) ── */
-    ccev_recv_cb       recv_cb;
-    void              *recv_udata;
-
-    /* ── Send callback (one at a time, last set wins) ── */
-    ccev_send_cb       send_cb;
-    void              *send_udata;
-
-    /* ── Close callback ── */
-    ccev_close_cb      close_cb;
-    void              *close_udata;
-
-    /* ── User-data pointer ── */
-    void              *udata;
+    ccev_recv_cb       recv_cb;        /**< Readable callback              */
+    void              *recv_udata;     /**< Recv callback user data        */
+    ccev_send_cb       send_cb;        /**< Write-complete callback        */
+    void              *send_udata;     /**< Send callback user data        */
+    ccev_close_cb      close_cb;       /**< Close / error callback         */
+    void              *close_udata;    /**< Close callback user data       */
+    void              *udata;          /**< User-data pointer              */
 
     /* ── Write buffering ── */
     cclink_t           wbuf_list;      /**< Linked list of pending buffers */
     size_t             wbuf_len;       /**< Total bytes buffered           */
+
+    /* ── 4-byte fields ── */
+    ccev_conn_type_t   type;           /**< Connection type tag            */
+    ccsocket_t         fd;             /**< Underlying file descriptor     */
+    int                reg_events;     /**< Currently registered epoll events */
+
+    /* ── Flags (packed at end, union needs 8-byte alignment below) ── */
+    bool               closed;         /**< true once close initiated      */
+    bool               in_closing;     /**< true if in the closing list    */
     bool               pending_write;  /**< EPOLLOUT is currently armed    */
+
     /* ── Type-specific fields ── */
     union {
         struct {
