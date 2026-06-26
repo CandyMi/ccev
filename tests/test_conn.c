@@ -291,8 +291,8 @@ TEST(set_udata_null_is_safe) {
     passed++;
 }
 
-TEST(fd_null_returns_err) {
-    ASSERT(ccev_conn_fd(NULL) == CCEV_ERR);
+TEST(fd_null_returns_invalid) {
+    ASSERT(ccev_conn_fd(NULL) == INVALID_SOCKET);
 }
 
 /* ═══ udata lifecycle ════*/
@@ -430,7 +430,7 @@ int main(void) {
     RUN(set_close_cb_null_is_safe);
     RUN(get_udata_null_returns_null);
     RUN(set_udata_null_is_safe);
-    RUN(fd_null_returns_err);
+    RUN(fd_null_returns_invalid);
 
     /* udata */
     RUN(udata_set_and_get);

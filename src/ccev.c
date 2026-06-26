@@ -328,6 +328,10 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 
                 /* Flush write buffer (ccev__conn_flush re-arms internally) */
                 if (conn->pending_write) ccev__conn_flush(loop, conn);
+
+                /* Continue sendfile if in progress */
+                if (conn->sendfile.sendfile_fd >= 0)
+                    ccev__conn_sendfile_continue(loop, conn);
             }
         }
 

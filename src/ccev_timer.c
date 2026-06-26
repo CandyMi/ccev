@@ -30,12 +30,6 @@ uint64_t ccev__now_ms(void) {
 #endif
 }
 
-static int64_t timer_cmp(const ccheap_node_t *a, const ccheap_node_t *b) {
-    if (ccheap_node_get(a, timeout) < ccheap_node_get(b, timeout)) return  1;
-    if (ccheap_node_get(a, timeout) > ccheap_node_get(b, timeout)) return -1;
-    return 0;
-}
-
 void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
     while (1) {
         ccheap_node_t *min = ccheap_peek(&loop->timers);
@@ -80,9 +74,6 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
     timer->udata      = udata;
     timer->active     = true;
 
-    /* Initialize the heap on first use (loop_create sets data=NULL) */
-    if (!loop->timers.data)
-        ccheap_init(&loop->timers, timer_cmp);
     ccheap_insert(&loop->timers, &timer->node);
     loop->timer_count++;
     return timer;

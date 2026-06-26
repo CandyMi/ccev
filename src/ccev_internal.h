@@ -19,6 +19,7 @@
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+#include <signal.h> /* sig_atomic_t */
 
 #ifdef _WIN32
 #  include <winsock2.h>
@@ -41,6 +42,12 @@ typedef int socklen_t;
 #define CCHEAP_ARITY 4
 /* Enable ccheap update with embedded index (BEFORE including ccheap.h) */
 #define CCHEAP_NODE_INDEX heap_index
+
+/* Inline compare macro — replaces function-pointer dispatch.
+ * (a).timeout < (b).timeout  →  a has higher priority (closer to root)
+ * Subtracting int64_t is branchless for uint64_t keys. */
+#define CCHEAP_COMPARE(a, b) \
+    ((int64_t)((b)->timeout) - (int64_t)((a)->timeout))
 
 /* ccalg data structures */
 #include "ccheap.h"
@@ -114,6 +121,11 @@ struct ccev_conn_s {
             ccev_timer_t   *timer;      /**< Connection timeout timer     */
         } connector;
 
+        struct {
+            int              sendfile_fd; /**< File fd, -1 when idle        */
+            ccev_send_cb     cb;          /**< Completion callback          */
+            void            *udata;
+        } sendfile;
     };
 };
 
@@ -190,7 +202,7 @@ struct ccev_loop_s {
     HANDLE              epfd;           /**< epoll fd (per epoll.h types)  */
     int                 max_events;     /**< epoll_wait() event cap         */
     struct epoll_event *events;         /**< epoll_wait() result array      */
-    volatile bool       stop_flag;      /**< Atomic stop flag               */
+    volatile sig_atomic_t stop_flag;    /**< Atomic stop flag               */
 
     /* ── Wakeup pipe ── */
     ccsocket_t          wakefds[2];     /**< Self-pipe for async wakeup    */
@@ -239,6 +251,9 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn);
 
 /* Schedule a conn for deferred close */
 void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn);
+
+/* Continue sendfile transfer (called from dispatch on EPOLLOUT) */
+void ccev__conn_sendfile_continue(ccev_loop_t *loop, ccev_conn_t *conn);
 
 /* Connection cleanup (internal, frees memory) */
 void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn);

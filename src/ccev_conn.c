@@ -48,9 +48,9 @@ void ccev__conn_rearm(ccev_loop_t *loop, ccev_conn_t *conn) {
     if (conn->closed) return;
 
     int want = 0;
-    if (conn->recv_cb)        want |= EPOLLIN;
-    if (conn->pending_write)  want |= EPOLLOUT;
-
+    if (conn->recv_cb)                  want |= EPOLLIN;
+    if (conn->pending_write)            want |= EPOLLOUT;
+    if (conn->sendfile.sendfile_fd >= 0) want |= EPOLLOUT;
 
     if (want && want != conn->reg_events) {
         ccev__conn_mod_internal(loop, conn, want);
@@ -154,6 +154,11 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
 
 void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn) {
     if (!conn) return;
+    /* Close sendfile file fd if still in progress */
+    if (conn->sendfile.sendfile_fd >= 0) {
+        close(conn->sendfile.sendfile_fd);
+        conn->sendfile.sendfile_fd = -1;
+    }
     /* DNS query state — allocated by ccev_dns_resolve, must free here */
     /* Free internal per-connection state for subsystem-owned conns */
     if (conn->recv_udata &&
@@ -214,6 +219,8 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     /* Init intrusive links */
     /* cclink is a singly-linked list; init the head */
     cclink_init(&conn->wbuf_list);
+    /* Sendfile state: no file in progress */
+    conn->sendfile.sendfile_fd = -1;
 
     /* Add to all_conns list (iteration) */
     cclist_push_back(&loop->all_conns, &conn->lnode);
@@ -364,6 +371,35 @@ void ccev_conn_set_udata(ccev_conn_t *conn, void *udata) {
     if (conn) conn->udata = udata;
 }
 
+/* ── Sendfile continuation (called from dispatch on EPOLLOUT) ── */
+
+void ccev__conn_sendfile_continue(ccev_loop_t *loop, ccev_conn_t *conn) {
+    if (conn->closed || conn->sendfile.sendfile_fd < 0) return;
+
+    int fd = conn->sendfile.sendfile_fd;
+    ccsocket_sendf_state_t rc = ccsocket_sendfile(conn->fd, fd);
+
+    if (rc == CC_SENDALL) {
+        close(fd);
+        conn->sendfile.sendfile_fd = -1;
+        if (conn->sendfile.cb) {
+            ccev_send_cb send_cb = conn->sendfile.cb;
+            void *send_udata = conn->sendfile.udata;
+            conn->sendfile.cb = NULL;
+            send_cb(send_udata);
+        }
+        /* Re-arm to clear EPOLLOUT if no other pending I/O */
+        ccev__conn_rearm(loop, conn);
+    } else if (rc == CC_SENDWAIT) {
+        /* Still waiting — next EPOLLOUT will retry */
+    } else {
+        /* CC_SENDERROR */
+        close(fd);
+        conn->sendfile.sendfile_fd = -1;
+        ccev__conn_schedule_close(loop, conn);
+    }
+}
+
 int ccev_conn_sendfile(ccev_conn_t *conn, const char *path,
                         ccev_send_cb cb, void *udata) {
     if (!conn || conn->closed) return CCEV_ERR;
@@ -377,26 +413,38 @@ int ccev_conn_sendfile(ccev_conn_t *conn, const char *path,
 #endif
     if (fd < 0) return CCEV_ERR;
 
-    /* Use ccsocket_sendfile for zero-copy (kernel sendfile when supported).
-     * Loop until the entire file is sent or an error occurs. */
-    ccsocket_sendf_state_t rc;
-    do {
-        rc = ccsocket_sendfile(conn->fd, fd);
-    } while (rc == CC_SENDWAIT);
+    /* Store completion callback */
+    if (cb) { conn->sendfile.cb = cb; conn->sendfile.udata = udata; }
 
-    close(fd);
+    /* Try non-blocking sendfile once.  On CC_SENDWAIT the kernel
+     * buffer is full — store the fd and wait for EPOLLOUT. */
+    ccsocket_sendf_state_t rc = ccsocket_sendfile(conn->fd, fd);
 
     if (rc == CC_SENDALL) {
-        if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
-        ccev__invoke_send_cb(conn);
+        close(fd);
+        if (conn->sendfile.cb) {
+            ccev_send_cb send_cb = conn->sendfile.cb;
+            void *send_udata = conn->sendfile.udata;
+            conn->sendfile.cb = NULL;
+            send_cb(send_udata);
+        }
         return CCEV_OK;
     }
 
+    if (rc == CC_SENDWAIT) {
+        conn->sendfile.sendfile_fd = fd;
+        /* Arm EPOLLOUT (combined with any existing EPOLLIN) */
+        ccev__conn_rearm(conn->loop, conn);
+        return CCEV_OK;
+    }
+
+    /* CC_SENDERROR */
+    close(fd);
     return CCEV_ERR;
 }
 
 ccsocket_t ccev_conn_fd(ccev_conn_t *conn) {
-    return conn ? conn->fd : (ccsocket_t)-1;
+    return conn ? conn->fd : INVALID_SOCKET;
 }
 
 int ccev_conn_count(ccev_loop_t *loop) {

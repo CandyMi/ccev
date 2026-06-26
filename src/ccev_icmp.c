@@ -30,6 +30,7 @@ typedef struct {
     unsigned int    timeout_ms;  /**< Saved for DNS-retry path   */
     ccicmp_t        ping;        /**< ccicmp context             */
     ccev_conn_t    *conn;        /**< ICMP fd reactor wrapper    */
+    uint64_t        send_time;   /**< Monotonic ms before send   */
     char            reply_buf[64];
     size_t          reply_len;
     char            host[256];   /**< Target IP or hostname      */
@@ -67,16 +68,13 @@ static void ping_recv_ready(void *udata) {
             p->timer = NULL;
         }
 
-        /* Build result */
+        /* Build result — compute RTT from recorded send_time, read TTL
+         * from ccicmp (populated via CMSG in ccicmp_reply). */
         ccev_icmp_result_t result;
         memset(&result, 0, sizeof(result));
-
-        /* TODO: Parse real RTT from ICMP reply timestamp and real TTL
-         * from the IP header.  Currently set to 0 to indicate "not
-         * computed from raw packet." */
-        result.rtt_ms      = 0.0;
+        result.rtt_ms      = (double)(ccev__now_ms() - p->send_time);
         result.payload_len = p->reply_len;
-        result.ttl         = 0;
+        result.ttl         = (p->ping.ttl >= 0) ? p->ping.ttl : 0;
 
         ccicmp_close(&p->ping);
 
@@ -98,6 +96,9 @@ static void ping_recv_ready(void *udata) {
  * On failure, returns -1; on success returns 0. */
 static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
     ccev_loop_t *loop = p->loop;
+
+    /* Record send time (monotonic ms) before transmit */
+    p->send_time = ccev__now_ms();
 
     /* Send the echo request */
     const char *payload = "ccev-ping";
