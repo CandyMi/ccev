@@ -46,27 +46,19 @@ static uint64_t domain_hash(const char *domain, size_t seed) {
     return h;
 }
 
-/* ── cache ──────────────────────────────────────────────────── */
-
-static uint64_t cache_hash(const cchashmap_node_t *n, size_t seed) {
-    return domain_hash(CCHASHMAP_CONTAINER(n, ccev_dns_cache_t, node)->domain, seed);
+/* Generate hash/equal helpers for a DNS hashmap type that has a
+ * cchashmap_node_t `node` and a `domain` char array at offset 0. */
+#define CCEV_DNS_HASH_EQUAL_DEFINE(prefix, type)                        \
+static uint64_t prefix##_hash(const cchashmap_node_t *n, size_t seed) { \
+    return domain_hash(CCHASHMAP_CONTAINER(n, type, node)->domain, seed);\
+}                                                                        \
+static bool prefix##_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {\
+    return strcmp(CCHASHMAP_CONTAINER(a, type, node)->domain,            \
+                  CCHASHMAP_CONTAINER(b, type, node)->domain) == 0;       \
 }
 
-static bool cache_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {
-    return strcmp(CCHASHMAP_CONTAINER(a, ccev_dns_cache_t, node)->domain,
-                  CCHASHMAP_CONTAINER(b, ccev_dns_cache_t, node)->domain) == 0;
-}
-
-/* ── pending ─────────────────────────────────────────────────── */
-
-static uint64_t pending_hash(const cchashmap_node_t *n, size_t seed) {
-    return domain_hash(CCHASHMAP_CONTAINER(n, ccev_dns_pending_t, node)->domain, seed);
-}
-
-static bool pending_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {
-    return strcmp(CCHASHMAP_CONTAINER(a, ccev_dns_pending_t, node)->domain,
-                  CCHASHMAP_CONTAINER(b, ccev_dns_pending_t, node)->domain) == 0;
-}
+CCEV_DNS_HASH_EQUAL_DEFINE(cache, ccev_dns_cache_t)
+CCEV_DNS_HASH_EQUAL_DEFINE(pending, ccev_dns_pending_t)
 
 /* ════════════════════════════════════════════════════════════════
  *  DNS answer collector (stack-allocated, used in recv callback)

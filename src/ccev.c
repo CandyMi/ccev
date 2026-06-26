@@ -34,6 +34,24 @@ void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Internal helpers
+ * ════════════════════════════════════════════════════════════════ */
+
+/* Process the deferred-close (closing) queue.
+ * Each entry was already removed from all_conns and epoll by
+ * ccev__conn_schedule_close(); here we invoke close_cb and free. */
+static void ccev__process_closing(ccev_loop_t *loop) {
+    while (!cclist_empty(&loop->closing)) {
+        cclist_node_t *cn = cclist_pop_front(&loop->closing);
+        if (!cn) continue;
+        ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
+        conn->in_closing = false;
+        if (conn->close_cb) conn->close_cb(conn->close_udata);
+        ccev__conn_free(conn);
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  Loop lifecycle
  * ════════════════════════════════════════════════════════════════ */
 
@@ -92,14 +110,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
 
     /* Process any pending closing queue first — these conns were
      * removed from all_conns by ccev__conn_schedule_close. */
-    while (!cclist_empty(&loop->closing)) {
-        cclist_node_t *cn = cclist_pop_front(&loop->closing);
-        if (!cn) continue;
-        ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
-        conn->in_closing = false;
-        if (conn->close_cb) conn->close_cb(conn->close_udata);
-        ccev__conn_free(conn);
-    }
+    ccev__process_closing(loop);
 
     /* Free remaining connections via the all_conns list */
     while (!cclist_empty(&loop->all_conns)) {
@@ -347,14 +358,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 
         /* 6. Process closing queue — conn was already removed from
          * all_conns by ccev__conn_schedule_close. */
-        while (!cclist_empty(&loop->closing)) {
-            cclist_node_t *cn = cclist_pop_front(&loop->closing);
-            if (!cn) continue;
-            ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
-            conn->in_closing = false;
-            if (conn->close_cb) conn->close_cb(conn->close_udata);
-            ccev__conn_free(conn);
-        }
+        ccev__process_closing(loop);
 
         if (loop->stop_flag) break;
 
