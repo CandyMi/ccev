@@ -329,7 +329,6 @@ ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     if (family != CC_UNIX) {
         if (flags & CCEV_REUSEADDR) ccsocket_set_reuseaddr(fd, true);
         if (flags & CCEV_REUSEPORT) ccsocket_set_reuseport(fd, true);
-        if (flags & CCEV_TCP_NODELAY) ccsocket_set_nodelay(fd, true);
     }
 
     if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
