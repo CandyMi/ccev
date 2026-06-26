@@ -31,10 +31,11 @@ typedef enum {
 ```c
 typedef unsigned int ccev_flag_t;
 enum {
-    CCEV_REUSEADDR   = 1u << 8,   /* SO_REUSEADDR */
-    CCEV_REUSEPORT   = 1u << 9,   /* SO_REUSEPORT */
-    CCEV_TCP_NODELAY = 1u << 10,  /* TCP_NODELAY  */
-    CCEV_UDP         = 1u << 12,  /* Use UDP (datagram) in ccev_connect() */
+    CCEV_REUSEADDR    = 1u << 8,   /* SO_REUSEADDR */
+    CCEV_REUSEPORT    = 1u << 9,   /* SO_REUSEPORT */
+    CCEV_TCP_NODELAY  = 1u << 10,  /* TCP_NODELAY  */
+    CCEV_ACCEPT_DEFER = 1u << 11,  /* TCP_DEFER_ACCEPT / SO_ACCEPTFILTER */
+    CCEV_UDP          = 1u << 12,  /* Use UDP (datagram) in ccev_connect() */
 };
 ```
 
@@ -108,6 +109,8 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode);
 
 Run the event loop. In `CCEV_RUN_FOREVER` mode, does not return until `ccev_loop_stop()` is called. In `CCEV_RUN_ONCE` mode, returns the number of events processed.
 
+**Listener dispatch:** When a listener socket fires `EPOLLIN`, up to 128 connections are accepted in a tight loop before re-arming the event, amortising `epoll_ctl` syscall cost across multiple connections.
+
 ### TCP Listener
 
 #### `ccev_listen`
@@ -119,6 +122,10 @@ ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
 ```
 
 Start listening for connections. Supports TCP, UDP (`CCEV_UDP` flag), and Unix domain sockets (`port=0`). Returns a listener handle that can be closed with `ccev_conn_close()`. Returns `NULL` on failure.
+
+**Flags:** `CCEV_REUSEADDR`, `CCEV_REUSEPORT`, `CCEV_TCP_NODELAY`, and `CCEV_ACCEPT_DEFER` (TCP only — enables `TCP_DEFER_ACCEPT` on Linux / `SO_ACCEPTFILTER` on FreeBSD, delaying accept until the client sends data).
+
+**Batch accept:** When `EPOLLIN` fires on a listener, the reactor accepts **up to 128 connections** in a single dispatch iteration before re-arming. This reduces `epoll_ctl`/`epoll_wait` syscall overhead under high connection rates.
 
 ### Async Connection
 

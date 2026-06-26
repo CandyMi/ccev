@@ -397,6 +397,131 @@ TEST(listen_then_connect) {
 #endif
 }
 
+/* ═══ listen batch accept ─────────────────────────────── */
+
+#define BATCH_NCONN 10
+
+static int  batch_accept_count;
+static int  batch_connect_count;
+static ccev_loop_t *batch_loop;
+
+static void batch_on_accept(void *udata, ccev_conn_t *conn,
+                             const char *ip, int port) {
+    (void)udata; (void)ip; (void)port;
+    (void)conn;
+    batch_accept_count++;
+    if (batch_accept_count >= BATCH_NCONN)
+        ccev_loop_stop(batch_loop);
+}
+
+static void batch_on_connect(void *udata, ccev_conn_t *conn, int status) {
+    (void)udata;
+    if (status == CCEV_OK && conn)
+        batch_connect_count++;
+}
+
+TEST(listen_accept_batch) {
+#ifndef _WIN32
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    batch_loop          = loop;
+    batch_accept_count  = 0;
+    batch_connect_count = 0;
+
+    ccev_conn_t *listener = ccev_listen(loop, "127.0.0.1", 0, 10,
+                                         CCEV_REUSEADDR,
+                                         batch_on_accept, loop);
+    ASSERT(listener != NULL);
+
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof(sin);
+    ccsocket_t lfd = ccev_conn_fd(listener);
+    ASSERT(getsockname((int)(intptr_t)lfd,
+                       (struct sockaddr *)&sin, &slen) == 0);
+    int port = ntohs(sin.sin_port);
+    ASSERT(port > 0);
+
+    /* Initiate BATCH_NCONN concurrent connections */
+    for (int i = 0; i < BATCH_NCONN; i++) {
+        int rc = ccev_connect(loop, "127.0.0.1", (uint16_t)port,
+                              2000, CCEV_TCP_NODELAY,
+                              batch_on_connect, loop);
+        ASSERT(rc == CCEV_OK);
+    }
+
+    /* Run until batch_on_accept stops the loop */
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(batch_accept_count  == BATCH_NCONN);
+    ASSERT(batch_connect_count == BATCH_NCONN);
+
+    ccev_conn_close(listener);
+    ccev_loop_destroy(loop);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+#undef BATCH_NCONN
+
+/* ═══ listen with CCEV_ACCEPT_DEFER ────────────────────── */
+
+static int  defer_accept_flag;
+static ccev_loop_t *defer_loop;
+
+static void defer_on_accept(void *udata, ccev_conn_t *conn,
+                             const char *ip, int port) {
+    (void)udata; (void)ip; (void)port;
+    (void)conn;
+    defer_accept_flag = 1;
+    ccev_loop_stop(defer_loop);
+}
+
+static void defer_on_connect(void *udata, ccev_conn_t *conn, int status) {
+    (void)udata;
+    (void)conn;
+    (void)status;
+    /* Don't stop — let accept callback control loop exit */
+}
+
+TEST(listen_accept_defer) {
+#ifndef _WIN32
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    defer_loop        = loop;
+    defer_accept_flag = 0;
+
+    ccev_conn_t *listener = ccev_listen(loop, "127.0.0.1", 0, 5,
+                                         CCEV_REUSEADDR | CCEV_ACCEPT_DEFER,
+                                         defer_on_accept, loop);
+    ASSERT(listener != NULL);
+
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof(sin);
+    ccsocket_t lfd = ccev_conn_fd(listener);
+    ASSERT(getsockname((int)(intptr_t)lfd,
+                       (struct sockaddr *)&sin, &slen) == 0);
+    int port = ntohs(sin.sin_port);
+    ASSERT(port > 0);
+
+    int rc = ccev_connect(loop, "127.0.0.1", (uint16_t)port,
+                          2000, CCEV_TCP_NODELAY,
+                          defer_on_connect, loop);
+    ASSERT(rc == CCEV_OK);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(defer_accept_flag == 1);
+
+    ccev_conn_close(listener);
+    ccev_loop_destroy(loop);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ═══ Main ═══ */
 
 int main(void) {
@@ -440,6 +565,8 @@ int main(void) {
 
     /* listen + connect */
     RUN(listen_then_connect);
+    RUN(listen_accept_batch);
+    RUN(listen_accept_defer);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;

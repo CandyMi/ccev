@@ -384,12 +384,11 @@ ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     if (fd == (ccsocket_t)-1) return NULL;
 
     /* Apply flags (UDS ignores most socket options) */
-    if (family != CC_UNIX) {
-        if (flags & CCEV_REUSEADDR) ccsocket_set_reuseaddr(fd, true);
-        if (flags & CCEV_REUSEPORT) ccsocket_set_reuseport(fd, true);
+    if (family == CC_UNIX || !((flags & CCEV_REUSEADDR || flags & CCEV_REUSEPORT))) {
+        if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
+    } else {
+        if (!ccsocket_listen1(fd, addr, port)) { ccsocket_close(fd); return NULL; }
     }
-
-    if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
 
     /* Apply deferred accept when requested */
     if ((flags & CCEV_ACCEPT_DEFER) && family != CC_UNIX)
