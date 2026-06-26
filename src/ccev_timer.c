@@ -31,8 +31,8 @@ uint64_t ccev__now_ms(void) {
 }
 
 static int64_t timer_cmp(const ccheap_node_t *a, const ccheap_node_t *b) {
-    if (a->timeout < b->timeout) return  1;
-    if (a->timeout > b->timeout) return -1;
+    if (ccheap_node_get(a, timeout) < ccheap_node_get(b, timeout)) return  1;
+    if (ccheap_node_get(a, timeout) > ccheap_node_get(b, timeout)) return -1;
     return 0;
 }
 
@@ -42,7 +42,7 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
         if (!min) break;
 
         ccev_timer_t *timer = CCHEAP_CONTAINER(min, ccev_timer_t, node);
-        if (timer->node.timeout > now_ms) break;
+        if (ccheap_node_get(&timer->node, timeout) > now_ms) break;
 
         ccheap_pop(&loop->timers);
 
@@ -55,7 +55,7 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
         timer->cb(timer->udata);
 
         if (timer->mode == CCEV_TIMER_REPEAT) {
-            timer->node.timeout = ccev__now_ms() + timer->interval;
+            ccheap_node_set(&timer->node, timeout, ccev__now_ms() + timer->interval);
             ccheap_insert(&loop->timers, &timer->node);
         } else {
             loop->free_fn(timer);
@@ -73,7 +73,7 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
     if (!timer) return NULL;
 
     timer->loop       = loop;
-    timer->node.timeout = ccev__now_ms() + delay_ms;
+    ccheap_node_set(&timer->node, timeout, ccev__now_ms() + delay_ms);
     timer->interval   = (mode == CCEV_TIMER_REPEAT) ? delay_ms : 0;
     timer->mode       = mode;
     timer->cb         = cb;
@@ -93,7 +93,8 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
         if (earliest) {
             struct itimerspec its;
             memset(&its, 0, sizeof(its));
-            uint64_t rem = (earliest->timeout > ccev__now_ms()) ? earliest->timeout - ccev__now_ms() : 0;
+            uint64_t now = ccev__now_ms();
+            uint64_t rem = (ccheap_node_get(earliest, timeout) > now) ? ccheap_node_get(earliest, timeout) - now : 0;
             its.it_value.tv_sec  = (time_t)(rem / 1000ULL);
             its.it_value.tv_nsec = (long)((rem % 1000ULL) * 1000000L);
             timerfd_settime(loop->timerfd, 0, &its, NULL);
@@ -118,11 +119,11 @@ int ccev_timer_reset(ccev_loop_t *loop, ccev_timer_t *timer,
 
     if (!timer->active) {
         timer->active    = true;
-        timer->node.timeout = new_expiry;
+        ccheap_node_set(&timer->node, timeout, new_expiry);
         ccheap_insert(&loop->timers, &timer->node);
         loop->timer_count++;
     } else {
-        timer->node.timeout = new_expiry;
+        ccheap_node_set(&timer->node, timeout, new_expiry);
         ccheap_update(&loop->timers, &timer->node);
     }
     return CCEV_OK;
