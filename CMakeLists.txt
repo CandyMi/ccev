@@ -21,7 +21,7 @@ if(CCEV_SANITIZE)
 endif()
 
 # ── Submodule check (informative error if not initialized) ──
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/epoll.h" OR
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/include/epoll/epoll.h" OR
    NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/ccalg/include/ccheap.h" OR
    NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/ccsocket/ccsocket.h")
     message(FATAL_ERROR
@@ -31,19 +31,7 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/epoll.h" OR
 endif()
 
 # ── Dependencies: epoll (cross-platform epoll ABI) ──
-# Each platform uses exactly one backend implementation
-add_library(epoll STATIC)
-target_include_directories(epoll PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/epoll>)
-
-if(WIN32)
-    target_sources(epoll PRIVATE deps/epoll/wepoll.c)
-elseif(APPLE)
-    target_sources(epoll PRIVATE deps/epoll/kepoll.c)
-elseif(UNIX)
-    target_sources(epoll PRIVATE deps/epoll/epoll.c)
-else()
-    target_sources(epoll PRIVATE deps/epoll/uepoll.c)
-endif()
+add_subdirectory(deps/epoll)
 
 # ── Dependencies: ccsocket ──
 add_library(ccsocket STATIC
@@ -77,8 +65,8 @@ target_include_directories(ccev PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_include_directories(ccev PRIVATE deps/ccalg/include deps/epoll deps/ccsocket)
-target_link_libraries(ccev PUBLIC epoll ccsocket ccalg)
+target_include_directories(ccev PRIVATE deps/ccalg/include deps/epoll/include deps/ccsocket)
+target_link_libraries(ccev PUBLIC epoll_static ccsocket ccalg)
 
 # Linux timerfd requires _GNU_SOURCE for CLOCK_MONOTONIC, TFD_NONBLOCK
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
@@ -98,7 +86,7 @@ endif()
 
 # ── Install (PUBLIC headers use $<INSTALL_INTERFACE> for relocatability) ──
 include(GNUInstallDirs)
-install(TARGETS ccev epoll ccsocket ccalg
+install(TARGETS ccev epoll epoll_static ccsocket ccalg
     EXPORT ccev-targets
     ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}

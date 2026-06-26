@@ -30,7 +30,7 @@ typedef int socklen_t;
 #  include <unistd.h>
 #endif
 
-#include "epoll.h"
+#include "epoll/epoll.h"
 #include "ccsocket.h"
 
 /* Linux timerfd — MUST be included outside struct definitions */
