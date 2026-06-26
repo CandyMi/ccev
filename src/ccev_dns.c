@@ -258,10 +258,12 @@ static void dns_adapter_cb(void *udata, const ccdns_ans_t *ans) {
     if (ans->type != CCDNS_A && ans->type != CCDNS_AAAA) return;
     if (!ans->ip[0]) return;
     ccev_address_t *addr = (ccev_address_t *)
-        calloc(1, sizeof(ccev_address_t));
+        q->loop->realloc_fn(NULL, sizeof(ccev_address_t));
     if (!addr) return;
+    memset(addr, 0, sizeof(*addr));
     memcpy(addr->ip, ans->ip, sizeof(addr->ip));
     addr->ttl = ans->ttl; addr->next = NULL;
+    addr->_free_fn = q->loop->free_fn;
     if (q->result_tail) q->result_tail->next = addr;
     else                q->result_head = addr;
     q->result_tail = addr;
@@ -345,8 +347,10 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     ccev_dns_cache_t *cached = cache_lookup(loop, domain);
     if (cached) {
         ccev_address_t *addr = (ccev_address_t *)
-            calloc(1, sizeof(ccev_address_t));
+            loop->realloc_fn(NULL, sizeof(ccev_address_t));
         if (!addr) return CCEV_ERR;
+        memset(addr, 0, sizeof(*addr));
+        addr->_free_fn = loop->free_fn;
         memcpy(addr->ip, cached->ip, sizeof(addr->ip));
         addr->ttl = cached->ttl;
         cb(udata, addr, CCEV_OK);
@@ -407,7 +411,8 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
 void ccev_dns_free(ccev_address_t *addr) {
     while (addr) {
         ccev_address_t *next = addr->next;
-        free(addr);
+        void (*free_fn)(void*) = addr->_free_fn ? addr->_free_fn : free;
+        free_fn(addr);
         addr = next;
     }
 }

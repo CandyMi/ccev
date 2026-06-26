@@ -6,6 +6,13 @@
 
 #include "ccev_internal.h"
 #include <string.h>
+#include <fcntl.h>
+
+/* Maximum iovec entries for scatter/gather sendv.
+ * IOV_MAX from <limits.h> / <sys/uio.h> on POSIX; fallback for portability. */
+#ifndef IOV_MAX
+#  define IOV_MAX 128
+#endif
 
 int ccev__conn_mod_internal(ccev_loop_t *loop, ccev_conn_t *conn,
                              int events) {
@@ -51,10 +58,12 @@ void ccev__conn_rearm(ccev_loop_t *loop, ccev_conn_t *conn) {
 
 static ccev_buf_t *ccev__buf_alloc(ccev_loop_t *loop, const void *data,
                                     size_t len) {
-    ccev_buf_t *buf = (ccev_buf_t *)loop->realloc_fn(NULL, sizeof(ccev_buf_t));
+    /* Single allocation: ccev_buf_t header + data payload contiguous.
+     * buf->data points into the same block, avoiding a second malloc. */
+    ccev_buf_t *buf = (ccev_buf_t *)loop->realloc_fn(
+        NULL, sizeof(ccev_buf_t) + len);
     if (!buf) return NULL;
-    buf->data = loop->realloc_fn(NULL, len);
-    if (!buf->data) { loop->free_fn(buf); return NULL; }
+    buf->data = (char*)buf + sizeof(ccev_buf_t);
     memcpy(buf->data, data, len);
     buf->len    = len;
     buf->offset = 0;
@@ -62,7 +71,8 @@ static ccev_buf_t *ccev__buf_alloc(ccev_loop_t *loop, const void *data,
 }
 
 static void ccev__buf_free(ccev_loop_t *loop, ccev_buf_t *buf) {
-    if (buf->data) loop->free_fn(buf->data);
+    (void)loop;
+    /* data is part of the same allocation — single free */
     loop->free_fn(buf);
 }
 
@@ -79,10 +89,10 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
     if (conn->closed || !conn->pending_write) return;
 
     /* Build iovec */
-    ccsocket_iovec_t iov[64];
+    ccsocket_iovec_t iov[IOV_MAX];
     int niov = 0;
     cclink_node_t *n = cclink_begin(&conn->wbuf_list);
-    while (n && niov < 64) {
+    while (n && niov < IOV_MAX) {
         ccev_buf_t *b = (ccev_buf_t *)((char*)n - offsetof(ccev_buf_t, node));
         size_t remaining = b->len - b->offset;
         if (remaining > 0) {
@@ -140,17 +150,19 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
 void ccev__conn_free(ccev_loop_t *loop, ccev_conn_t *conn) {
     if (!conn) return;
     /* DNS query state — allocated by ccev_dns_resolve, must free here */
-    if (conn->type == CCEV_CONN_DNS && conn->recv_udata)
+    /* Free internal per-connection state for subsystem-owned conns */
+    if (conn->recv_udata &&
+        (conn->type == CCEV_CONN_DNS || conn->type == CCEV_CONN_ICMP))
         loop->free_fn(conn->recv_udata);
     /* Close socket */
     if (conn->fd != (ccsocket_t)-1) ccsocket_close(conn->fd);
     conn->fd = (ccsocket_t)-1;
-    /* Free write buffers */
+    /* Free write buffers — buf->data is part of the same allocation
+     * (see ccev__buf_alloc), so one free per buf suffices. */
     while (!cclink_empty(&conn->wbuf_list)) {
         cclink_node_t *bn = cclink_begin(&conn->wbuf_list);
         cclink_remove(&conn->wbuf_list, bn);
         ccev_buf_t *b = (ccev_buf_t *)((char*)bn - offsetof(ccev_buf_t, node));
-        if (b->data) loop->free_fn(b->data);
         loop->free_fn(b);
     }
     loop->free_fn(conn);
@@ -167,7 +179,10 @@ void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn) {
 
     loop->conn_count--;
 
-    /* Add lnode (cclist_node_t) to closing list */
+    /* Remove from all_conns first, then push to closing.
+     * This prevents the lnode from being in two lists simultaneously,
+     * which would corrupt the doubly-linked list of all_conns. */
+    cclist_remove(&loop->all_conns, &conn->lnode);
     cclist_push_back(&loop->closing, &conn->lnode);
 }
 
@@ -233,9 +248,18 @@ int ccev_conn_recv(ccev_conn_t *conn, void *buf, size_t len,
     }
 
     if (rc == CC_OPCODE_WAIT) {
-        /* Would block — arm epoll */
-        if (conn->recv_cb) ccev__conn_rearm(conn->loop, conn);
-        return 1;  /* no data but epoll re-armed; >0 but not a byte count */
+        /* Would block — arm epoll if a callback is registered */
+        if (conn->recv_cb) {
+            ccev__conn_rearm(conn->loop, conn);
+            /* No data yet; epoll re-armed. Caller must wait for the
+             * callback to fire.  Return CCEV_OK (not 1) so callers
+             * do not mistake the value for bytes read. */
+            return CCEV_OK;
+        }
+        /* Mode 2: pure sync read, no callback — no way to be notified
+         * when data arrives.  Return CCEV_ERR so the caller doesn't
+         * misinterpret a positive return as having data in buf. */
+        return CCEV_ERR;
     }
 
     /* n=0 on EOF (CC_OPCODE_OK, 0 bytes) */
@@ -249,12 +273,11 @@ int ccev_conn_send(ccev_conn_t *conn, const void *data, size_t len,
     if (!conn || conn->closed) return CCEV_ERR;
     if (!data || !len) return 0;
 
-    if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
-
     int sent = 0;
     ccsocket_stcode_t rc = ccsocket_send(conn->fd, data, (int)len, &sent);
 
     if (rc == CC_OPCODE_OK || rc == CC_OPCODE_WAIT) {
+        if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
         if (sent > 0 && (size_t)sent == len) {
             /* Fully written */
             ccev__invoke_send_cb(conn);
@@ -281,9 +304,8 @@ int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
                        bool done, ccev_send_cb cb, void *udata) {
     if (!conn || conn->closed) return CCEV_ERR;
 
-    if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
-
     if (!done) {
+        if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
         /* Buffer only */
         if (data && len > 0) {
             ccev_buf_t *buf = ccev__buf_alloc(conn->loop, data, len);
@@ -295,6 +317,7 @@ int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
     }
 
     /* done=true: flush */
+    if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
 
     if (data && len > 0) {
         ccev_buf_t *buf = ccev__buf_alloc(conn->loop, data, len);
@@ -315,22 +338,10 @@ int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
 
 int ccev_conn_close(ccev_conn_t *conn) {
     if (!conn || conn->closed) return CCEV_ERR;
-
-    /* Shutdown + close socket */
-    if (conn->fd != (ccsocket_t)-1) {
-        ccsocket_close(conn->fd);
-        conn->fd = (ccsocket_t)-1;
-    }
-
-    conn->closed = true;
-
-    if (conn->close_cb) {
-        ccev_close_cb cc = conn->close_cb;
-        void *cu = conn->close_udata;
-        conn->close_cb = NULL;
-        cc(cu);
-    }
-
+    /* Unified close path: schedule deferred cleanup.
+     * close_cb fires once in step 6 of the dispatch loop;
+     * the fd is closed and memory freed by ccev__conn_free. */
+    ccev__conn_schedule_close(conn->loop, conn);
     return CCEV_OK;
 }
 
@@ -348,14 +359,30 @@ void ccev_conn_set_udata(ccev_conn_t *conn, void *udata) {
     if (conn) conn->udata = udata;
 }
 
-int ccev_conn_sendfile(ccev_conn_t *conn, int fd, ccev_send_cb cb, void *udata) {
+int ccev_conn_sendfile(ccev_conn_t *conn, const char *path,
+                        ccev_send_cb cb, void *udata) {
     if (!conn || conn->closed) return CCEV_ERR;
 
-    if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
+    /* Open the file (read-only, close-on-exec) */
+    int fd;
+#ifdef _WIN32
+    fd = open(path, O_RDONLY | O_BINARY);
+#else
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+#endif
+    if (fd < 0) return CCEV_ERR;
 
-    /* Use ccsocket_sendfile for zero-copy (kernel sendfile when supported) */
-    ccsocket_sendf_state_t rc = ccsocket_sendfile(conn->fd, fd);
-    if (rc == CC_SENDALL || rc == CC_SENDWAIT) {
+    /* Use ccsocket_sendfile for zero-copy (kernel sendfile when supported).
+     * Loop until the entire file is sent or an error occurs. */
+    ccsocket_sendf_state_t rc;
+    do {
+        rc = ccsocket_sendfile(conn->fd, fd);
+    } while (rc == CC_SENDWAIT);
+
+    close(fd);
+
+    if (rc == CC_SENDALL) {
+        if (cb) { conn->send_cb = cb; conn->send_udata = udata; }
         ccev__invoke_send_cb(conn);
         return CCEV_OK;
     }

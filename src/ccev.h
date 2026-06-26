@@ -48,6 +48,9 @@ typedef struct ccev_address_s {
     char                    ip[64];   /**< Human-readable IP string.        */
     int                     ttl;      /**< DNS TTL in seconds.              */
     struct ccev_address_s  *next;     /**< Next address, NULL at end-of-list. */
+    /** @private Internal: allocator hook for freeing this node.
+     *  Set by the DNS subsystem; used by ccev_dns_free(). */
+    void                  (*_free_fn)(void*);
 } ccev_address_t;
 
 /* ════════════════════════════════════════════════════════════════
@@ -299,7 +302,8 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata);
  *  @param len   Buffer capacity, or 0.
  *  @param cb    Readable callback. Non-NULL updates the internal recv_cb.
  *  @param udata User pointer for the callback.
- *  @return Bytes read (>0), 0 (EOF), or CCEV_ERR on error/closed.
+ *  @return Bytes read (>0), CCEV_OK (0 = re-armed, callback will fire),
+ *          0 (EOF), or CCEV_ERR on error/closed.
  */
 int ccev_conn_recv(ccev_conn_t *conn, void *buf, size_t len,
                     ccev_recv_cb cb, void *udata);
@@ -346,19 +350,22 @@ int ccev_conn_send(ccev_conn_t *conn, const void *data, size_t len,
 int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
                        bool done, ccev_send_cb cb, void *udata);
 
-/** @brief Send a file using kernel sendfile (zero-copy when supported).
+/** @brief Send a file by path using kernel sendfile (zero-copy when supported).
  *
- *  Delegates to ccsocket_sendfile(). Sends the file from its current
- *  seek position. Falls back to read+send on platforms without
- *  kernel sendfile support.
+ *  Opens the file at @p path, sends its entire content, then closes
+ *  it.  Falls back to read+send on platforms without kernel sendfile
+ *  support.
  *
  *  @param conn    Connection handle.
- *  @param fd      Open file descriptor to send.
+ *  @param path    File path to send.  The file is opened read-only,
+ *                 sent, and closed — the library manages all fd lifecycle.
  *  @param cb      Write-complete callback. NULL preserves existing.
  *  @param udata   User pointer for the callback.
- *  @return CCEV_OK on success, CCEV_ERR on failure.
+ *  @return CCEV_OK on success, CCEV_ERR on failure (file not found,
+ *          read error, or connection closed).
  */
-int ccev_conn_sendfile(ccev_conn_t *conn, int fd, ccev_send_cb cb, void *udata);
+int ccev_conn_sendfile(ccev_conn_t *conn, const char *path,
+                        ccev_send_cb cb, void *udata);
 
 /** @brief Shutdown and close a connection.
  *

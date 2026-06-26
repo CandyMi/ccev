@@ -41,6 +41,23 @@ static void ccev__signal_dispatch(void *udata) {
 
 /* ── Public API ─────────────────────────────────────────────── */
 
+/* ── Platform-safe signal handler install (sigaction preferred) ── */
+
+static int ccev__sig_install(int signum, void (*handler)(int)) {
+#if defined(_WIN32)
+    /* Windows only provides signal() */
+    signal(signum, handler);
+    return CCEV_OK;
+#else
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    return (sigaction(signum, &sa, NULL) == 0) ? CCEV_OK : CCEV_ERR;
+#endif
+}
+
 int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
     if (signum < 1 || signum > 63 || !cb) return CCEV_ERR;
 
@@ -60,9 +77,7 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
         ccev__conn_mod_internal(loop, loop->signal_conn, EPOLLIN);
 
     /* Install OS signal handler */
-    signal(signum, ccev__sig_handler);
-
-    return CCEV_OK;
+    return ccev__sig_install(signum, ccev__sig_handler);
 }
 
 int ccev_signal_ignore(int signum) {
@@ -72,6 +87,5 @@ int ccev_signal_ignore(int signum) {
 
     loop->signals[signum].cb    = NULL;
     loop->signals[signum].udata = NULL;
-    signal(signum, SIG_DFL);
-    return CCEV_OK;
+    return ccev__sig_install(signum, SIG_DFL);
 }
