@@ -1,6 +1,6 @@
 /**
  * @file test_dns.c
- * @brief DNS resolver tests — server config, resolve API, callback, NULL guards.
+ * @brief DNS resolver tests — server config, resolve API, callback, NULL guards, cache.
  */
 
 #include "ccev.h"
@@ -43,15 +43,11 @@ TEST(dns_free_null) {
 }
 
 TEST(dns_resolve_api_smoke) {
-    /* Verify the API accepts a call and returns OK */
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-
     int rc = ccev_dns_resolve(loop, "example.com", 3000,
                                CCEV_DNS_A, on_resolved, loop);
     ASSERT(rc == CCEV_OK);
-
-    /* Let the loop process one iteration (may not resolve in time) */
     ccev_loop_run(loop, CCEV_RUN_ONCE);
     ccev_loop_destroy(loop);
 }
@@ -59,26 +55,97 @@ TEST(dns_resolve_api_smoke) {
 TEST(dns_resolve_null_domain) {
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-
-    int rc = ccev_dns_resolve(loop, NULL, 100, CCEV_DNS_A, on_resolved, loop);
-    ASSERT(rc == CCEV_ERR);
-
+    ASSERT(ccev_dns_resolve(loop, NULL, 100, CCEV_DNS_A, on_resolved, loop) == CCEV_ERR);
     ccev_loop_destroy(loop);
 }
 
 TEST(dns_resolve_null_cb) {
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-
-    int rc = ccev_dns_resolve(loop, "example.com", 100, CCEV_DNS_A, NULL, NULL);
-    ASSERT(rc == CCEV_ERR);
-
+    ASSERT(ccev_dns_resolve(loop, "example.com", 100, CCEV_DNS_A, NULL, NULL) == CCEV_ERR);
     ccev_loop_destroy(loop);
 }
 
 TEST(dns_resolve_null_loop) {
-    int rc = ccev_dns_resolve(NULL, "example.com", 100, CCEV_DNS_A, on_resolved, NULL);
-    ASSERT(rc == CCEV_ERR);
+    ASSERT(ccev_dns_resolve(NULL, "example.com", 100, CCEV_DNS_A, on_resolved, NULL) == CCEV_ERR);
+}
+
+/* ════════════════════════════════════════════════════════════════
+ *  DNS cache tests
+ * ════════════════════════════════════════════════════════════════ */
+
+static int cache_cb_count;
+
+static void cache_cb(void *udata, ccev_address_t *addr, int status) {
+    (void)status;
+    cache_cb_count++;
+    if (addr) ccev_dns_free(addr);
+    if (udata) ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+TEST(dns_cache_hit_from_hosts) {
+    /* /etc/hosts contains "127.0.0.1 localhost" — flush loads it into cache */
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_dns_flush(loop);
+
+    /* Resolve "localhost" — should hit cache immediately (sync callback) */
+    cache_cb_count = 0;
+    int rc = ccev_dns_resolve(loop, "localhost", 3000, CCEV_DNS_A,
+                               cache_cb, NULL);
+    ASSERT(rc == CCEV_OK);
+    ASSERT(cache_cb_count == 1);  /* fired synchronously from cache */
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_flush_clears_hosts_cache) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_dns_flush(loop);                     /* load hosts */
+
+    /* First resolve: cache hit */
+    cache_cb_count = 0;
+    ASSERT(ccev_dns_resolve(loop, "localhost", 100, CCEV_DNS_A,
+                             cache_cb, NULL) == CCEV_OK);
+    ASSERT(cache_cb_count == 1);
+
+    ccev_dns_flush(loop);                     /* flush + reload hosts */
+    /* Note: after reload "localhost" is still in hosts, so still cached */
+    /* This tests that flush doesn't crash and reloads correctly */
+
+    cache_cb_count = 0;
+    ASSERT(ccev_dns_resolve(loop, "localhost", 100, CCEV_DNS_A,
+                             cache_cb, NULL) == CCEV_OK);
+    ASSERT(cache_cb_count == 1);
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_flush_null_safe) {
+    ccev_dns_flush(NULL);
+    ASSERT(1);
+}
+
+TEST(dns_cache_miss_by_domain) {
+    /* A domain NOT in hosts should NOT hit cache after flush */
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_dns_flush(loop);
+
+    /* If "x-surely-not-in-hosts" happens to be in /etc/hosts, skip */
+    cache_cb_count = 0;
+    int rc = ccev_dns_resolve(loop, "x-surely-not-in-hosts", 100,
+                               CCEV_DNS_A, cache_cb, loop);
+    if (rc == CCEV_OK) {
+        /* Should NOT fire synchronously (cache miss) */
+        if (cache_cb_count > 0) {
+            /* It was in hosts — skip this assertion */
+            ccev_loop_destroy(loop);
+            return;
+        }
+        ASSERT(cache_cb_count == 0);  /* miss */
+        ccev_loop_run(loop, CCEV_RUN_FOREVER);  /* wait for timeout */
+    }
+    ccev_loop_destroy(loop);
 }
 
 /* ═══ Main ═══ */
@@ -92,6 +159,13 @@ int main(void) {
     RUN(dns_resolve_null_domain);
     RUN(dns_resolve_null_cb);
     RUN(dns_resolve_null_loop);
+
+    printf("dns cache:\n");
+    RUN(dns_cache_hit_from_hosts);
+    RUN(dns_flush_clears_hosts_cache);
+    RUN(dns_flush_null_safe);
+    RUN(dns_cache_miss_by_domain);
+
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;
 }

@@ -64,6 +64,7 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     loop->dns.servers[0] = "1.1.1.1";
     loop->dns.nservers   = 1;
     loop->dns.port       = 53;
+    cchashmap_init(&loop->dns_cache, NULL, NULL);
 
     /* Wakeup pipe */
     if (ccsocket_pipe(loop->wakefds) < 0) {
@@ -124,6 +125,10 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     /* Free timer heap internal array */
     ccheap_destroy(&loop->timers);
 
+    /* Free DNS cache */
+    ccev_dns_flush(loop);
+    cchashmap_destroy(&loop->dns_cache);
+
     loop->free_fn(loop->events);
     epoll_close(loop->epfd);
     loop->free_fn(loop);
@@ -153,6 +158,9 @@ ccev_loop_t *ccev_default_loop(void) {
     loop->signal_conn = sc;
     /* recv_cb is set by ccev_signal.c during ccev_signal_handle() */
     ccev__conn_mod_internal(loop, sc, EPOLLIN);
+
+    /* Pre-populate DNS cache from hosts file */
+    ccev_dns_flush(loop);
 
     return loop;
 }

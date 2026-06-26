@@ -485,6 +485,20 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
  *  @param addr  Head of the address list (NULL-safe). */
 void ccev_dns_free(ccev_address_t *addr);
 
+/** @brief Flush the DNS cache and reload from the OS hosts file.
+ *
+ *  Clears all cached DNS entries (both hosts-file and network-resolved)
+ *  and re-reads /etc/hosts (or the Windows equivalent) to pre-populate
+ *  the cache with static entries.  After calling this, the next
+ *  ccev_dns_resolve() for any domain will perform a fresh network query
+ *  (unless the domain is listed in hosts).
+ *
+ *  Called automatically during ccev_default_loop() initialisation.
+ *  Safe to call at any time from within the reactor thread.
+ *
+ *  @param loop  Event-loop handle (NULL-safe). */
+void ccev_dns_flush(ccev_loop_t *loop);
+
 /* ════════════════════════════════════════════════════════════════
  *  Utilities
  * ════════════════════════════════════════════════════════════════ */

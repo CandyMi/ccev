@@ -47,6 +47,7 @@ typedef int socklen_t;
 #include "ccheap.h"
 #include "cclist.h"
 #include "cclink.h"
+#include "cchashmap.h"
 
 /*
  */
@@ -143,7 +144,7 @@ typedef struct ccev_buf_s {
 } ccev_buf_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  DNS state (per-loop, but shared globally as well)
+ *  DNS state + cache
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_dns_state_s {
@@ -151,6 +152,16 @@ typedef struct ccev_dns_state_s {
     int         nservers;               /**< Number of servers             */
     int         port;                   /**< DNS server port               */
 } ccev_dns_state_t;
+
+/** DNS cache entry — domain → IP mapping */
+typedef struct ccev_dns_cache_s {
+    cchashmap_node_t  node;
+    char              domain[256];
+    char              ip[65];
+    int               ttl;
+    bool              cached;           /**< true = from hosts file, never expires */
+    uint64_t          cached_at;        /**< monotonic ms when cached */
+} ccev_dns_cache_t;
 
 /* ════════════════════════════════════════════════════════════════
  *  Loop structure
@@ -189,6 +200,7 @@ struct ccev_loop_s {
 
     /* ── DNS state ── */
     ccev_dns_state_t    dns;
+    cchashmap_t         dns_cache;      /**< domain → ccev_dns_cache_t */
 
     /* ── Signal handling (default loop only) ── */
     ccsocket_t              signal_pipe[2]; /**< Self-pipe for signal delivery */
@@ -226,6 +238,9 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
 
 /* Monotonic clock in milliseconds */
 uint64_t ccev__now_ms(void);
+
+/* DNS cache flush + reload hosts file */
+void ccev_dns_flush(ccev_loop_t *loop);
 
 
 

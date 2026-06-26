@@ -269,6 +269,18 @@ void ccev_dns_free(ccev_address_t *addr);
 
 Free a DNS address list. NULL-safe.
 
+#### `ccev_dns_flush`
+
+```c
+void ccev_dns_flush(ccev_loop_t *loop);
+```
+
+Flush the DNS cache and reload from the OS hosts file (e.g. `/etc/hosts`). Clears all cached entries (both network-resolved and hosts-file entries) and re-reads the hosts file to pre-populate the cache. After calling, the next `ccev_dns_resolve()` for any domain will perform a fresh query (unless the domain is listed in hosts).
+
+Entries loaded from hosts are marked `cached=true` — they never expire. Network-resolved entries expire based on their DNS TTL.
+
+Automatically called during `ccev_default_loop()` initialization.
+
 ### Utilities
 
 ```c
