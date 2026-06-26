@@ -456,16 +456,34 @@ int ccev_timer_reset(ccev_loop_t *loop, ccev_timer_t *timer,
  *  Asynchronous DNS resolver
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Set the DNS server addresses for resolution.
+/** @brief DNS server address and port pair.
  *
- *  Default value: {"1.1.1.1"}.
+ *  Passed as an array to ccev_dns_set_server(). The library makes
+ *  internal copies of the @p server string so the caller may reuse
+ *  or free the pointer immediately after the call.
+ */
+typedef struct ccev_dns_server {
+    const char *server;   /**< Server IP (dot-decimal or IPv6 string).      */
+    uint16_t    port;     /**< Server port (typically 53).                  */
+} ccev_dns_server_t;
+
+/** Maximum number of DNS servers that can be configured. */
+#define CCEV_DNS_MAX_SERVERS 4
+
+/** @brief Set DNS server addresses for resolution.
+ *
+ *  Each server may specify an independent port.  The library makes
+ *  internal copies of all server strings.
+ *
+ *  Default: {{"1.1.1.1", 53}}.
  *  Must be called before any ccev_dns_resolve() call (not thread-safe).
  *
- *  @param servers  Array of server strings, e.g. {"1.1.1.1","8.8.8.8"}.
- *  @param n        Number of servers in the array.
- *  @return CCEV_OK or CCEV_ERR.
+ *  @param servers  Array of ccev_dns_server_t structs.
+ *  @param n        Number of servers in the array (max 4).
+ *  @return CCEV_OK on success, CCEV_ERR on NULL/invalid input/OOM.
  */
-int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int port);
+int ccev_dns_set_server(ccev_loop_t *loop,
+                         const ccev_dns_server_t servers[], int n);
 
 /** @brief Resolve a domain name asynchronously.
  *

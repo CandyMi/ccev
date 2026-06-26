@@ -26,15 +26,42 @@ static void on_resolved(void *udata, const char *address, int status) {
 
 TEST(dns_set_server_valid) {
     ccev_loop_t *loop = ccev_loop_create(64);
-    const char *servers[] = {"1.1.1.1", "8.8.8.8"};
-    ASSERT(ccev_dns_set_server(loop, servers, 2, 53) == CCEV_OK);
+    ccev_dns_server_t servers[] = {{"1.1.1.1", 53}, {"8.8.8.8", 53}};
+    ASSERT(ccev_dns_set_server(loop, servers, 2) == CCEV_OK);
     ccev_loop_destroy(loop);
 }
 
 TEST(dns_set_server_invalid) {
     ccev_loop_t *loop = ccev_loop_create(64);
-    ASSERT(ccev_dns_set_server(NULL, NULL, 1, 53) == CCEV_ERR);
-    ASSERT(ccev_dns_set_server(loop, (const char*[]){"x"}, 0, 53) == CCEV_ERR);
+    ASSERT(ccev_dns_set_server(NULL, NULL, 1) == CCEV_ERR);
+    ccev_dns_server_t s = {"x", 53};
+    ASSERT(ccev_dns_set_server(loop, &s, 0) == CCEV_ERR);
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_set_server_replaces) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_dns_server_t s1[] = {{"1.1.1.1", 53}};
+    ASSERT(ccev_dns_set_server(loop, s1, 1) == CCEV_OK);
+    /* Second call — frees old deep-copied strings, allocates new ones */
+    ccev_dns_server_t s2[] = {{"8.8.8.8", 53}, {"1.1.1.1", 53}};
+    ASSERT(ccev_dns_set_server(loop, s2, 2) == CCEV_OK);
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_set_server_null_server_field) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_dns_server_t s[] = {{NULL, 53}};
+    ASSERT(ccev_dns_set_server(loop, s, 1) == CCEV_ERR);
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_set_server_too_many) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_dns_server_t s[] = {{"1.1.1.1",53},{"8.8.8.8",53},{"9.9.9.9",53},
+                             {"4.4.4.4",53},{"1.0.0.1",53}};
+    ASSERT(ccev_dns_set_server(loop, s, 5) == CCEV_ERR);
+    /* nservers should be unchanged (still defaults from init) */
     ccev_loop_destroy(loop);
 }
 
@@ -196,6 +223,9 @@ int main(void) {
     printf("dns tests:\n"); fflush(stdout);
     RUN(dns_set_server_valid);
     RUN(dns_set_server_invalid);
+    RUN(dns_set_server_replaces);
+    RUN(dns_set_server_null_server_field);
+    RUN(dns_set_server_too_many);
     RUN(dns_resolve_api_smoke);
     RUN(dns_resolve_null_domain);
     RUN(dns_resolve_null_cb);

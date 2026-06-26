@@ -25,14 +25,85 @@
  *  DNS config
  * ════════════════════════════════════════════════════════════════ */
 
-#define CCEV_DNS_MAX_SERVERS 4
+/* ════════════════════════════════════════════════════════════════
+ *  DNS initialisation — parse /etc/resolv.conf for nameservers,
+ *  fall back to {"1.1.1.1", 53}
+ * ════════════════════════════════════════════════════════════════ */
 
-int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int port) {
+void ccev__dns_init(ccev_loop_t *loop) {
+    if (!loop) return;
+
+    loop->dns.nservers = 0;
+
+#if !defined(_WIN32)
+    FILE *fp = fopen("/etc/resolv.conf", "r");
+    if (fp) {
+        char line[512];
+        while (fgets(line, sizeof(line), fp) &&
+               loop->dns.nservers < CCEV_DNS_MAX_SERVERS) {
+            const char *p = line;
+            while (*p && (unsigned char)*p <= ' ') p++;
+            if (*p == '#' || *p == '\0' || *p == '\n') continue;
+            if (strncmp(p, "nameserver", 10) != 0) continue;
+            p += 10;
+            while (*p && (unsigned char)*p <= ' ') p++;
+            char ip[64];
+            int  pos = 0;
+            while (*p && (unsigned char)*p > ' ' && pos < (int)sizeof(ip) - 1)
+                ip[pos++] = *p++;
+            ip[pos] = '\0';
+            if (pos == 0) continue;
+            if (ccsocket_get_version(ip) == CC_FAMILY_INVALID) continue;
+
+            size_t len = (size_t)pos;
+            char *copy = (char *)ccev__realloc_fn(NULL, len + 1);
+            if (!copy) continue;
+            memcpy(copy, ip, len + 1);
+            loop->dns.servers[loop->dns.nservers].server = copy;
+            loop->dns.servers[loop->dns.nservers].port   = 53;
+            loop->dns.nservers++;
+        }
+        fclose(fp);
+    }
+#endif /* !_WIN32 */
+
+    if (loop->dns.nservers == 0) {
+        char *srv = (char *)ccev__realloc_fn(NULL, 8);
+        if (srv) {
+            memcpy(srv, "1.1.1.1", 8);
+            loop->dns.servers[0].server = srv;
+            loop->dns.servers[0].port   = 53;
+            loop->dns.nservers          = 1;
+        }
+    }
+}
+
+int ccev_dns_set_server(ccev_loop_t *loop,
+                         const ccev_dns_server_t servers[], int n) {
     if (!loop || !servers || n <= 0 || n > CCEV_DNS_MAX_SERVERS) return CCEV_ERR;
+
+    /* Free all old server strings first */
+    for (int i = 0; i < loop->dns.nservers; i++)
+        ccev__free_fn((void *)(uintptr_t)loop->dns.servers[i].server);
+
+    loop->dns.nservers = 0;  /* temporarily empty — clean OOM rollback */
+
+    for (int i = 0; i < n; i++) {
+        if (!servers[i].server) return CCEV_ERR;
+        size_t len = strlen(servers[i].server);
+        char *copy = (char *)ccev__realloc_fn(NULL, len + 1);
+        if (!copy) {
+            /* OOM: free already-copied entries, state stays clean */
+            for (int j = 0; j < i; j++)
+                ccev__free_fn((void *)(uintptr_t)loop->dns.servers[j].server);
+            return CCEV_ERR;
+        }
+        memcpy(copy, servers[i].server, len + 1);
+        loop->dns.servers[i].server = copy;
+        loop->dns.servers[i].port   = servers[i].port > 0 ? servers[i].port : 53;
+    }
+
     loop->dns.nservers = n;
-    loop->dns.port     = port > 0 ? port : 53;
-    for (int i = 0; i < n; i++)
-        loop->dns.servers[i] = servers[i];
     return CCEV_OK;
 }
 
@@ -278,7 +349,8 @@ static int ccev__dns_send_one(ccev_loop_t *loop, ccev_conn_t *conn,
     for (int i = 0; i < loop->dns.nservers; i++) {
         int sent = 0;
         ccsocket_sendto(conn->fd, (const char*)buf, qlen,
-                        loop->dns.servers[i], (uint16_t)loop->dns.port, &sent);
+                        loop->dns.servers[i].server,
+                        loop->dns.servers[i].port, &sent);
     }
     return CCEV_OK;
 }

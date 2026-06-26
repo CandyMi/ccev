@@ -168,9 +168,8 @@ typedef struct ccev_buf_s {
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_dns_state_s {
-    const char *servers[4];             /**< DNS server addresses          */
-    int         nservers;               /**< Number of servers             */
-    int         port;                   /**< DNS server port               */
+    ccev_dns_server_t servers[CCEV_DNS_MAX_SERVERS];  /**< DNS server addresses + ports */
+    int                nservers;                      /**< Number of servers             */
 } ccev_dns_state_t;
 
 /** DNS cache entry — domain → IP mapping */
@@ -267,6 +266,9 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
 
 /* Monotonic clock in milliseconds */
 uint64_t ccev__now_ms(void);
+
+/* DNS init — parse /etc/resolv.conf, fall back to 1.1.1.1 */
+void ccev__dns_init(ccev_loop_t *loop);
 
 /* DNS cache flush + reload hosts file */
 void ccev_dns_flush(ccev_loop_t *loop);

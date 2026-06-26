@@ -76,10 +76,8 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     cclist_init(&loop->closing);
     ccheap_init(&loop->timers, NULL);
 
-    /* Init DNS state */
-    loop->dns.servers[0] = "1.1.1.1";
-    loop->dns.nservers   = 1;
-    loop->dns.port       = 53;
+    /* Init DNS state — parse resolv.conf, or fall back to 1.1.1.1 */
+    ccev__dns_init(loop);
     cchashmap_init(&loop->dns_cache, NULL, NULL);
     cchashmap_init(&loop->dns_pending, NULL, NULL);
 
@@ -174,6 +172,9 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     }
     cchashmap_destroy(&loop->dns_pending);
 
+    /* Free DNS server string copies */
+    for (int _i = 0; _i < loop->dns.nservers; _i++)
+        ccev__free_fn((void *)(uintptr_t)loop->dns.servers[_i].server);
 
     ccev__free_fn(loop->events);
     epoll_close(loop->epfd);

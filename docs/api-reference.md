@@ -6,6 +6,7 @@
 |---|---|---|
 | `CCEV_OK` | `0` | Operation completed successfully. |
 | `CCEV_ERR` | `-1` | Operation failed / fd is closed. |
+| `CCEV_DNS_MAX_SERVERS` | `4` | Maximum number of DNS servers that can be configured via ccev_dns_set_server(). |
 
 ## Enumerations
 
@@ -246,13 +247,29 @@ Re-schedule a timer. Uses `ccheap_update()` with embedded index for O(log n) rep
 
 ### DNS
 
+#### `ccev_dns_server_t`
+
+```c
+typedef struct ccev_dns_server {
+    const char *server;   /* Server IP (dot-decimal or IPv6) */
+    uint16_t    port;     /* Server port (typically 53)     */
+} ccev_dns_server_t;
+```
+
+DNS server address and port pair. The library makes internal copies — caller may reuse/free immediately.
+
 #### `ccev_dns_set_server`
 
 ```c
-int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int port);
+int ccev_dns_set_server(ccev_loop_t *loop,
+                         const ccev_dns_server_t servers[], int n);
 ```
 
-Set DNS server addresses and port. Default servers: `{"1.1.1.1"}`, port: `53`. Max 4 servers. @p port is ignored when <= 0.
+Set DNS server addresses and ports. Each server can specify its own port. The library deep-copies all strings internally — the caller may reuse/free the input immediately.
+
+Default: reads `/etc/resolv.conf` (POSIX) for `nameserver` entries (up to 4, validated as real IPs); falls back to `{{"1.1.1.1", 53}}` on Windows or when no valid nameserver is found.
+
+Returns `CCEV_ERR` on NULL/OOM/invalid input.
 
 #### `ccev_dns_resolve`
 
@@ -275,8 +292,6 @@ The resolved address is written to the cache before the callback chain fires.
 The @p address passed to the callback points to a stack buffer valid only
 during the callback invocation — the caller must NOT free or store the
 pointer.
-
-<!-- ccev_dns_free removed — no heap allocation, no free needed. -->
 
 #### `ccev_dns_flush`
 
