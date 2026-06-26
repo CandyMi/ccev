@@ -40,8 +40,16 @@ typedef struct {
 static void ping_timeout_cb(void *udata) {
     ccev_ping_t *p = (ccev_ping_t *)udata;
     ccicmp_close(&p->ping);
+
     if (p->cb) p->cb(p->udata, NULL);
-    p->loop->free_fn(p);
+
+    /* Close the conn via unified path — deferred cleanup will
+     * free p via ccev__conn_free (CCEV_CONN_ICMP frees recv_udata). */
+    if (p->conn) {
+        ccev__conn_schedule_close(p->loop, p->conn);
+    } else {
+        p->loop->free_fn(p);
+    }
 }
 
 /* ── Recv callback (EPOLLIN on ICMP fd) ───────────────────────────── */
@@ -63,13 +71,24 @@ static void ping_recv_ready(void *udata) {
         ccev_icmp_result_t result;
         memset(&result, 0, sizeof(result));
 
-        result.rtt_ms      = 1.0;    /* rough estimate */
+        /* TODO: Parse real RTT from ICMP reply timestamp and real TTL
+         * from the IP header.  Currently set to 0 to indicate "not
+         * computed from raw packet." */
+        result.rtt_ms      = 0.0;
         result.payload_len = p->reply_len;
-        result.ttl         = 64;     /* default TTL */
+        result.ttl         = 0;
 
         ccicmp_close(&p->ping);
+
+        /* Fire user callback BEFORE close, so udata is still valid. */
         if (p->cb) p->cb(p->udata, &result);
-        p->loop->free_fn(p);
+
+        /* Close the conn via unified path — deferred cleanup will
+         * free p via ccev__conn_free (CCEV_CONN_ICMP frees recv_udata). */
+        if (p->conn)
+            ccev__conn_schedule_close(p->loop, p->conn);
+        else
+            p->loop->free_fn(p);
     }
 }
 
@@ -90,7 +109,7 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
     p->conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)fd, p);
     if (!p->conn) return -1;
 
-    p->conn->type = CCEV_CONN_NORMAL;
+    p->conn->type = CCEV_CONN_ICMP;
     ccev_conn_recv(p->conn, NULL, 0, ping_recv_ready, p);
 
     /* Set a timeout */
@@ -115,6 +134,7 @@ static void ccev__icmp_dns_cb(void *udata, ccev_address_t *addr, int status) {
             p->timer = NULL;
         }
         if (p->cb) p->cb(p->udata, NULL);
+        /* No conn was created yet; free ping state directly. */
         p->loop->free_fn(p);
         return;
     }
@@ -128,6 +148,7 @@ static void ccev__icmp_dns_cb(void *udata, ccev_address_t *addr, int status) {
             if (!ccicmp_init(&p->ping, CC_INET6)) {
                 ccev_dns_free(addr);
                 if (p->cb) p->cb(p->udata, NULL);
+                /* No conn yet; free directly. */
                 p->loop->free_fn(p);
                 return;
             }

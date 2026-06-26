@@ -115,6 +115,31 @@ TEST(timer_reset_null_returns_err) {
     ccev_loop_destroy(loop);
 }
 
+/* ── Repeat timer firing count ─────────────────────────── */
+
+static int repeat_fire_count;
+static ccev_loop_t *repeat_test_loop;
+
+static void repeat_count_cb(void *udata) {
+    (void)udata;
+    repeat_fire_count++;
+    if (repeat_fire_count >= 3)
+        ccev_loop_stop(repeat_test_loop);
+}
+
+TEST(timer_repeat_fires_at_least_three) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    repeat_test_loop  = loop;
+    repeat_fire_count = 0;
+
+    ccev_timer_add(loop, 5, CCEV_TIMER_REPEAT, repeat_count_cb, loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(repeat_fire_count >= 3);
+    ccev_loop_destroy(loop);
+}
+
 /* ── NULL guards ───────────────────────────────────────── */
 
 TEST(timer_add_null_cb_returns_null) {
@@ -141,6 +166,7 @@ int main(void) {
     RUN(timer_del_null_timer);
     RUN(timer_reset_shortens);
     RUN(timer_reset_null_returns_err);
+    RUN(timer_repeat_fires_at_least_three);
     RUN(timer_add_null_cb_returns_null);
     RUN(timer_count_null_returns_zero);
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);

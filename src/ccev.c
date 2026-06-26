@@ -82,15 +82,6 @@ ccev_loop_t *ccev_loop_create(int max_events) {
         ccev__conn_mod_internal(loop, wake, EPOLLIN);
     }
 
-    /* Linux timerfd */
-#if defined(__linux__) || defined(__ANDROID__)
-    loop->timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-    if (loop->timerfd >= 0) {
-        ccev_conn_t *tc = ccev_conn_create(loop, (ccsocket_t)(intptr_t)loop->timerfd, NULL);
-        if (tc) ccev__conn_mod_internal(loop, tc, EPOLLIN);
-    }
-#endif
-
     return loop;
 }
 
@@ -101,11 +92,18 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     if (loop->wakefds[1] != (ccsocket_t)-1) ccsocket_close(loop->wakefds[1]);
     if (loop->signal_pipe[1] != (ccsocket_t)-1) ccsocket_close(loop->signal_pipe[1]);
 
-#if defined(__linux__) || defined(__ANDROID__)
-    if (loop->timerfd >= 0) close(loop->timerfd);
-#endif
+    /* Process any pending closing queue first — these conns were
+     * removed from all_conns by ccev__conn_schedule_close. */
+    while (!cclist_empty(&loop->closing)) {
+        cclist_node_t *cn = cclist_pop_front(&loop->closing);
+        if (!cn) continue;
+        ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
+        conn->in_closing = false;
+        if (conn->close_cb) conn->close_cb(conn->close_udata);
+        ccev__conn_free(loop, conn);
+    }
 
-    /* Free all connections via the all_conns list */
+    /* Free remaining connections via the all_conns list */
     while (!cclist_empty(&loop->all_conns)) {
         cclist_node_t *n = cclist_pop_front(&loop->all_conns);
         if (n) {
@@ -139,6 +137,32 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         }
     }
     cchashmap_destroy(&loop->dns_cache);
+
+    /* Free DNS pending entries and their waiter chains.
+     * Walk every bucket chain and free each entry; then free the
+     * buckets array via cchashmap_destroy. */
+    if (loop->dns_pending.buckets) {
+        for (size_t _i = 0; _i < loop->dns_pending.cap; _i++) {
+            cchashmap_node_t *_n = loop->dns_pending.buckets[_i];
+            while (_n) {
+                cchashmap_node_t *_next = _n->next;
+                ccev_dns_pending_t *_p = CCHASHMAP_CONTAINER(_n, ccev_dns_pending_t, node);
+                /* Free all waiters attached to this pending entry */
+                cclink_node_t *_wn = cclink_begin(&_p->waiters);
+                while (_wn) {
+                    cclink_node_t *_wnext = cclink_next(_wn);
+                    ccev_dns_waiter_t *_w = CCLINK_CONTAINER(_wn, ccev_dns_waiter_t, node);
+                    loop->free_fn(_w);
+                    _wn = _wnext;
+                }
+                loop->free_fn(_p);
+                _n = _next;
+            }
+            /* Null the bucket to prevent stale pointer after destroy */
+            loop->dns_pending.buckets[_i] = NULL;
+        }
+        loop->dns_pending.size = 0;
+    }
     cchashmap_destroy(&loop->dns_pending);
 
 
@@ -237,9 +261,10 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                 continue;
             }
 
-            /* Error / hangup */
+            /* Error / hangup — schedule deferred close; close_cb fires
+             * once in step 6 (closing queue processing) to avoid
+             * double-firing. */
             if (fired & (EPOLLERR | EPOLLHUP)) {
-                if (conn->close_cb) conn->close_cb(conn->close_udata);
                 ccev__conn_schedule_close(loop, conn);
                 continue;
             }
@@ -274,7 +299,11 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                 /* DNS + normal recv: fire callback then re-arm */
                 if (conn->recv_cb) {
                     conn->recv_cb(conn->recv_udata);
-                    ccev__conn_rearm(loop, conn);
+                    /* Only re-arm if there are events to register after
+                     * the callback (recv_cb may have changed or cleared
+                     * the callback via ccev_conn_recv inside the cb). */
+                    if (conn->recv_cb || conn->pending_write)
+                        ccev__conn_rearm(loop, conn);
                 }
             }
 
@@ -306,15 +335,13 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         if (loop->wake_conn && !loop->wake_conn->closed)
             ccev__conn_mod_internal(loop, loop->wake_conn, EPOLLIN);
 
-        /* 6. Process closing queue */
+        /* 6. Process closing queue — conn was already removed from
+         * all_conns by ccev__conn_schedule_close. */
         while (!cclist_empty(&loop->closing)) {
             cclist_node_t *cn = cclist_pop_front(&loop->closing);
             if (!cn) continue;
             ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
             conn->in_closing = false;
-            /* Remove from all_conns */
-            cclist_remove(&loop->all_conns, &conn->lnode);
-            /* Fire close callback */
             if (conn->close_cb) conn->close_cb(conn->close_udata);
             ccev__conn_free(loop, conn);
         }

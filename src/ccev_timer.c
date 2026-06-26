@@ -55,7 +55,7 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
         timer->cb(timer->udata);
 
         if (timer->mode == CCEV_TIMER_REPEAT) {
-            ccheap_node_set(&timer->node, timeout, ccev__now_ms() + timer->interval);
+            ccheap_node_set(&timer->node, timeout, now_ms + timer->interval);
             ccheap_insert(&loop->timers, &timer->node);
         } else {
             loop->free_fn(timer);
@@ -85,22 +85,6 @@ ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
         ccheap_init(&loop->timers, timer_cmp);
     ccheap_insert(&loop->timers, &timer->node);
     loop->timer_count++;
-
-    /* Linux: update timerfd */
-#if defined(__linux__) || defined(__ANDROID__)
-    if (loop->timerfd >= 0) {
-        ccheap_node_t *earliest = ccheap_peek(&loop->timers);
-        if (earliest) {
-            struct itimerspec its;
-            memset(&its, 0, sizeof(its));
-            uint64_t now = ccev__now_ms();
-            uint64_t rem = (ccheap_node_get(earliest, timeout) > now) ? ccheap_node_get(earliest, timeout) - now : 0;
-            its.it_value.tv_sec  = (time_t)(rem / 1000ULL);
-            its.it_value.tv_nsec = (long)((rem % 1000ULL) * 1000000L);
-            timerfd_settime(loop->timerfd, 0, &its, NULL);
-        }
-    }
-#endif
     return timer;
 }
 

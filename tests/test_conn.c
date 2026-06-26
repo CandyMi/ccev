@@ -18,6 +18,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #endif
 
 static int passed, failed;
@@ -216,32 +218,32 @@ TEST(sendall_batch_then_flush) {
 
 TEST(sendfile_smoke) {
 #ifndef _WIN32
-    /* Create a temp file, write data, rewind, send via sendfile */
+    const char *filepath = "/tmp/ccev_sendfile_test";
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
 
-    int tmp_fd = -1;
-    tmp_fd = open("/tmp/ccev_sendfile_test", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    /* Create a temp file, write data */
+    int tmp_fd = open(filepath, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (tmp_fd < 0) { passed++; ccev_loop_destroy(loop); return; }
 
     const char *data = "sendfile test data";
     write(tmp_fd, data, strlen(data));
-    lseek(tmp_fd, 0, SEEK_SET);
+    close(tmp_fd);
 
     /* Need a connected socket pair to send to */
     int sv[2];
-    if (pair_create(sv) != 0) { close(tmp_fd); passed++; ccev_loop_destroy(loop); return; }
+    if (pair_create(sv) != 0) { unlink(filepath); passed++; ccev_loop_destroy(loop); return; }
 
     ccev_conn_t *conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
     ASSERT(conn != NULL);
 
-    int rc = ccev_conn_sendfile(conn, tmp_fd, NULL, NULL);
+    /* sendfile now takes a file path instead of an fd */
+    int rc = ccev_conn_sendfile(conn, filepath, NULL, NULL);
     ASSERT(rc == CCEV_OK);
 
     ccev_conn_close(conn);
     ccev_loop_destroy(loop);
-    close(tmp_fd);
-    unlink("/tmp/ccev_sendfile_test");
+    unlink(filepath);
     close(sv[1]);
     passed++;
 #else
@@ -323,6 +325,74 @@ TEST(conn_count_null_returns_zero) {
     ASSERT(ccev_conn_count(NULL) == 0);
 }
 
+/* ═══ listen + connect (end-to-end) ────────────────────── */
+
+static int  listen_accept_flag;
+static ccev_conn_t *listen_accept_conn;
+static int  listen_connect_flag;
+static ccev_loop_t *listen_test_loop;
+
+static void listen_on_accept(void *udata, ccev_conn_t *conn,
+                              const char *ip, int port) {
+    (void)udata; (void)ip; (void)port;
+    listen_accept_flag = 1;
+    listen_accept_conn = conn;
+    ccev_loop_stop(listen_test_loop);
+}
+
+static void listen_on_connect(void *udata, ccev_conn_t *conn, int status) {
+    (void)udata;
+    if (status == CCEV_OK && conn) {
+        listen_connect_flag = 1;
+        /* Don't stop the loop here — connect may complete synchronously
+         * (before loop_run starts), which would prevent the accept from
+         * being processed.  The accept callback stops the loop instead. */
+    }
+}
+
+TEST(listen_then_connect) {
+#ifndef _WIN32
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    listen_test_loop    = loop;
+    listen_accept_flag  = 0;
+    listen_connect_flag = 0;
+    listen_accept_conn  = NULL;
+
+    ccev_conn_t *listener = ccev_listen(loop, "127.0.0.1", 0, 5,
+                                         CCEV_REUSEADDR,
+                                         listen_on_accept, loop);
+    ASSERT(listener != NULL);
+
+    /* Discover the port the OS assigned */
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof(sin);
+    ccsocket_t lfd = ccev_conn_fd(listener);
+    ASSERT(getsockname((int)(intptr_t)lfd,
+                       (struct sockaddr *)&sin, &slen) == 0);
+    int port = ntohs(sin.sin_port);
+    ASSERT(port > 0);
+
+    int rc = ccev_connect(loop, "127.0.0.1", (uint16_t)port,
+                          1000, CCEV_TCP_NODELAY,
+                          listen_on_connect, loop);
+    ASSERT(rc == CCEV_OK);
+
+    /* Run one iteration: accept should fire, which stops the loop */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+
+    ASSERT(listen_accept_flag  == 1);
+    ASSERT(listen_accept_conn  != NULL);
+    ASSERT(listen_connect_flag == 1);
+
+    ccev_conn_close(listener);
+    ccev_loop_destroy(loop);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ═══ Main ═══ */
 
 int main(void) {
@@ -363,6 +433,9 @@ int main(void) {
 
     /* count */
     RUN(conn_count_null_returns_zero);
+
+    /* listen + connect */
+    RUN(listen_then_connect);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;

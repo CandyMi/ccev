@@ -31,13 +31,11 @@ typedef int socklen_t;
 #  include <unistd.h>
 #endif
 
+/* struct timespec (used by ccev__now_ms on Linux/POSIX) */
+#include <time.h>
+
 #include "epoll/epoll.h"
 #include "ccsocket.h"
-
-/* Linux timerfd — MUST be included outside struct definitions */
-#if defined(__linux__) || defined(__ANDROID__)
-#  include <sys/timerfd.h>
-#endif
 
 /* ccheap configuration: 4-ary heap (wider = shallower, fewer pops) */
 #define CCHEAP_ARITY 4
@@ -67,6 +65,7 @@ typedef enum {
     CCEV_CONN_LISTENER,   /**< TCP listener created by ccev_listen()     */
     CCEV_CONN_CONNECTING, /**< TCP connect in progress                   */
     CCEV_CONN_DNS,        /**< Internal DNS socket                       */
+    CCEV_CONN_ICMP,       /**< Internal ICMP (ping) socket               */
 } ccev_conn_type_t;
 
 /* ════════════════════════════════════════════════════════════════
@@ -207,11 +206,6 @@ struct ccev_loop_s {
     /* ── Timer heap ── */
     ccheap_t            timers;         /**< D-ary min-heap (4-ary)        */
     int                 timer_count;    /**< Active timer count             */
-
-    /* ── Timerfd (Linux/Android only, for ns precision) ── */
-#if defined(__linux__) || defined(__ANDROID__)
-    int                 timerfd;        /**< timerfd fd for hrtimer         */
-#endif
 
     /* ── DNS state ── */
     ccev_dns_state_t    dns;
