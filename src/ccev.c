@@ -65,6 +65,7 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     loop->dns.nservers   = 1;
     loop->dns.port       = 53;
     cchashmap_init(&loop->dns_cache, NULL, NULL);
+    cchashmap_init(&loop->dns_pending, NULL, NULL);
 
     /* Wakeup pipe */
     if (ccsocket_pipe(loop->wakefds) < 0) {
@@ -125,7 +126,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     /* Free timer heap internal array */
     ccheap_destroy(&loop->timers);
 
-    /* Free DNS cache — free all entries then destroy bucket array */
+    /* Free DNS cache */
     if (loop->dns_cache.buckets) {
         for (size_t _i = 0; _i < loop->dns_cache.cap; _i++) {
             cchashmap_node_t *_n = loop->dns_cache.buckets[_i];
@@ -138,6 +139,8 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         }
     }
     cchashmap_destroy(&loop->dns_cache);
+    cchashmap_destroy(&loop->dns_pending);
+
 
     loop->free_fn(loop->events);
     epoll_close(loop->epfd);

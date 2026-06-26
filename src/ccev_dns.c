@@ -1,10 +1,14 @@
 /**
  * @file ccev_dns.c
- * @brief Asynchronous DNS resolver — race mode, with cache + hosts.
+ * @brief Asynchronous DNS resolver — race mode, with cache + hosts + pending.
  *
  * Wire-format encode/decode uses ccdns (deps/ccsocket/ccdns.h).
  * Queries for A and AAAA are sent in parallel using two ccdns_t contexts.
  * The first valid response wins.
+ *
+ * Concurrent requests for the same domain are coalesced: when a resolution
+ * is already in-flight, new callbacks are appended as waiters instead of
+ * creating duplicate UDP sockets.
  *
  * DNS cache (per-loop):
  *   - Domain → IP mapping stored in a cchashmap.
@@ -22,7 +26,7 @@
 #include <ctype.h>
 
 /* ════════════════════════════════════════════════════════════════
- *  DNS config — stored in per-loop state
+ *  DNS config
  * ════════════════════════════════════════════════════════════════ */
 
 #define CCEV_DNS_MAX_SERVERS 4
@@ -37,21 +41,35 @@ int ccev_dns_set_server(ccev_loop_t *loop, const char *servers[], int n, int por
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  DNS cache — hash / equal
+ *  Domain hash/equal helpers (shared by cache + pending)
  * ════════════════════════════════════════════════════════════════ */
 
-static uint64_t cache_hash(const cchashmap_node_t *n, size_t seed) {
-    const ccev_dns_cache_t *e = CCHASHMAP_CONTAINER(n, ccev_dns_cache_t, node);
+static uint64_t domain_hash(const char *domain, size_t seed) {
     uint64_t h = seed;
-    const char *p = e->domain;
-    while (*p) { h = h * 31 + (unsigned char)(*p); p++; }
+    while (*domain) { h = h * 31 + (unsigned char)(*domain); domain++; }
     return h;
 }
 
+/* ── cache ──────────────────────────────────────────────────── */
+
+static uint64_t cache_hash(const cchashmap_node_t *n, size_t seed) {
+    return domain_hash(CCHASHMAP_CONTAINER(n, ccev_dns_cache_t, node)->domain, seed);
+}
+
 static bool cache_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {
-    const ccev_dns_cache_t *ea = CCHASHMAP_CONTAINER(a, ccev_dns_cache_t, node);
-    const ccev_dns_cache_t *eb = CCHASHMAP_CONTAINER(b, ccev_dns_cache_t, node);
-    return strcmp(ea->domain, eb->domain) == 0;
+    return strcmp(CCHASHMAP_CONTAINER(a, ccev_dns_cache_t, node)->domain,
+                  CCHASHMAP_CONTAINER(b, ccev_dns_cache_t, node)->domain) == 0;
+}
+
+/* ── pending ─────────────────────────────────────────────────── */
+
+static uint64_t pending_hash(const cchashmap_node_t *n, size_t seed) {
+    return domain_hash(CCHASHMAP_CONTAINER(n, ccev_dns_pending_t, node)->domain, seed);
+}
+
+static bool pending_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {
+    return strcmp(CCHASHMAP_CONTAINER(a, ccev_dns_pending_t, node)->domain,
+                  CCHASHMAP_CONTAINER(b, ccev_dns_pending_t, node)->domain) == 0;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -157,6 +175,62 @@ void ccev_dns_flush(ccev_loop_t *loop) {
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Pending resolution helpers
+ * ════════════════════════════════════════════════════════════════ */
+
+/* Look up a pending resolution by domain (thread-safe: reactor thread only) */
+static ccev_dns_pending_t *pending_lookup(ccev_loop_t *loop, const char *domain) {
+    if (!loop->dns_pending.buckets) return NULL;
+    ccev_dns_pending_t probe;
+    memset(&probe, 0, sizeof(probe));
+    size_t len = strlen(domain);
+    if (len >= sizeof(probe.domain)) len = sizeof(probe.domain) - 1;
+    memcpy(probe.domain, domain, len);
+    probe.domain[len] = '\0';
+    cchashmap_node_t *n = cchashmap_get(&loop->dns_pending, &probe.node);
+    return n ? CCHASHMAP_CONTAINER(n, ccev_dns_pending_t, node) : NULL;
+}
+
+/* Register a pending resolution entry */
+static ccev_dns_pending_t *pending_add(ccev_loop_t *loop, const char *domain) {
+    if (!loop->dns_pending.buckets)
+        cchashmap_init(&loop->dns_pending, pending_hash, pending_equal);
+    ccev_dns_pending_t *p = (ccev_dns_pending_t *)
+        loop->realloc_fn(NULL, sizeof(ccev_dns_pending_t));
+    if (!p) return NULL;
+    memset(p, 0, sizeof(*p));
+    size_t dlen = strlen(domain);
+    if (dlen >= sizeof(p->domain)) dlen = sizeof(p->domain) - 1;
+    memcpy(p->domain, domain, dlen);
+    p->domain[dlen] = '\0';
+    cclink_init(&p->waiters);
+    if (cchashmap_set(&loop->dns_pending, &p->node, NULL))
+        return p;
+    loop->free_fn(p);  /* duplicate (shouldn't happen) */
+    return NULL;
+}
+
+/* Remove and free a pending entry (does NOT free waiters — caller handles) */
+static void pending_remove(ccev_loop_t *loop, ccev_dns_pending_t *p) {
+    cchashmap_del(&loop->dns_pending, &p->node);
+    loop->free_fn(p);
+}
+
+/* Distribute result to all waiters, then remove pending entry */
+static void pending_distribute(ccev_loop_t *loop, ccev_dns_pending_t *p,
+                                ccev_address_t *addr, int status) {
+    cclink_node_t *wn = cclink_begin(&p->waiters);
+    while (wn) {
+        ccev_dns_waiter_t *w = CCLINK_CONTAINER(wn, ccev_dns_waiter_t, node);
+        cclink_node_t *next = cclink_next(wn);
+        if (w->cb) w->cb(w->udata, addr, status);
+        loop->free_fn(w);
+        wn = next;
+    }
+    pending_remove(loop, p);
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  DNS internal state (per-resolution)
  * ════════════════════════════════════════════════════════════════ */
 
@@ -166,18 +240,20 @@ typedef struct ccev_dns_query_s {
     ccev_timer_t    *timer;
     ccev_dns_cb      cb;
     void            *udata;
-    int              qtype;         /**< CCEV_DNS_A | CCEV_DNS_AAAA   */
+    int              qtype;
     bool             finished;
     ccev_address_t  *result_head;
     ccev_address_t  *result_tail;
     int              result_ttl;
     char             domain[256];
-    ccdns_t          ctx_a;         /**< ccdns context for A query     */
-    ccdns_t          ctx_aaaa;      /**< ccdns context for AAAA query  */
+    ccdns_t          ctx_a;
+    ccdns_t          ctx_aaaa;
+    /* pending entry, if this query is the primary for a domain */
+    ccev_dns_pending_t *pending;
 } ccev_dns_query_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  ccdns adapter — builds ccev_address_t linked list from ccdns_ans_t
+ *  ccdns adapter — builds ccev_address_t linked list
  * ════════════════════════════════════════════════════════════════ */
 
 static void dns_adapter_cb(void *udata, const ccdns_ans_t *ans) {
@@ -185,13 +261,11 @@ static void dns_adapter_cb(void *udata, const ccdns_ans_t *ans) {
     if (q->finished) return;
     if (ans->type != CCDNS_A && ans->type != CCDNS_AAAA) return;
     if (!ans->ip[0]) return;
-
     ccev_address_t *addr = (ccev_address_t *)
         calloc(1, sizeof(ccev_address_t));
     if (!addr) return;
     memcpy(addr->ip, ans->ip, sizeof(addr->ip));
-    addr->ttl = ans->ttl;
-    addr->next = NULL;
+    addr->ttl = ans->ttl; addr->next = NULL;
     if (q->result_tail) q->result_tail->next = addr;
     else                q->result_head = addr;
     q->result_tail = addr;
@@ -217,7 +291,7 @@ static int ccev__dns_send_one(ccev_loop_t *loop, ccev_conn_t *conn,
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  DNS recv callback (fired on EPOLLIN)
+ *  DNS recv callback — distribute result to original cb + waiters
  * ════════════════════════════════════════════════════════════════ */
 
 static void dns_recv_cb(void *udata) {
@@ -229,7 +303,6 @@ static void dns_recv_cb(void *udata) {
     ccsocket_stcode_t rc = ccsocket_recv(q->conn->fd, (char*)buf, sizeof(buf), &n);
     if (rc != CC_OPCODE_OK || n <= 0) return;
 
-    /* Try decoding with A context first, then AAAA */
     int count = ccdns_decode(&q->ctx_a, buf, (size_t)n, q, dns_adapter_cb);
     if (count < 0)
         count = ccdns_decode(&q->ctx_aaaa, buf, (size_t)n, q, dns_adapter_cb);
@@ -239,6 +312,12 @@ static void dns_recv_cb(void *udata) {
         if (q->timer) { ccev_timer_del(q->loop, q->timer); q->timer = NULL; }
         if (q->result_head->ip[0])
             cache_insert(q->loop, q->domain, q->result_head->ip, q->result_ttl);
+
+        /* Distribute to waiters first */
+        ccev_dns_pending_t *p = q->pending;
+        if (p) pending_distribute(q->loop, p, q->result_head, CCEV_OK);
+
+        /* Fire original callback */
         if (q->cb) q->cb(q->udata, q->result_head, CCEV_OK);
         ccev__conn_schedule_close(q->loop, q->conn);
     }
@@ -248,6 +327,11 @@ static void dns_timeout_cb(void *udata) {
     ccev_dns_query_t *q = (ccev_dns_query_t *)udata;
     if (!q || q->finished) return;
     q->finished = true; q->timer = NULL;
+
+    /* Distribute timeout to waiters */
+    ccev_dns_pending_t *p = q->pending;
+    if (p) pending_distribute(q->loop, p, NULL, CCEV_ERR);
+
     if (q->cb) q->cb(q->udata, NULL, CCEV_ERR);
     if (q->conn) ccev__conn_schedule_close(q->loop, q->conn);
 }
@@ -261,7 +345,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
                       ccev_dns_cb cb, void *udata) {
     if (!loop || !domain || !cb) return CCEV_ERR;
 
-    /* Check cache */
+    /* 1. Check cache */
     ccev_dns_cache_t *cached = cache_lookup(loop, domain);
     if (cached) {
         ccev_address_t *addr = (ccev_address_t *)
@@ -273,28 +357,42 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
         return CCEV_OK;
     }
 
-    /* Allocate query state */
+    /* 2. Check pending — if an in-flight resolution exists, append waiter */
+    ccev_dns_pending_t *pending = pending_lookup(loop, domain);
+    if (pending) {
+        ccev_dns_waiter_t *w = (ccev_dns_waiter_t *)
+            loop->realloc_fn(NULL, sizeof(ccev_dns_waiter_t));
+        if (!w) return CCEV_ERR;
+        w->cb = cb; w->udata = udata;
+        cclink_push_back(&pending->waiters, &w->node);
+        return CCEV_OK;
+    }
+
+    /* 3. Cache miss + no pending — start a new resolution */
+    /* Register pending FIRST so racing callers find it */
+    pending = pending_add(loop, domain);
+    if (!pending) return CCEV_ERR;
+
     ccev_dns_query_t *q = (ccev_dns_query_t *)
         loop->realloc_fn(NULL, sizeof(ccev_dns_query_t));
-    if (!q) return CCEV_ERR;
+    if (!q) { pending_remove(loop, pending); return CCEV_ERR; }
     memset(q, 0, sizeof(*q));
     q->loop = loop; q->cb = cb; q->udata = udata; q->qtype = (int)type;
+    q->pending = pending;
     size_t dlen = strlen(domain);
     if (dlen >= sizeof(q->domain)) dlen = sizeof(q->domain) - 1;
     memcpy(q->domain, domain, dlen);
     q->domain[dlen] = '\0';
 
-    /* Initialise ccdns contexts */
     ccdns_init(&q->ctx_a);
     ccdns_init(&q->ctx_aaaa);
 
-    /* Create UDP socket */
     ccsocket_t fd = ccsocket(CC_INET4, CC_UDP);
-    if (fd == (ccsocket_t)-1) { loop->free_fn(q); return CCEV_ERR; }
+    if (fd == (ccsocket_t)-1) { pending_remove(loop, pending); loop->free_fn(q); return CCEV_ERR; }
     ccsocket_set_nonblock(fd, true);
 
     ccev_conn_t *conn = ccev_conn_create(loop, fd, q);
-    if (!conn) { ccsocket_close(fd); loop->free_fn(q); return CCEV_ERR; }
+    if (!conn) { ccsocket_close(fd); pending_remove(loop, pending); loop->free_fn(q); return CCEV_ERR; }
     conn->type = CCEV_CONN_DNS; q->conn = conn;
     conn->recv_cb = dns_recv_cb; conn->recv_udata = q;
     ccev__conn_mod_internal(loop, conn, EPOLLIN);
@@ -302,12 +400,10 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     if (timeout_ms > 0)
         q->timer = ccev_timer_add(loop, timeout_ms, CCEV_TIMER_ONCE, dns_timeout_cb, q);
 
-    /* Send queries — A and/or AAAA */
-    if ((type & CCEV_DNS_A) && ccev__dns_send_one(loop, conn, &q->ctx_a, domain, CCDNS_A) != CCEV_OK) {
-        /* Send failure — one less outstanding query; still try AAAA */
-    }
-    if ((type & CCEV_DNS_AAAA) && ccev__dns_send_one(loop, conn, &q->ctx_aaaa, domain, CCDNS_AAAA) != CCEV_OK) {
-    }
+    if ((type & CCEV_DNS_A))
+        ccev__dns_send_one(loop, conn, &q->ctx_a, domain, CCDNS_A);
+    if ((type & CCEV_DNS_AAAA))
+        ccev__dns_send_one(loop, conn, &q->ctx_aaaa, domain, CCDNS_AAAA);
 
     return CCEV_OK;
 }

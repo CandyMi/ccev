@@ -163,6 +163,20 @@ typedef struct ccev_dns_cache_s {
     uint64_t          cached_at;        /**< monotonic ms when cached */
 } ccev_dns_cache_t;
 
+/** Pending DNS waiter — appended to an in-flight resolution */
+typedef struct ccev_dns_waiter_s {
+    cclink_node_t  node;
+    ccev_dns_cb    cb;
+    void          *udata;
+} ccev_dns_waiter_t;
+
+/** Pending DNS resolution — domain currently in-flight */
+typedef struct ccev_dns_pending_s {
+    cchashmap_node_t  node;
+    char              domain[256];
+    cclink_t          waiters;          /**< list of ccev_dns_waiter_t */
+} ccev_dns_pending_t;
+
 /* ════════════════════════════════════════════════════════════════
  *  Loop structure
  * ════════════════════════════════════════════════════════════════ */
@@ -201,6 +215,7 @@ struct ccev_loop_s {
     /* ── DNS state ── */
     ccev_dns_state_t    dns;
     cchashmap_t         dns_cache;      /**< domain → ccev_dns_cache_t */
+    cchashmap_t         dns_pending;    /**< domain → ccev_dns_pending_t */
 
     /* ── Signal handling (default loop only) ── */
     ccsocket_t              signal_pipe[2]; /**< Self-pipe for signal delivery */
