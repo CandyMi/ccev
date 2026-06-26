@@ -121,6 +121,49 @@ TEST(icmp_destroy_while_pending) {
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Domain name (hostname) support
+ * ════════════════════════════════════════════════════════════════ */
+
+static int dns_triggered;
+
+static void on_domain_result(void *udata, ccev_icmp_result_t *result) {
+    dns_triggered = 1;
+    /* result is NULL on timeout or DNS failure */
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+TEST(icmp_domain_localhost) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+
+    dns_triggered = 0;
+    /* "localhost" should resolve to 127.0.0.1 or ::1 */
+    int rc = ccev_icmp_echo(loop, "localhost", 100, on_domain_result, loop);
+    ASSERT(rc == CCEV_OK);  /* must succeed (DNS + ICMP init) */
+    if (rc == CCEV_OK) {
+        ccev_loop_run(loop, CCEV_RUN_FOREVER);
+        ASSERT(dns_triggered == 1);  /* callback must fire (timeout or reply) */
+    }
+    ccev_loop_destroy(loop);
+}
+
+TEST(icmp_domain_nonexistent) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+
+    dns_triggered = 0;
+    /* A domain that is extremely unlikely to resolve */
+    int rc = ccev_icmp_echo(loop, "x-surely-nonexistent-domain.test", 100,
+                             on_domain_result, loop);
+    /* If DNS starts successfully, wait for result */
+    if (rc == CCEV_OK) {
+        ccev_loop_run(loop, CCEV_RUN_FOREVER);
+        ASSERT(dns_triggered == 1);
+    }
+    ccev_loop_destroy(loop);
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  Main
  * ════════════════════════════════════════════════════════════════ */
 
@@ -138,6 +181,10 @@ int main(void) {
 
     printf("icmp lifecycle:\n");
     RUN(icmp_destroy_while_pending);
+
+    printf("icmp domain:\n");
+    RUN(icmp_domain_localhost);
+    RUN(icmp_domain_nonexistent);
 
     printf("\n%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
