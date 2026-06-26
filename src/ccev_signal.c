@@ -36,8 +36,7 @@ static void ccev__signal_dispatch(void *udata) {
         if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
             loop->signals[signum].cb(loop->signals[signum].udata, signum);
     }
-    if (loop->signal_conn && !loop->signal_conn->closed)
-        ccev__conn_mod_internal(loop, loop->signal_conn, EPOLLIN);
+    /* Re-arm is handled by the event loop after recv_cb returns */
 }
 
 /* ── Public API ─────────────────────────────────────────────── */
