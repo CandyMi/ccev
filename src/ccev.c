@@ -125,8 +125,18 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     /* Free timer heap internal array */
     ccheap_destroy(&loop->timers);
 
-    /* Free DNS cache */
-    ccev_dns_flush(loop);
+    /* Free DNS cache — free all entries then destroy bucket array */
+    if (loop->dns_cache.buckets) {
+        for (size_t _i = 0; _i < loop->dns_cache.cap; _i++) {
+            cchashmap_node_t *_n = loop->dns_cache.buckets[_i];
+            while (_n) {
+                cchashmap_node_t *_next = _n->next;
+                ccev_dns_cache_t *_e = CCHASHMAP_CONTAINER(_n, ccev_dns_cache_t, node);
+                loop->free_fn(_e);
+                _n = _next;
+            }
+        }
+    }
     cchashmap_destroy(&loop->dns_cache);
 
     loop->free_fn(loop->events);

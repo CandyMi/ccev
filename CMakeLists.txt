@@ -32,6 +32,11 @@ endif()
 
 # ── Dependencies: epoll (cross-platform epoll ABI) ──
 add_subdirectory(deps/epoll)
+# On Windows, epoll_dynamic and epoll_static both produce epoll.lib,
+# causing Ninja multi-rule errors.  Rename the shared-library output.
+if(WIN32)
+    set_target_properties(epoll_dynamic PROPERTIES OUTPUT_NAME "epoll-shared")
+endif()
 
 # ── Dependencies: ccsocket ──
 add_library(ccsocket STATIC
