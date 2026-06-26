@@ -529,13 +529,15 @@ typedef void (*ccev_icmp_cb)(void *udata, ccev_icmp_result_t *result);
   *  (CAP_NET_RAW on Linux, root on most systems). On Linux 3.0+
  *  and macOS, a privilege-free SOCK_DGRAM+ICMP socket is tried first.
  *
- *  @param loop  Event-loop handle.
- *  @param host  Target hostname or IP address.
- *  @param cb    Completion callback. @p result is NULL on failure.
- *  @param udata User pointer passed to @p cb.
+ *  @param loop       Event-loop handle.
+ *  @param host       Target hostname or IP address.
+ *  @param timeout_ms Per-request timeout in ms. 0 = no timeout (infinite).
+ *  @param cb         Completion callback. @p result is NULL on failure/timeout.
+ *  @param udata      User pointer passed to @p cb.
  *  @return CCEV_OK on successful initiation, CCEV_ERR on error.
  */
 int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
+                    unsigned int timeout_ms,
                     ccev_icmp_cb cb, void *udata);
 
 /* ════════════════════════════════════════════════════════════════

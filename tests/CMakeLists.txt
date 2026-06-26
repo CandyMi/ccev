@@ -9,5 +9,6 @@ if(BUILD_TESTING)
 
     add_ccev_test(test_timer test_timer.c)
     add_ccev_test(test_conn  test_conn.c)
-    add_ccev_test(test_dns  test_dns.c)
+    add_ccev_test(test_dns   test_dns.c)
+    add_ccev_test(test_icmp  test_icmp.c)
 endif()

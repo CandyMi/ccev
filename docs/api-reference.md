@@ -296,10 +296,11 @@ typedef void (*ccev_icmp_cb)(void *udata, ccev_icmp_result_t *result);
 
 ```c
 int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
+                    unsigned int timeout_ms,
                     ccev_icmp_cb cb, void *udata);
 ```
 
-Send an ICMP echo request (ping). Uses ccicmp internally — tries privilege-free SOCK_DGRAM+ICMP on Linux 3.0+ and macOS, falls back to SOCK_RAW (requires root).
+Send an ICMP echo request (ping). Uses ccicmp internally — tries privilege-free SOCK_DGRAM+ICMP on Linux 3.0+ and macOS, falls back to SOCK_RAW (requires root). When @p timeout_ms is 0, the request has no timeout (infinite wait).
 
 ### Signal Handling
 

@@ -64,6 +64,7 @@ static void ping_recv_ready(void *udata) {
 }
 
 int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
+                    unsigned int timeout_ms,
                     ccev_icmp_cb cb, void *udata) {
     if (!loop || !host || !cb) return CCEV_ERR;
 
@@ -105,9 +106,11 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
     conn->type = CCEV_CONN_NORMAL;
     ccev_conn_recv(conn, NULL, 0, ping_recv_ready, p);
 
-    /* Set a timeout (default 5 seconds) */
-    p->timer = ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
-                               ping_timeout_cb, p);
+    /* Set a timeout */
+    if (timeout_ms > 0) {
+        p->timer = ccev_timer_add(loop, timeout_ms, CCEV_TIMER_ONCE,
+                                   ping_timeout_cb, p);
+    }
 
     return CCEV_OK;
 }
