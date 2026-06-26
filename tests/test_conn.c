@@ -12,6 +12,10 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
+#include <io.h>
+#if !defined(__MINGW32__)
+#define close _close
+#endif
 #else
 #include <unistd.h>
 #include <sys/socket.h>

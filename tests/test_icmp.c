@@ -73,8 +73,6 @@ TEST(icmp_timeout_triggers) {
  *  Zero timeout = infinite wait (no timer created)
  * ════════════════════════════════════════════════════════════════ */
 
-static int timer_count_before;
-
 TEST(icmp_no_timeout) {
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
