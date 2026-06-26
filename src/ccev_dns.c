@@ -444,6 +444,10 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
                       ccev_dns_cb cb, void *udata) {
     if (!loop || !domain || !cb) return CCEV_ERR;
 
+    /* DNS wire format limit: 255 octets per label sequence.
+     * Reject longer domains upfront to avoid silent truncation. */
+    if (strlen(domain) >= 255) return CCEV_ERR;
+
     /* 1. IP or UDS short circuit — domain is already a direct address */
     {
         ccsocket_family_t family = ccsocket_get_version(domain);

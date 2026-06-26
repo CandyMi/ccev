@@ -35,7 +35,7 @@ static void on_recv(void *udata) {
             ccev_conn_close(conn);
             return;
         } else {
-            /* EAGAIN (1) or error (-1): return, epoll will re-arm */
+            /* EAGAIN or error (-1): return, epoll will re-arm */
             return;
         }
     }

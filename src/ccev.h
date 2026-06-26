@@ -295,7 +295,7 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata);
  *
  *  2. (buf!=NULL, len>0, cb=NULL)
  *     Pure synchronous read. Returns bytes read, 0 on EOF, CCEV_ERR
- *     on error. Does NOT register any epoll event.
+ *     on error or EWOULDBLOCK. Does NOT register any epoll event.
  *
  *  3. (buf=NULL, len=0, cb!=NULL)
  *     Register/update the recv callback and arm CCEV_READ. Does NOT
@@ -312,7 +312,7 @@ ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata);
  *  @param len   Buffer capacity, or 0.
  *  @param cb    Readable callback. Non-NULL updates the internal recv_cb.
  *  @param udata User pointer for the callback.
- *  @return Bytes read (>0), CCEV_OK (0 = re-armed, callback will fire),
+ *  @return Bytes read (>0), CCEV_OK (0 = no data yet, re-armed),
  *          0 (EOF), or CCEV_ERR on error/closed.
  */
 int ccev_conn_recv(ccev_conn_t *conn, void *buf, size_t len,
@@ -336,8 +336,9 @@ int ccev_conn_recv(ccev_conn_t *conn, void *buf, size_t len,
  *               updates the internal send_cb. NULL preserves the
  *               existing callback.
  *  @param udata User pointer for the callback.
- *  @return Number of bytes accepted (may be less than @p len on EAGAIN
- *          if not all data is buffered), or CCEV_ERR on closed fd.
+ *  @return @p len (the full request is always accepted — remaining data is
+ *          buffered internally and flushed asynchronously), or CCEV_ERR
+ *          on closed fd / OOM.
  */
 int ccev_conn_send(ccev_conn_t *conn, const void *data, size_t len,
                     ccev_send_cb cb, void *udata);

@@ -47,7 +47,7 @@ typedef struct ccev_loop_s  ccev_loop_t;   /* Event-loop handle. */
 typedef struct ccev_conn_s  ccev_conn_t;   /* Connection / I/O handle. */
 typedef struct ccev_timer_s ccev_timer_t;  /* Timer handle. */
 
-/* ccev_address_t was removed — see ccev_dns_cb for the new signature. */
+
 ```
 
 ## Callbacks
@@ -162,10 +162,10 @@ int ccev_conn_recv(ccev_conn_t *conn, void *buf, size_t len,
 Read data or register a readable callback.
 
 **Behaviours:**
-- `(buf!=NULL, len>0, cb!=NULL)`: Attempts a speculative non-blocking read. If data is available, `cb` is called synchronously. Returns bytes read, or `1` on EAGAIN (epoll re-armed, retry later).
-- `(buf!=NULL, len>0, cb=NULL)`: Pure synchronous read. Returns bytes read (>0), `0` on EOF, `1` on EAGAIN, or `CCEV_ERR(-1)` on error.
+- `(buf!=NULL, len>0, cb!=NULL)`: Attempts a speculative non-blocking read. If data is available, `cb` is called synchronously. Returns bytes read, or `CCEV_OK` (epoll re-armed, callback will fire later).
+- `(buf!=NULL, len>0, cb=NULL)`: Pure synchronous read. Returns bytes read (>0), `0` on EOF, or `CCEV_ERR(-1)` on error / EWOULDBLOCK.
 - `(buf=NULL, len=0, cb!=NULL)`: Register callback and arm read events.
-- `(cb=NULL, udata=NULL)`: Clear callback and disarm.
+- `(buf=NULL, len=0, cb=NULL)`: Clear callback and disarm.
 
 #### `ccev_conn_send`
 
@@ -174,15 +174,16 @@ int ccev_conn_send(ccev_conn_t *conn, const void *data, size_t len,
                     ccev_send_cb cb, void *udata);
 ```
 
-Send data asynchronously. On EAGAIN the data is buffered internally and `EPOLLOUT` is armed. The `cb` fires when the buffer is fully flushed. On immediate success, `cb` fires synchronously.
+Send data asynchronously. Attempts a non-blocking write first. On EAGAIN the remaining data is buffered internally and `EPOLLOUT` is armed automatically. Always returns the full `len` (unsent data is buffered). The `cb` fires when the buffer is fully flushed. On immediate success, `cb` fires synchronously in the same call.
 
 #### `ccev_conn_sendfile`
 
 ```c
-int ccev_conn_sendfile(ccev_conn_t *conn, int fd, ccev_send_cb cb, void *udata);
+int ccev_conn_sendfile(ccev_conn_t *conn, const char *path,
+                        ccev_send_cb cb, void *udata);
 ```
 
-Send an open file descriptor via kernel sendfile (zero-copy on Linux/macOS/FreeBSD). Falls back to read+send on other platforms.
+Send a file by path using kernel sendfile (zero-copy on Linux/macOS/FreeBSD). Opens the file, sends its entire content, then closes it. Falls back to read+send on platforms without kernel sendfile support. Returns `CCEV_OK` on success, `CCEV_ERR` on file-not-found / read error / connection closed.
 
 #### `ccev_conn_sendall`
 

@@ -77,7 +77,7 @@ static void on_recv(void *udata) {
             ccev_conn_close(conn);
             return;
         } else {
-            /* EAGAIN (1) or error (-1): wait for next epoll notification */
+            /* EAGAIN or error: wait for next epoll notification */
             return;
         }
     }
@@ -139,51 +139,4 @@ int main(void) {
 }
 ```
 
-## Project structure
 
-```
-ccev/
-├── CMakeLists.txt          # Root build system
-├── src/
-│   ├── ccev.h              # Public API header (with Doxygen comments)
-│   ├── ccev_internal.h     # Internal data structures
-│   ├── ccev.c              # Reactor core (loop, listen, connect)
-│   ├── ccev_timer.c        # Timer subsystem (ccheap)
-│   ├── ccev_conn.c         # Connection I/O, buffering, sendfile
-│   ├── ccev_dns.c          # Asynchronous DNS resolver
-│   ├── ccev_icmp.c         # ICMP echo (ping)
-│   └── ccev_signal.c       # Signal handling (self-pipe)
-├── deps/                   # Git submodules
-│   ├── epoll/              # github.com/CandyMi/epoll
-│   ├── ccalg/              # github.com/CandyMi/ccalg
-│   └── ccsocket/           # github.com/CandyMi/ccsocket
-├── scripts/
-│   ├── init-deps.sh          # Submodule re-init (POSIX shell)
-│   ├── init-deps.cmd         # Submodule re-init (Windows CMD)
-│   └── init-deps.ps1         # Submodule re-init (PowerShell)
-├── tests/
-│   ├── CMakeLists.txt
-│   ├── test_timer.c
-│   ├── test_conn.c
-│   └── test_dns.c
-├── examples/
-│   ├── echo_server.c
-│   ├── timer_demo.c
-│   └── http_bench.c         # HTTP benchmark server (wrk/ab)
-└── docs/
-    ├── api-reference.md
-    └── getting-started.md
-```
-
-## Key Design Decisions
-
-- **Single-threaded reactor**: All I/O, timers, and DNS resolution share one event loop. No locks in the hot path.
-- **EPOLLONESHOT by default**: Every event fires at most once per registration. Unfired events are automatically re-armed by the library — the user never needs to call epoll_ctl().
-- **Asynchronous send / synchronous recv**: `ccev_conn_send()` buffers data and manages EPOLLOUT internally. `ccev_conn_recv()` is a synchronous read (call it from within a recv callback).
-- **Speculative reads**: `ccev_conn_recv()` with a callback performs a non-blocking read first. If data is available immediately, the callback fires synchronously — avoiding a redundant epoll registration.
-- **D-ary heap timers**: 4-ary min-heap (ccheap) with O(log n) insert/pop and O(log n) update via embedded index.
-- **Race-mode DNS**: Queries are sent to all configured servers simultaneously via unconnected UDP sockets. The first valid response wins. Results are returned as a stack-allocated string (`const char *`) via the callback — no heap allocation, no `free` needed. IP addresses and Unix socket paths are resolved synchronously without network activity.
-- **Deferred close**: Connections are moved to a closing list during dispatch; actual teardown happens after all callbacks return.
-- **sendfile**: `ccev_conn_sendfile()` delegates to kernel sendfile (zero-copy on Linux, macOS, FreeBSD).
-- **ICMP echo**: `ccev_icmp_echo()` integrates ccicmp with the reactor for privilege-free ping on modern kernels.
-- **Signal handling**: Self-pipe trick with `ccev_default_loop()` + `ccev_signal_handle()` — async-signal-safe delivery.

@@ -48,12 +48,17 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
 
         timer->cb(timer->udata);
 
-        if (timer->mode == CCEV_TIMER_REPEAT) {
+        if (timer->active && timer->mode == CCEV_TIMER_REPEAT) {
+            /* REPEAT timer not deleted in callback — re-insert */
             ccheap_node_set(&timer->node, timeout, now_ms + timer->interval);
             ccheap_insert(&loop->timers, &timer->node);
-        } else {
+        } else if (timer->active) {
+            /* ONCE timer not deleted — free and decrement */
             ccev__free_fn(timer);
             loop->timer_count--;
+        } else {
+            /* Deleted inside callback — count already decremented by ccev_timer_del */
+            ccev__free_fn(timer);
         }
     }
 }

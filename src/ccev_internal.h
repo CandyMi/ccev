@@ -65,6 +65,10 @@ extern void  (*ccev__free_fn)(void*);
 #include "cclink.h"
 #include "cchashmap.h"
 
+/* Maximum connections to accept per EPOLLIN dispatch on a listener.
+ * Keeps the event loop responsive by not monopolising the iteration. */
+#define CCEV_MAX_ACCEPT_BATCH 128
+
 /*
  */
 

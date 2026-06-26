@@ -88,6 +88,7 @@ ccev_loop_t *ccev_loop_create(int max_events) {
         ccev__free_fn(loop);
         return NULL;
     }
+    ccsocket_set_nonblock(loop->wakefds[1], true);
 
     loop->wake_conn = NULL;
     ccev_conn_t *wake = ccev_conn_create(loop, loop->wakefds[0], NULL);
@@ -147,7 +148,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
 
     /* Free DNS pending entries and their waiter chains.
      * Walk every bucket chain and free each entry; then free the
-     * buckets array via cchashmap_destroy. */
+     * buckets array via cchashmap_destroy (ccev_dns_cache_t style). */
     if (loop->dns_pending.buckets) {
         for (size_t _i = 0; _i < loop->dns_pending.cap; _i++) {
             cchashmap_node_t *_n = loop->dns_pending.buckets[_i];
@@ -165,10 +166,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
                 ccev__free_fn(_p);
                 _n = _next;
             }
-            /* Null the bucket to prevent stale pointer after destroy */
-            loop->dns_pending.buckets[_i] = NULL;
         }
-        loop->dns_pending.size = 0;
     }
     cchashmap_destroy(&loop->dns_pending);
 
@@ -287,11 +285,11 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 
             if (fired_read) {
                 /* Listener — batch accept to reduce syscall overhead.
-                 * Accept at most 128 connections per EPOLLIN dispatch.
-                 * ccsocket_accept2 returns 0 on EAGAIN (no more). */
+                 * Accept at most CCEV_MAX_ACCEPT_BATCH connections per
+                 * EPOLLIN dispatch. ccsocket_accept2 returns 0 on EAGAIN. */
                 if (conn->type == CCEV_CONN_LISTENER) {
                     int count = 0;
-                    while (count < 128) {
+                    while (count < CCEV_MAX_ACCEPT_BATCH) {
                         char addr_buf[64];
                         uint16_t port = 0;
                         ccsocket_t afd = ccsocket_accept2(conn->fd, addr_buf, &port, 0);
@@ -483,6 +481,7 @@ int ccev_connect(ccev_loop_t *loop, const char *addr, uint16_t port,
 
 int ccev_wakeup(ccev_loop_t *loop) {
     if (!loop) return CCEV_ERR;
+    if (loop->wakefds[1] == (ccsocket_t)-1) return CCEV_ERR;
     char c = 1;
     return (ccsocket_send(loop->wakefds[1], &c, 1, NULL) == CC_OPCODE_OK)
            ? CCEV_OK : CCEV_ERR;
