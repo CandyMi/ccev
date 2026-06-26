@@ -209,11 +209,10 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 
             uint32_t fired = ev->events;
 
-            /* Wakeup pipe */
+            /* Wakeup pipe — drain and let step 5 re-arm */
             if (conn == loop->wake_conn) {
                 char buf[64];
                 while (ccsocket_recv(conn->fd, buf, sizeof(buf), NULL) == CC_OPCODE_OK) {}
-                ccev__conn_mod_internal(loop, conn, EPOLLIN);
                 continue;
             }
 
