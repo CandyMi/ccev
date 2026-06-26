@@ -378,8 +378,12 @@ TEST(listen_then_connect) {
                           listen_on_connect, loop);
     ASSERT(rc == CCEV_OK);
 
-    /* Run one iteration: accept should fire, which stops the loop */
-    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    /* Run until the accept fires and stops the loop.
+     * macOS arm64's non-blocking connect on loopback is asynchronous
+     * (EINPROGRESS), so a single RUN_ONCE poll would miss both the
+     * connect completion and the accept.  RUN_FOREVER + loop_stop
+     * inside the accept callback handles both sync and async paths. */
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
     ASSERT(listen_accept_flag  == 1);
     ASSERT(listen_accept_conn  != NULL);
