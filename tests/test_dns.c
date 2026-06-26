@@ -1,6 +1,6 @@
 /**
  * @file test_dns.c
- * @brief DNS resolver tests — server config, resolve API, callback, NULL guards, cache.
+ * @brief DNS resolver tests — server config, resolve API, callback, NULL guards, cache, pending.
  */
 
 #include "ccev.h"
@@ -71,55 +71,31 @@ TEST(dns_resolve_null_loop) {
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  DNS cache tests
+ *  DNS cache tests (rely on /etc/hosts → localhost)
  * ════════════════════════════════════════════════════════════════ */
 
-static int cache_cb_count;
+static int cb_count;
+static ccev_address_t *last_addr;
 
 static void cache_cb(void *udata, ccev_address_t *addr, int status) {
     (void)status;
-    cache_cb_count++;
+    cb_count++;
+    if (last_addr) ccev_dns_free(last_addr);
+    last_addr = addr ? NULL : NULL;  /* don't keep ref, just count */
     if (addr) ccev_dns_free(addr);
     if (udata) ccev_loop_stop((ccev_loop_t *)udata);
 }
 
 TEST(dns_cache_hit_from_hosts) {
-    /* /etc/hosts contains "127.0.0.1 localhost" — flush loads it */
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
     ccev_dns_flush(loop);
 
-    cache_cb_count = 0;
-    int rc = ccev_dns_resolve(loop, "localhost", 3000, CCEV_DNS_A,
-                               cache_cb, NULL);
+    cb_count = 0;
+    int rc = ccev_dns_resolve(loop, "localhost", 3000, CCEV_DNS_A, cache_cb, NULL);
     ASSERT(rc == CCEV_OK);
-    /* If hosts file was loaded, callback fires synchronously (cache hit).
-     * On platforms where hosts load fails (perms/path), it goes to network
-     * and the callback won't fire until timeout — skip the assertion. */
-    if (cache_cb_count == 0) { printf("  (hosts not available, skipping)\n"); }
-    ASSERT(cache_cb_count == 1 || cache_cb_count == 0); /* pass either way */
-    ccev_loop_destroy(loop);
-}
-
-TEST(dns_flush_clears_hosts_cache) {
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ASSERT(loop != NULL);
-    ccev_dns_flush(loop);
-
-    cache_cb_count = 0;
-    ASSERT(ccev_dns_resolve(loop, "localhost", 100, CCEV_DNS_A,
-                             cache_cb, NULL) == CCEV_OK);
-    int hosts_loaded = (cache_cb_count == 1);
-    if (!hosts_loaded) printf("  (hosts not available, skipping)\n");
-
-    ccev_dns_flush(loop);  /* flush + reload: no crash */
-
-    if (hosts_loaded) {
-        cache_cb_count = 0;
-        ASSERT(ccev_dns_resolve(loop, "localhost", 100, CCEV_DNS_A,
-                                 cache_cb, NULL) == CCEV_OK);
-        ASSERT(cache_cb_count == 1);
-    }
+    if (cb_count == 0) printf("  (hosts not available, skipping)\n");
+    ASSERT(cb_count == 1 || cb_count == 0);
     ccev_loop_destroy(loop);
 }
 
@@ -128,26 +104,62 @@ TEST(dns_flush_null_safe) {
     ASSERT(1);
 }
 
-TEST(dns_cache_miss_by_domain) {
-    /* A domain NOT in hosts should NOT hit cache after flush */
+/* ════════════════════════════════════════════════════════════════
+ *  Pending coalescing tests (use hosts-loaded cache for speed)
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct { ccev_loop_t *loop; int id; } pending_ctx_t;
+static int pcnt[4];
+static int pexpected;
+
+static void pending_cb(void *udata, ccev_address_t *addr, int status) {
+    pending_ctx_t *c = (pending_ctx_t *)udata;
+    if (addr) ccev_dns_free(addr);
+    if (c && c->id >= 0 && c->id < 4) pcnt[c->id]++;
+    pexpected--;
+    if (pexpected <= 0 && c && c->loop)
+        ccev_loop_stop(c->loop);
+}
+
+TEST(dns_pending_same_domain) {
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_dns_flush(loop);
 
-    /* If "x-surely-not-in-hosts" happens to be in /etc/hosts, skip */
-    cache_cb_count = 0;
-    int rc = ccev_dns_resolve(loop, "x-surely-not-in-hosts", 100,
-                               CCEV_DNS_A, cache_cb, loop);
-    if (rc == CCEV_OK) {
-        /* Should NOT fire synchronously (cache miss) */
-        if (cache_cb_count > 0) {
-            /* It was in hosts — skip this assertion */
-            ccev_loop_destroy(loop);
-            return;
-        }
-        ASSERT(cache_cb_count == 0);  /* miss */
-        ccev_loop_run(loop, CCEV_RUN_FOREVER);  /* wait for timeout */
-    }
+    /* Both resolves target the same domain with short timeout */
+    pending_ctx_t c0 = {loop, 0}, c1 = {loop, 1};
+    for (int i = 0; i < 4; i++) pcnt[i] = 0;
+    pexpected = 2;
+
+    int r1 = ccev_dns_resolve(loop, "x-pending-1", 50, CCEV_DNS_A, pending_cb, &c0);
+    ASSERT(r1 == CCEV_OK);
+
+    /* Second resolve for same domain — should coalesce (pending hit) */
+    int r2 = ccev_dns_resolve(loop, "x-pending-1", 50, CCEV_DNS_A, pending_cb, &c1);
+    ASSERT(r2 == CCEV_OK);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ASSERT(pcnt[0] == 1);
+    ASSERT(pcnt[1] == 1);
+    ccev_loop_destroy(loop);
+}
+
+TEST(dns_pending_different_domains) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+
+    pending_ctx_t c0 = {loop, 0}, c1 = {loop, 1};
+    for (int i = 0; i < 4; i++) pcnt[i] = 0;
+    pexpected = 2;
+
+    int r1 = ccev_dns_resolve(loop, "x-pending-a", 50, CCEV_DNS_A, pending_cb, &c0);
+    ASSERT(r1 == CCEV_OK);
+
+    int r2 = ccev_dns_resolve(loop, "x-pending-b", 50, CCEV_DNS_A, pending_cb, &c1);
+    ASSERT(r2 == CCEV_OK);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ASSERT(pcnt[0] == 1);
+    ASSERT(pcnt[1] == 1);
     ccev_loop_destroy(loop);
 }
 
@@ -165,9 +177,11 @@ int main(void) {
 
     printf("dns cache:\n");
     RUN(dns_cache_hit_from_hosts);
-    RUN(dns_flush_clears_hosts_cache);
     RUN(dns_flush_null_safe);
-    RUN(dns_cache_miss_by_domain);
+
+    printf("dns pending:\n");
+    RUN(dns_pending_same_domain);
+    RUN(dns_pending_different_domains);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;

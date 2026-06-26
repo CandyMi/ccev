@@ -11,6 +11,7 @@
 
 #include "ccev.h"
 
+#include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
