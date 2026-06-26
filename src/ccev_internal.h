@@ -121,8 +121,7 @@ struct ccev_conn_s {
  * ════════════════════════════════════════════════════════════════ */
 
 struct ccev_timer_s {
-    ccheap_node_t       node;           /**< Heap node                      */
-    size_t              heap_index;     /**< Position in ccheap for update  */
+    ccheap_node_t       node;           /**< Heap node (embed, not pointer) */
     ccev_loop_t        *loop;           /**< Owning event loop              */
     uint64_t            expiry;         /**< Absolute expiry (monotonic ms) */
     uint64_t            interval;       /**< Repeat interval (0 for ONCE)   */
@@ -131,8 +130,6 @@ struct ccev_timer_s {
     void               *udata;          /**< User data                      */
     bool                active;         /**< false = lazily deleted         */
 };
-
-/* Already defined above, before ccheap.h inclusion */
 
 /* ════════════════════════════════════════════════════════════════
  *  Write-buffer entry (linked via cclink)

@@ -34,6 +34,28 @@ cmake --build build --target echo_server
 ./build/examples/echo_server 8080
 ```
 
+## Quick Start: Signal Handler
+
+```c
+#include "ccev.h"
+#include <signal.h>
+#include <stdio.h>
+
+static void on_signal(void *udata, int signum) {
+    printf("signal %d received, shutting down\n", signum);
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+int main(void) {
+    ccev_loop_t *loop = ccev_default_loop();
+    ccev_signal_handle(SIGINT,  on_signal, loop);
+    ccev_signal_handle(SIGTERM, on_signal, loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ccev_loop_destroy(loop);
+    return 0;
+}
+```
+
 ## Quick Start: Echo Server
 
 ```c
@@ -129,7 +151,8 @@ ccev/
 │   ├── ccev_timer.c        # Timer subsystem (ccheap)
 │   ├── ccev_conn.c         # Connection I/O, buffering, sendfile
 │   ├── ccev_dns.c          # Asynchronous DNS resolver
-│   └── ccev_icmp.c         # ICMP echo (ping)
+│   ├── ccev_icmp.c         # ICMP echo (ping)
+│   └── ccev_signal.c       # Signal handling (self-pipe)
 ├── deps/                   # Git submodules
 │   ├── epoll/              # github.com/CandyMi/epoll
 │   ├── ccalg/              # github.com/CandyMi/ccalg
@@ -163,3 +186,4 @@ ccev/
 - **Deferred close**: Connections are moved to a closing list during dispatch; actual teardown happens after all callbacks return.
 - **sendfile**: `ccev_conn_sendfile()` delegates to kernel sendfile (zero-copy on Linux, macOS, FreeBSD).
 - **ICMP echo**: `ccev_icmp_echo()` integrates ccicmp with the reactor for privilege-free ping on modern kernels.
+- **Signal handling**: Self-pipe trick with `ccev_default_loop()` + `ccev_signal_handle()` — async-signal-safe delivery.

@@ -544,7 +544,7 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
 
 /** @brief Signal callback. Fired when a trapped signal arrives.
  *  @param udata   User-provided context pointer.
- *  @param signum  ccev signal number (CCEV_SIGINT, CCEV_SIGTERM, etc.). */
+ *  @param signum  OS signal number (e.g. SIGINT, SIGTERM from <signal.h>). */
 typedef void (*ccev_signal_cb)(void *udata, int signum);
 
 

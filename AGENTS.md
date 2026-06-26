@@ -33,6 +33,7 @@ CMake will print a clear error if they are missing.
 | src/ccev_conn.c | Connection I/O, buffering, sendfile |
 | src/ccev_dns.c | Async DNS resolver |
 | src/ccev_icmp.c | ICMP echo (ping) |
+| src/ccev_signal.c | Signal handling (self-pipe trick) |
 
 ## CI pipeline (`.github/workflows/ci.yml`)
 

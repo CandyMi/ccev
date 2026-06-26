@@ -300,3 +300,37 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
 ```
 
 Send an ICMP echo request (ping). Uses ccicmp internally — tries privilege-free SOCK_DGRAM+ICMP on Linux 3.0+ and macOS, falls back to SOCK_RAW (requires root).
+
+### Signal Handling
+
+#### `ccev_default_loop`
+
+```c
+ccev_loop_t *ccev_default_loop(void);
+```
+
+Get the default event-loop singleton. Only this loop may register signal handlers. Do NOT call `ccev_loop_destroy()` on the returned pointer.
+
+#### `ccev_signal_cb`
+
+```c
+typedef void (*ccev_signal_cb)(void *udata, int signum);
+```
+
+Signal delivery callback. `signum` is the raw OS signal number (e.g. `SIGINT`, `SIGTERM`).
+
+#### `ccev_signal_handle`
+
+```c
+int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata);
+```
+
+Register a signal handler on the default loop. The handler fires inside `ccev_loop_run()` via the self-pipe trick. Only one handler per signum — a second call overwrites the previous one. Returns `CCEV_ERR` if `signum` is out of range.
+
+#### `ccev_signal_ignore`
+
+```c
+int ccev_signal_ignore(int signum);
+```
+
+Restore a signal to its default disposition (`SIG_DFL`).

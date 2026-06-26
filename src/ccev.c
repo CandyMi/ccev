@@ -42,6 +42,8 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     if (!loop) return NULL;
 
     memset(loop, 0, sizeof(ccev_loop_t));
+    loop->wakefds[0] = loop->wakefds[1]     = (ccsocket_t)-1;
+    loop->signal_pipe[0] = loop->signal_pipe[1] = (ccsocket_t)-1;
     loop->realloc_fn = g_realloc_fn;
     loop->free_fn    = g_free_fn;
     loop->max_events = max_events > 0 ? max_events : 64;
@@ -93,7 +95,9 @@ ccev_loop_t *ccev_loop_create(int max_events) {
 void ccev_loop_destroy(ccev_loop_t *loop) {
     if (!loop) return;
 
-    /* Let the all_conns loop handle all fd and conn freeing */
+    /* Close write-ends not wrapped in conns */
+    if (loop->wakefds[1] != (ccsocket_t)-1) ccsocket_close(loop->wakefds[1]);
+    if (loop->signal_pipe[1] != (ccsocket_t)-1) ccsocket_close(loop->signal_pipe[1]);
 
 #if defined(__linux__) || defined(__ANDROID__)
     if (loop->timerfd >= 0) close(loop->timerfd);
