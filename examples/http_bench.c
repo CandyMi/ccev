@@ -22,44 +22,45 @@
                  "\r\n" \
                  "Hello, World!"
 
-static void on_sent(void *udata) {
-    /* Write complete — conn is ready for next request */
-}
-
-static void on_recv(void *udata) {
-    ccev_conn_t *conn = (ccev_conn_t *)udata;
+static void on_read(ccev_sock_t *sock, int events) {
+    (void)events;
+    ccsocket_t fd = ccev_sock_get_fd(sock);
     char buf[4096];
-    int n;
 
     for (;;) {
-        n = ccev_conn_recv(conn, buf, sizeof(buf), NULL, NULL);
-        if (n > 13) {
-            /* Got enough data — send response immediately */
-            ccev_conn_send(conn, RESPONSE, strlen(RESPONSE), on_sent, NULL);
+        int n;
+        ccsocket_stcode_t rc = ccsocket_recv(fd, buf, sizeof(buf), &n);
+        if (rc == CC_OPCODE_OK && n > 13) {
+            /* Got enough data — send response immediately.
+             * Keep-alive: return here and the ONESHOT re-arm will
+             * fire on_read again for the next request. */
+            int w;
+            ccsocket_send(fd, RESPONSE, strlen(RESPONSE), &w);
             return;
-        } else if (n == 0) {
-            ccev_conn_close(conn);
-            return;
-        } else if (n < 0) {
-            ccev_conn_close(conn);
+        } else if (rc == CC_OPCODE_OK && n > 0) {
+            /* Partial data — keep reading */
+            continue;
+        } else if (rc == CC_OPCODE_ERROR && n == 0) {
+            ccev_sock_close(sock);
             return;
         } else {
-            /* EAGAIN or error: return — epoll will re-arm and notify */
+            /* EAGAIN (CC_OPCODE_WAIT) or error — return.
+             * ONESHOT re-arm happens automatically. */
             return;
         }
     }
 }
 
 static void on_close(void *udata) {
-    ccev_conn_t *conn = (ccev_conn_t *)udata;
-    ccev_conn_close(conn);
+    ccev_sock_t *sock = (ccev_sock_t *)udata;
+    (void)sock;  /* already in closing — no further action */
 }
 
-static void on_accept(void *udata, ccev_conn_t *conn,
+static void on_accept(void *udata, ccev_sock_t *client,
                        const char *ip, int port) {
-    (void)udata;
-    ccev_conn_set_close_cb(conn, on_close, conn);
-    ccev_conn_recv(conn, NULL, 0, on_recv, conn);
+    (void)udata; (void)ip; (void)port;
+    ccev_sock_set_close_cb(client, on_close, client);
+    ccev_sock_read_start(client, on_read);
 }
 
 int main(int argc, char **argv) {
@@ -73,7 +74,7 @@ int main(int argc, char **argv) {
     ccev_loop_t *loop = ccev_loop_create(1024);
     if (!loop) { fprintf(stderr, "loop_create failed\n"); return 1; }
 
-    ccev_conn_t *l = ccev_listen(loop, host, port, backlog,
+    ccev_sock_t *l = ccev_listen(loop, host, port, backlog,
                                    CCEV_REUSEADDR, on_accept, NULL);
     if (!l) {
         fprintf(stderr, "listen failed on %s:%u\n", host, port);

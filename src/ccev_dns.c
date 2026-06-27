@@ -2,6 +2,9 @@
  * @file ccev_dns.c
  * @brief Asynchronous DNS resolver — race mode, with cache + hosts + pending.
  *
+ * @author CandyMi
+ * @license MIT
+ *
  * Wire-format encode/decode uses ccdns (deps/ccsocket/ccdns.h).
  * Queries for A and AAAA are sent in parallel using two ccdns_t contexts.
  * The first valid response wins.
@@ -299,7 +302,7 @@ static void pending_distribute(ccev_loop_t *loop, ccev_dns_pending_t *p,
 
 typedef struct ccev_dns_query_s {
     ccev_loop_t     *loop;
-    ccev_conn_t     *conn;
+    ccev_sock_t     *sock;
     ccev_timer_t    *timer;
     ccev_dns_cb      cb;
     void            *udata;
@@ -334,7 +337,7 @@ static void dns_collect_cb(void *udata, const ccdns_ans_t *ans) {
  *  Internal: send a DNS query to all servers
  * ════════════════════════════════════════════════════════════════ */
 
-static int ccev__dns_send_one(ccev_loop_t *loop, ccev_conn_t *conn,
+static int ccev__dns_send_one(ccev_loop_t *loop, ccsocket_t fd,
                                ccdns_t *ctx, const char *domain,
                                ccdns_type_t qtype) {
     unsigned char buf[512];
@@ -342,7 +345,7 @@ static int ccev__dns_send_one(ccev_loop_t *loop, ccev_conn_t *conn,
     if (qlen == 0) return CCEV_ERR;
     for (int i = 0; i < loop->dns.nservers; i++) {
         int sent = 0;
-        ccsocket_sendto(conn->fd, (const char*)buf, qlen,
+        ccsocket_sendto(fd, (const char*)buf, qlen,
                         loop->dns.servers[i].server,
                         loop->dns.servers[i].port, &sent);
     }
@@ -353,13 +356,14 @@ static int ccev__dns_send_one(ccev_loop_t *loop, ccev_conn_t *conn,
  *  DNS recv callback — distribute result to original cb + waiters
  * ════════════════════════════════════════════════════════════════ */
 
-static void dns_recv_cb(void *udata) {
-    ccev_dns_query_t *q = (ccev_dns_query_t *)udata;
+static void dns_recv_cb(ccev_sock_t *sock, int events) {
+    (void)events;
+    ccev_dns_query_t *q = (ccev_dns_query_t *)sock->udata;
     if (!q || q->finished) return;
 
     unsigned char buf[4096];
     int n;
-    ccsocket_stcode_t rc = ccsocket_recv(q->conn->fd, (char*)buf, sizeof(buf), &n);
+    ccsocket_stcode_t rc = ccsocket_recv(sock->fd, (char*)buf, sizeof(buf), &n);
     if (rc != CC_OPCODE_OK || n <= 0) return;
 
     q->finished = true;
@@ -400,7 +404,7 @@ static void dns_recv_cb(void *udata) {
     if (status == CCEV_OK)
         cache_insert(q->loop, q->domain, addr, col.best_ttl);
 
-    ccev__conn_schedule_close(q->loop, q->conn);
+    ccev__sock_schedule_close(q->loop, q->sock);
 }
 
 static void dns_timeout_cb(void *udata) {
@@ -426,7 +430,7 @@ static void dns_timeout_cb(void *udata) {
 
     /* 4. No cache write on timeout */
 
-    if (q->conn) ccev__conn_schedule_close(q->loop, q->conn);
+    if (q->sock) ccev__sock_schedule_close(q->loop, q->sock);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -495,19 +499,18 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     if (fd == (ccsocket_t)-1) { pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
     ccsocket_set_nonblock(fd, true);
 
-    ccev_conn_t *conn = ccev_conn_create(loop, fd, q);
-    if (!conn) { ccsocket_close(fd); pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
-    conn->type = CCEV_CONN_DNS; q->conn = conn;
-    conn->recv_cb = dns_recv_cb; conn->recv_udata = q;
-    ccev__conn_mod_internal(loop, conn, EPOLLIN);
+    ccev_sock_t *sock = ccev_sock_create(loop, fd, q);
+    if (!sock) { ccsocket_close(fd); pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
+    q->sock = sock;
+    ccev_sock_read_start(sock, dns_recv_cb);
 
     if (timeout_ms > 0)
         q->timer = ccev_timer_add(loop, timeout_ms, CCEV_TIMER_ONCE, dns_timeout_cb, q);
 
     if ((type & CCEV_DNS_A))
-        ccev__dns_send_one(loop, conn, &q->ctx_a, domain, CCDNS_A);
+        ccev__dns_send_one(loop, fd, &q->ctx_a, domain, CCDNS_A);
     if ((type & CCEV_DNS_AAAA))
-        ccev__dns_send_one(loop, conn, &q->ctx_aaaa, domain, CCDNS_AAAA);
+        ccev__dns_send_one(loop, fd, &q->ctx_aaaa, domain, CCDNS_AAAA);
 
     return CCEV_OK;
 }

@@ -2,6 +2,9 @@
  * @file ccev_signal.c
  * @brief Signal handling via self-pipe trick.
  *
+ * @author CandyMi
+ * @license MIT
+ *
  * Integrates with the default loop (ccev_default_loop()).  The signal
  * handler writes the signal number as a single byte to a self-pipe.
  * The dispatch callback reads the byte and fires the registered handler.
@@ -32,8 +35,8 @@ static void ccev__sig_handler(int signum) {
 
 /* ── Dispatch callback (fired from loop on pipe readable) ───── */
 
-static void ccev__signal_dispatch(void *udata) {
-    (void)udata;
+static void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
+    (void)sock; (void)events;
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
 
@@ -77,12 +80,9 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
     loop->signals[signum].udata = udata;
 
     /* Wire up the signal dispatch callback on first use */
-    if (loop->signal_conn)
-        loop->signal_conn->recv_cb = ccev__signal_dispatch;
-
-    /* Ensure signal dispatch conn is registered */
-    if (loop->signal_conn && !loop->signal_conn->closed)
-        ccev__conn_mod_internal(loop, loop->signal_conn, EPOLLIN);
+    /* Wire up signal dispatch via sock_read_start */
+    if (loop->signal_sock && !loop->signal_sock->closed)
+        ccev_sock_read_start(loop->signal_sock, ccev__signal_dispatch);
 
     /* Install OS signal handler */
     return ccev__sig_install(signum, ccev__sig_handler);

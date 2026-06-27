@@ -2,15 +2,21 @@
  * @file ccev.h
  * @brief ccev — A lightweight, cross-platform reactor event-driven library.
  *
+ * @author CandyMi
+ * @license MIT
+ *
  * ccev wraps epoll (Linux), kqueue (macOS/BSD), IOCP (Windows), and select
  * (other POSIX) behind a single, high-level C API. It provides:
  *   - A single-threaded event loop with automatic ONESHOT re-arm
- *   - TCP listen / TCP+UDP connect with async DNS resolution
+ *   - Two-level socket abstraction:
+ *       · ccev_sock_t    — raw fd + event callbacks (reactor primitive)
+ *       · ccev_stream_t  — buffered I/O + stream reader (protocol primitive)
+ *   - TCP listen / TCP+UDS connect with integrated async DNS resolution
  *   - Timer management backed by a D-ary heap (4-ary, O(log n))
  *   - Automatic write buffering with iovec scatter/gather
  *   - kernel sendfile (zero-copy on Linux/macOS/FreeBSD)
  *   - ICMP echo (ping) with privilege-free path on modern kernels
- *   - Stream reader: read-until-delimiter / read-N-bytes state machine
+ *   - Stream reader: read-until-delimiter / read-N-bytes with timeout
  *   - Replaceable memory allocator hooks
  *
  * License: MIT
@@ -30,48 +36,89 @@ extern "C" {
 #endif
 
 /* ════════════════════════════════════════════════════════════════
+ *  Constants
+ * ════════════════════════════════════════════════════════════════ */
+
+/** @brief Maximum host string length (covers IPv4, IPv6, UDS path, FQDN). */
+#define CCEV_DOMAIN_MAXLEN 256
+
+/* ════════════════════════════════════════════════════════════════
  *  Opaque handle types
  * ════════════════════════════════════════════════════════════════ */
 
 /** Opaque event-loop instance. Created by ccev_loop_create(). */
-typedef struct ccev_loop_s  ccev_loop_t;
+typedef struct ccev_loop_s    ccev_loop_t;
 
-/** Opaque connection / I/O handle.
- *  Created by ccev_listen(), ccev_conn_create(), or delivered via
- *  ccev_accept_cb / ccev_connect_cb. */
-typedef struct ccev_conn_s  ccev_conn_t;
+/** Low-level socket handle — fd + event callbacks.
+ *  Created by ccev_sock_create(), ccev_listen(), ccev_connect(),
+ *  or delivered via ccev_listen_cb. */
+typedef struct ccev_sock_s    ccev_sock_t;
+
+/** High-level stream handle — embeds ccev_sock_t, adds write
+ *  buffering and stream reader.  Created by ccev_stream_open(). */
+typedef struct ccev_stream_s  ccev_stream_t;
 
 /** Opaque timer handle. Created by ccev_timer_add(). */
-typedef struct ccev_timer_s ccev_timer_t;
+typedef struct ccev_timer_s   ccev_timer_t;
 
-/* ccev_address_t was removed — address is now passed as const char* on the stack. */
+/* ════════════════════════════════════════════════════════════════
+ *  Event flags (bitmask, passed to ccev_event_cb)
+ * ════════════════════════════════════════════════════════════════ */
 
+enum {
+    CCEV_EVENT_NONE  = 0,        /**< No event (initial state).             */
+    CCEV_EVENT_READ  = 1 << 0,   /**< Data available to read.               */
+    CCEV_EVENT_WRITE = 1 << 1,   /**< Socket ready for writing.             */
+    CCEV_EVENT_HUP   = 1 << 2,   /**< Peer closed / error (fast-path).
+                                  *   select backend may report this as
+                                  *   READ + recv()==0 instead.             */
+};
 
 /* ════════════════════════════════════════════════════════════════
  *  Callback type definitions
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Readable callback. Fired when new data is available on the fd.
- *  The user should call ccev_conn_recv() to consume data inside this callback.
- *  @param udata  User-provided context pointer. */
-typedef void (*ccev_recv_cb)(void *udata);
+/** @brief Low-level event callback. Fired when socket events occur.
+ *  @param sock   The socket that fired the event.
+ *  @param events Bitmask of CCEV_EVENT_* flags. */
+typedef void (*ccev_event_cb)(ccev_sock_t *sock, int events);
 
-/** @brief Write-complete callback. Fired when the internal write buffer has
- *  been fully flushed to the kernel.
+/** @brief Write-complete callback. Fired when the internal write buffer
+ *  has been fully flushed to the kernel.
  *  @param udata  User-provided context pointer. */
 typedef void (*ccev_send_cb)(void *udata);
 
-/** @brief Connection-closed / error callback. Fired when the peer closes
- *  the connection or an I/O error occurs. The fd is already dead by this
- *  point — the user must call ccev_conn_close() to release resources.
+/** @brief Socket-closed / error callback. Fired when the peer closes
+ *  the connection or an I/O error occurs.  The fd is already dead —
+ *  the user should release associated resources inside this callback.
  *  @param udata  User-provided context pointer. */
 typedef void (*ccev_close_cb)(void *udata);
 
+/** @brief Accept callback. Fired when a new TCP connection is accepted.
+ *  The returned @p client is already registered with the loop.
+ *  The user may call ccev_sock_read_start() or ccev_stream_open()
+ *  on it inside this callback.
+ *  @param udata  User-provided context pointer.
+ *  @param client The newly accepted client socket.
+ *  @param ip     Human-readable peer IP address (valid during callback).
+ *  @param port   Peer port number. */
+typedef void (*ccev_listen_cb)(void *udata, ccev_sock_t *client,
+                                const char *ip, int port);
+
+/** @brief Connect completion callback.
+ *  @param udata  User-provided context pointer.
+ *  @param sock   The connected socket (same pointer returned by
+ *                ccev_connect()), or NULL on immediate failure.
+ *  @param status CCEV_OK on success, CCEV_ERR on failure (timeout,
+ *                DNS error, connection refused, etc.).  On failure
+ *                the socket is already scheduled for deferred close. */
+typedef void (*ccev_connect_cb)(void *udata, ccev_sock_t *sock, int status);
+
 /** @brief Stream read completion callback.
  *  @param udata  User-provided context pointer.
- *  @param data   Full data segment (delimiter-inclusive for read_until).
+ *  @param data   Full data segment (delimiter-inclusive for readline).
  *                Valid only during the callback — do NOT free or store.
- *  @param len    Length of @p data.
+ *  @param len    Length of @p data (0 on error/closed).
  *  @param status CCEV_OK on success, CCEV_ERR on max_len exceeded or
  *                connection closed. */
 typedef void (*ccev_stream_cb)(void *udata, const char *data,
@@ -81,31 +128,23 @@ typedef void (*ccev_stream_cb)(void *udata, const char *data,
  *  @param udata  User-provided context pointer. */
 typedef void (*ccev_timer_cb)(void *udata);
 
-/** @brief Accept callback. Fired when a new TCP connection is accepted.
- *  The returned @p conn is already registered with the loop but has no
- *  callbacks bound yet. The user should set callbacks and optionally
- *  call ccev_conn_recv() to arm read events.
- *  @param udata  User-provided context pointer.
- *  @param conn   The newly accepted connection handle.
- *  @param ip     Human-readable peer IP address.
- *  @param port   Peer port number. */
-typedef void (*ccev_accept_cb)(void *udata, ccev_conn_t *conn,
-                                const char *ip, int port);
-
-/** @brief Connect completion callback.
- *  @param udata  User-provided context pointer.
- *  @param conn   The connected connection handle, or NULL on failure.
- *  @param status CCEV_OK on success, CCEV_ERR on failure. */
-typedef void (*ccev_connect_cb)(void *udata, ccev_conn_t *conn, int status);
-
 /** @brief DNS resolution callback.
- *
  *  @param udata    User-provided context pointer.
- *  @param address  Resolved address string (IP or UDS path), or "" on failure.
- *                  Points to a stack buffer — valid only during the callback.
- *                  The caller must NOT free or store this pointer.
- *  @param status   CCEV_OK if resolution succeeded, CCEV_ERR on timeout/error. */
+ *  @param address  Resolved address string, or "" on failure.
+ *                  Points to a stack buffer — valid only during callback.
+ *  @param status   CCEV_OK if resolution succeeded, CCEV_ERR on error. */
 typedef void (*ccev_dns_cb)(void *udata, const char *address, int status);
+
+/** @brief ICMP echo result callback.
+ *  @param udata  User-provided context pointer.
+ *  @param result ICMP echo result, or NULL on timeout/error. */
+typedef struct ccev_icmp_result_s ccev_icmp_result_t;
+typedef void (*ccev_icmp_cb)(void *udata, const ccev_icmp_result_t *result);
+
+/** @brief Signal handler callback.
+ *  @param udata  User-provided context pointer.
+ *  @param signum OS signal number. */
+typedef void (*ccev_signal_cb)(void *udata, int signum);
 
 /* ════════════════════════════════════════════════════════════════
  *  Enumerations & flag constants
@@ -129,22 +168,18 @@ typedef enum {
     CCEV_DNS_AAAA = 2, /**< AAAA record (IPv6).                          */
 } ccev_dns_type_t;
 
-/** @brief Flags for socket options (OR-able bitmask).
+/** @brief Socket option flags (OR-able bitmask).
  *  Used by ccev_listen(), ccev_connect(). */
 typedef unsigned int ccev_flag_t;
 enum {
     /** Enable SO_REUSEADDR — allow binding to a recently-used address. */
-    CCEV_REUSEADDR   = 1u << 8,
-    /** Enable SO_REUSEPORT — allow multiple processes to bind the same port. */
-    CCEV_REUSEPORT   = 1u << 9,
+    CCEV_REUSEADDR    = 1u << 8,
+    /** Enable SO_REUSEPORT — allow multiple processes to bind same port. */
+    CCEV_REUSEPORT    = 1u << 9,
     /** Enable TCP_NODELAY — disable Nagle's algorithm. */
-    CCEV_TCP_NODELAY = 1u << 10,
-    /** Enable TCP_DEFER_ACCEPT (Linux) / SO_ACCEPTFILTER (FreeBSD).
-     *  Delays accept() until the client has sent data, avoiding
-     *  wakeups from connection scans.  Only meaningful for listen(). */
+    CCEV_TCP_NODELAY  = 1u << 10,
+    /** Enable TCP_DEFER_ACCEPT (Linux) / SO_ACCEPTFILTER (FreeBSD). */
     CCEV_ACCEPT_DEFER = 1u << 11,
-    /** Use UDP (datagram) instead of TCP (stream) for connect(). */
-    CCEV_UDP          = 1u << 12,
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -161,11 +196,9 @@ enum {
 /** @brief Replace the internal memory allocator.
  *
  *  Must be called before any ccev_loop_create() call. Not thread-safe.
- *  If never called, the library uses the standard libc realloc/free.
  *
- *  @param realloc_fn  Pointer to a realloc-compatible function (or NULL
- *                     to keep the default).
- *  @param free_fn     Pointer to a free-compatible function (or NULL).
+ *  @param realloc_fn  Pointer to a realloc-compatible function.
+ *  @param free_fn     Pointer to a free-compatible function.
  */
 void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
                         void  (*free_fn)(void*));
@@ -175,292 +208,286 @@ void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
  * ════════════════════════════════════════════════════════════════ */
 
 /** @brief Create a new event-loop instance.
- *
- *  @param max_events  Maximum number of events epoll_wait() may return
- *                     per iteration. Typical values: 64–1024.
- *  @return Loop handle, or NULL on allocation failure.
- */
+ *  @param max_events  Max events epoll_wait() may return per iteration.
+ *  @return Loop handle, or NULL on allocation failure. */
 ccev_loop_t *ccev_loop_create(int max_events);
 
 /** @brief Get the default event-loop singleton (not thread-safe).
- *
- *  The first call creates the loop and sets up the self-pipe for signal
- *  delivery.  Only this loop may register signal handlers.  Do NOT call
- *  ccev_loop_destroy() on the returned pointer.
  *  @return Default loop handle. */
 ccev_loop_t *ccev_default_loop(void);
 
 /** @brief Destroy an event-loop instance.
- *
- *  Closes all remaining connections, timers, and frees resources.
- *  Do NOT call from inside a callback that belongs to this loop.
- *  @param loop  Loop handle (NULL-safe).
- */
+ *  @param loop  Loop handle (NULL-safe). */
 void ccev_loop_destroy(ccev_loop_t *loop);
 
 /** @brief Request the event loop to stop.
- *
- *  Thread-safe. Wakes the loop from epoll_wait() via an internal pipe.
- *  The loop will exit after the current iteration completes.
- *  @param loop  Loop handle.
- */
+ *  Thread-safe. Wakes the loop via an internal pipe.
+ *  @param loop  Loop handle. */
 void ccev_loop_stop(ccev_loop_t *loop);
 
 /** @brief Run the event loop.
- *
- *  @param mode  CCEV_RUN_ONCE — process ready events and return.
- *               CCEV_RUN_FOREVER — loop until ccev_loop_stop().
- *  @return In ONCE mode: number of events processed (0 on timeout).
- *          In FOREVER mode: does not return (call ccev_loop_stop()
- *          from a callback or another thread to exit).
- */
+ *  @param mode  CCEV_RUN_ONCE or CCEV_RUN_FOREVER.
+ *  @return In ONCE mode: events processed. In FOREVER: does not return. */
 int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode);
 
 /* ════════════════════════════════════════════════════════════════
- *  High-level TCP listen / TCP+UDP connect
+ *  Low-level socket API (ccev_sock_t)
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Start listening for TCP, UDP, or Unix domain socket connections.
- *
- *  Creates a TCP socket, binds to @p host:@p port, and starts accepting.
- *  The returned handle can be closed with ccev_conn_close() to stop
- *  listening.
- *
- *  @param loop       Event-loop handle.
- *  @param addr       Address ("0.0.0.0", "::", "/tmp/sock", etc.).
- *  @param port       Port number (0 for Unix domain sockets).
- *  @param backlog    listen(2) backlog size.
- *  @param flags      OR-ed ccev_flag_t socket options.
- *                   CCEV_ACCEPT_DEFER enables TCP_DEFER_ACCEPT / SO_ACCEPTFILTER.
- *  @param on_accept  Callback invoked for every new connection.
- *  @param udata      User pointer passed to on_accept.
- *  @return Connection handle (the listener itself), or NULL on failure.
- */
-ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
-                          int backlog, ccev_flag_t flags,
-                          ccev_accept_cb on_accept, void *udata);
-
-/** @brief Initiate an asynchronous connection (TCP or UDP).
- *
- *  For TCP: creates a non-blocking socket, begins connect(2), and
- *  returns immediately. The @p on_connect callback fires on completion.
- *
- *  For UDP (CCEV_UDP flag): creates a UDP socket and calls
- *  ccsocket_connect() to associate the remote address.
- *
- *  @param loop         Event-loop handle.
- *  @param addr         Target address (IP, hostname, or UDS path).
- *  @param port         Target port (0 for Unix domain sockets).
- *  @param timeout_ms   Connection timeout in ms. 0 = no timeout.
- *  @param flags        OR-ed ccev_flag_t (CCEV_UDP for datagram).
- *  @param on_connect   Callback on connect finish or failure.
- *  @param udata        User pointer passed to on_connect.
- *  @return CCEV_OK on successful initiation, CCEV_ERR on error.
- */
-int ccev_connect(ccev_loop_t *loop, const char *addr, uint16_t port,
-                 unsigned int timeout_ms, ccev_flag_t flags,
-                 ccev_connect_cb on_connect, void *udata);
-
-/* ════════════════════════════════════════════════════════════════
- *  External fd registration
- * ════════════════════════════════════════════════════════════════ */
-
-/** @brief Register an external file descriptor with the reactor.
+/** @brief Create a ccev_sock_t from an external file descriptor.
  *
  *  The caller is responsible for creating and configuring the fd.
- *  The returned handle has no callbacks bound and no events armed.
- *  Call ccev_conn_recv() with a non-NULL callback to arm read events.
+ *  The returned sock has no callbacks bound and no events armed.
+ *  Call ccev_sock_read_start() to arm read events.
  *
  *  @param loop  Event-loop handle.
- *  @param fd    The file descriptor to monitor (ccsocket_t).
- *  @param udata User pointer (retrievable via ccev_conn_get_udata()).
- *  @return Connection handle, or NULL on failure.
- */
-ccev_conn_t *ccev_conn_create(ccev_loop_t *loop, ccsocket_t fd, void *udata);
+ *  @param fd    File descriptor to monitor (ccsocket_t).
+ *  @param udata User pointer (retrievable via ccev_sock_get_udata()).
+ *  @return Socket handle, or NULL on failure. */
+ccev_sock_t *ccev_sock_create(ccev_loop_t *loop, ccsocket_t fd, void *udata);
 
-/* ════════════════════════════════════════════════════════════════
- *  Connection I/O
- * ════════════════════════════════════════════════════════════════ */
+/** @brief Start listening for TCP connections (or Unix domain sockets).
+ *
+ *  Creates a socket, binds to @p host:@p port, and starts accepting.
+ *  The returned sock can be closed with ccev_sock_close() to stop
+ *  listening.
+ *
+ *  @param loop      Event-loop handle.
+ *  @param addr      Address ("0.0.0.0", "::", "/tmp/sock", etc.).
+ *  @param port      Port (0 for Unix domain sockets).
+ *  @param backlog   listen(2) backlog size.
+ *  @param flags     OR-ed ccev_flag_t.
+ *  @param cb        Callback invoked for every new connection.
+ *  @param udata     User pointer passed to @p cb.
+ *  @return Listener socket, or NULL on failure. */
+ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
+                           int backlog, ccev_flag_t flags,
+                           ccev_listen_cb cb, void *udata);
 
-/** @brief Read data from a connection.
+/** @brief Initiate an asynchronous connection (TCP or UDS).
  *
- *  Three behaviours depending on the arguments:
+ *  For hostnames the library resolves DNS internally, then begins
+ *  non-blocking connect(2).  The total timeout spans both DNS and
+ *  TCP connect phases.
  *
- *  1. (buf!=NULL, len>0, cb!=NULL)
- *     Attempt a non-blocking recv() immediately. If data is available,
- *     it is read into @p buf and @p cb is called synchronously with
- *     the read data. Returns the number of bytes read. If recv() would
- *     block (EWOULDBLOCK), registers CCEV_READ (internal ONESHOT) and
- *     returns CCEV_OK — @p cb will fire later when data arrives.
+ *  The returned sock has fd == -1 until DNS+connect completes.
+ *  Do NOT attempt I/O on it before the callback fires.
  *
- *  2. (buf!=NULL, len>0, cb=NULL)
- *     Pure synchronous read. Returns bytes read, 0 on EOF, CCEV_ERR
- *     on error or EWOULDBLOCK. Does NOT register any epoll event.
- *
- *  3. (buf=NULL, len=0, cb!=NULL)
- *     Register/update the recv callback and arm CCEV_READ. Does NOT
- *     attempt an immediate read. Returns CCEV_OK.
- *
- *  4. (buf=NULL, len=0, cb=NULL, udata=NULL)
- *     Clear the recv callback and disarm CCEV_READ. Returns CCEV_OK.
- *
- *  Once the fd is closed (CCEV_ERR from any I/O call), only
- *  ccev_conn_close() is valid.
- *
- *  @param conn  Connection handle.
- *  @param buf   Read buffer, or NULL for callback-only mode.
- *  @param len   Buffer capacity, or 0.
- *  @param cb    Readable callback. Non-NULL updates the internal recv_cb.
- *  @param udata User pointer for the callback.
- *  @return Bytes read (>0), CCEV_OK (0 = no data yet, re-armed),
- *          0 (EOF), or CCEV_ERR on error/closed.
- */
-int ccev_conn_recv(ccev_conn_t *conn, void *buf, size_t len,
-                    ccev_recv_cb cb, void *udata);
+ *  @param loop         Event-loop handle.
+ *  @param host         Target address/domain (or UDS path).
+ *  @param port         Target port (0 for Unix domain sockets).
+ *  @param timeout_ms   Total timeout in ms (0 = no timeout).
+ *  @param flags        OR-ed ccev_flag_t.
+ *  @param cb           Callback on connect completion or failure.
+ *  @param udata        User pointer passed to @p cb.
+ *  @return Socket handle, or NULL on immediate failure (OOM). */
+ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
+                            unsigned int timeout_ms, ccev_flag_t flags,
+                            ccev_connect_cb cb, void *udata);
 
-/** @brief Send data asynchronously.
+/** @brief Arm read events and optionally set the read event callback.
  *
- *  Attempts a non-blocking write first. On EAGAIN the data is buffered
- *  internally and EPOLLOUT is armed automatically. The @p cb fires
- *  when the entire write buffer has been flushed.
+ *  When @p cb is non-NULL, it replaces the current read callback and
+ *  registers CCEV_EVENT_READ with the reactor.  When @p cb is NULL,
+ *  the read callback is unchanged but the event is still armed.
  *
- *  If the write succeeds immediately, @p cb is called synchronously in
- *  the same call. The @p cb parameter is required to exist (non-NULL)
- *  when you want to be notified of write completion — pass NULL if you
- *  don't need a callback for this particular send.
- *
- *  @param conn  Connection handle.
- *  @param data  Data to send.
- *  @param len   Data length.
- *  @param cb    Write-complete callback. Passing a non-NULL value
- *               updates the internal send_cb. NULL preserves the
- *               existing callback.
- *  @param udata User pointer for the callback.
- *  @return @p len (the full request is always accepted — remaining data is
- *          buffered internally and flushed asynchronously), or CCEV_ERR
- *          on closed fd / OOM.
- */
-int ccev_conn_send(ccev_conn_t *conn, const void *data, size_t len,
-                    ccev_send_cb cb, void *udata);
+ *  @param sock  Socket handle.
+ *  @param cb    Read event callback, or NULL to keep existing.
+ *  @return CCEV_OK or CCEV_ERR (closed/invalid). */
+int ccev_sock_read_start(ccev_sock_t *sock, ccev_event_cb cb);
 
-/** @brief Send data with batching control (bulk-transfer friendly).
- *
- *  @param conn  Connection handle.
- *  @param data  Data to send.
- *  @param len   Data length.
- *  @param done  false = buffer only (no immediate flush attempt).
- *               true  = flush the accumulated buffer via ccsocket_sendv()
- *                       and write the remaining data. @p cb fires when
- *                       everything is sent.
- *  @param cb    Write-complete callback. Only the last non-NULL @p cb
- *               across a batch of sendall(...,done=false) calls will
- *               fire when the final flush succeeds.
- *  @param udata User pointer for the callback.
- *  @return Bytes accepted, or CCEV_ERR.
- */
-int ccev_conn_sendall(ccev_conn_t *conn, const void *data, size_t len,
-                       bool done, ccev_send_cb cb, void *udata);
+/** @brief Disarm read events. The read callback is preserved but
+ *  will not fire until ccev_sock_read_start() is called again.
+ *  @param sock  Socket handle.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_sock_read_stop(ccev_sock_t *sock);
 
-/** @brief Send a file by path using kernel sendfile (zero-copy when supported).
+/** @brief Arm write events and optionally set the write event callback.
  *
- *  Opens the file at @p path, sends its entire content, then closes
- *  it.  Falls back to read+send on platforms without kernel sendfile
- *  support.
+ *  Most users should use ccev_stream_write() instead — this low-level
+ *  API is for custom protocol implementations.
  *
- *  @param conn    Connection handle.
- *  @param path    File path to send.  The file is opened read-only,
- *                 sent, and closed — the library manages all fd lifecycle.
- *  @param cb      Write-complete callback. NULL preserves existing.
- *  @param udata   User pointer for the callback.
- *  @return CCEV_OK on success, CCEV_ERR on failure (file not found,
- *          read error, or connection closed).
- */
-int ccev_conn_sendfile(ccev_conn_t *conn, const char *path,
-                        ccev_send_cb cb, void *udata);
+ *  @param sock  Socket handle.
+ *  @param cb    Write event callback, or NULL to keep existing.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_sock_write_start(ccev_sock_t *sock, ccev_event_cb cb);
 
-/** @brief Shutdown and close a connection.
- *
- *  Performs a platform-appropriate shutdown of the socket, marks the
- *  handle as closed (all subsequent I/O returns CCEV_ERR), and schedules
- *  the close_cb for invocation. The user should call this from within
- *  the close_cb to complete resource teardown.
- *
- *  If the connection was created by ccev_listen() (a listener), calling
- *  this stops listening and closes the listener socket.
- *
- *  @param conn  Connection handle.
- *  @return CCEV_OK or CCEV_ERR.
- */
-int ccev_conn_close(ccev_conn_t *conn);
+/** @brief Disarm write events.
+ *  @param sock  Socket handle.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_sock_write_stop(ccev_sock_t *sock);
 
 /** @brief Set the close/error callback.
- *
- *  Fired when the peer closes the connection or an I/O error is detected
- *  (EPOLLERR / EPOLLHUP on the epoll backend). Inside this callback the
- *  user should call ccev_conn_close() to release the handle.
- *
- *  @param conn  Connection handle.
+ *  Fired when the peer closes the connection or an I/O error occurs.
+ *  @param sock  Socket handle.
  *  @param cb    Close callback.
- *  @param udata User pointer for the callback.
- */
-void ccev_conn_set_close_cb(ccev_conn_t *conn, ccev_close_cb cb, void *udata);
+ *  @param udata User pointer for the callback. */
+void ccev_sock_set_close_cb(ccev_sock_t *sock, ccev_close_cb cb, void *udata);
+
+/** @brief Close and release a socket.
+ *
+ *  The socket is removed from epoll and scheduled for deferred close.
+ *  The close_cb (if set) fires before memory is freed.
+ *
+ *  @param sock  Socket handle.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_sock_close(ccev_sock_t *sock);
+
+/** @brief Get the underlying file descriptor (diagnostic use only). */
+ccsocket_t ccev_sock_get_fd(const ccev_sock_t *sock);
+
+/** @brief Get the user-data pointer. */
+void  *ccev_sock_get_udata(const ccev_sock_t *sock);
+
+/** @brief Set the user-data pointer. */
+void   ccev_sock_set_udata(ccev_sock_t *sock, void *udata);
+
+/** @brief Get the number of active sockets.
+ *  @param loop  Event-loop handle.
+ *  @return Socket count. */
+int ccev_sock_count(ccev_loop_t *loop);
 
 /* ════════════════════════════════════════════════════════════════
- *  Stream reader API (read-until / read-N-byte)
+ *  High-level stream API (ccev_stream_t)
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Read data until @p delim is found (delimiter inclusive).
+/** @brief Upgrade a ccev_sock_t to a ccev_stream_t.
  *
- *  Once the delimiter (or @p max_len bytes) is received, the callback
- *  fires exactly once and the internal reader is deactivated. The user
- *  must call ccev_conn_read_until() again for subsequent reads.
+ *  Internally this is a realloc — the returned stream address is the
+ *  same as the passed sock address.  After this call, use the
+ *  returned stream pointer; the original sock pointer is still valid
+ *  (same address) but should be treated as a stream.
  *
- *  Only one stream reader may be active at a time — calling this while
- *  another reader is active will cancel the previous one.
+ *  The stream takes ownership of the sock's event callbacks internally,
+ *  routing them through buffered I/O and the stream reader.
  *
- *  @param conn    Connection handle.
- *  @param delim   Delimiter byte to search for (e.g. '\\n').
- *  @param max_len Maximum bytes to accumulate before yielding CCEV_ERR.
- *  @param cb      Completion callback.
- *  @param udata   User pointer for @p cb.
- *  @return CCEV_OK on success, CCEV_ERR on NULL/invalid params.
- */
-int ccev_conn_read_until(ccev_conn_t *conn, char delim, size_t max_len,
-                          ccev_stream_cb cb, void *udata);
+ *  @param sock  A live socket (not in closing state).
+ *  @return Stream handle, or NULL on failure (OOM / closed sock). */
+ccev_stream_t *ccev_stream_open(ccev_sock_t *sock);
+
+/** @brief Close a stream and release all resources.
+ *
+ *  Flushes any pending write data, closes the underlying socket,
+ *  frees write buffers and the stream reader.  Safe to call on
+ *  an already-closed stream (no-op).
+ *
+ *  @param st  Stream handle.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_close(ccev_stream_t *st);
+
+/* ── Write operations ── */
+
+/** @brief Write data asynchronously.
+ *
+ *  Data is appended to the internal write buffer and sent
+ *  non-blocking.  If the kernel buffer is full, the remainder
+ *  is queued and EPOLLOUT is armed automatically.
+ *
+ *  Each write's callback fires once when that specific buffer chunk
+ *  has been fully flushed to the kernel.  The callback is bound to
+ *  the buffer entry, so multiple writes with distinct callbacks
+ *  each trigger independently.
+ *
+ *  @param st    Stream handle.
+ *  @param data  Data to write (may be freed after return).
+ *  @param len   Data length.
+ *  @param cb    Per-buffer write-complete callback, or NULL.
+ *  @param udata User pointer for @p cb.
+ *  @return @p len (always accepted) or CCEV_ERR (OOM/closed). */
+int ccev_stream_write(ccev_stream_t *st, const void *data, size_t len,
+                       ccev_send_cb cb, void *udata);
+
+/** @brief Batch write with explicit flush control.
+ *
+ *  @param st    Stream handle.
+ *  @param data  Data to write (may be NULL when done=true for flush-only).
+ *  @param len   Data length.
+ *  @param done  false = buffer only (no send attempt).
+ *               true  = buffer then trigger send.
+ *  @param cb    Per-buffer write-complete callback, or NULL.
+ *  @param udata User pointer for @p cb.
+ *  @return Bytes accepted, or CCEV_ERR. */
+int ccev_stream_write_batch(ccev_stream_t *st, const void *data, size_t len,
+                             bool done, ccev_send_cb cb, void *udata);
+
+/** @brief Flush the write buffer — send all queued data.
+ *  Equivalent to ccev_stream_write_batch(st, NULL, 0, true, NULL, NULL).
+ *  @param st  Stream handle.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_flush(ccev_stream_t *st);
+
+/** @brief Send a file using kernel sendfile (zero-copy).
+ *  @param st    Stream handle.
+ *  @param path  File path to send.
+ *  @param cb    Completion callback, or NULL.
+ *  @param udata User pointer for @p cb.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_sendfile(ccev_stream_t *st, const char *path,
+                          ccev_send_cb cb, void *udata);
+
+/** @brief Set the global write-drain callback.
+ *
+ *  Fires once when the entire write buffer has been flushed to the
+ *  kernel (wbuf_len reaches 0).  Unlike per-buffer callbacks, this
+ *  is a single notification independent of how many write() calls
+ *  were batched.  Useful for flow control.
+ *
+ *  @param st    Stream handle.
+ *  @param cb    Callback (NULL to clear).
+ *  @param udata User pointer. */
+void ccev_stream_set_send_cb(ccev_stream_t *st, ccev_send_cb cb, void *udata);
+
+/** @brief Get the number of bytes pending in the write buffer.
+ *  @param st  Stream handle.
+ *  @return Pending bytes. */
+size_t ccev_stream_wbuf_len(const ccev_stream_t *st);
+
+/* ── Read operations ── */
+
+/** @brief Read until @p delim is found (delimiter inclusive).
+ *
+ *  When the delimiter (or @p maxlen bytes) is received, the callback
+ *  fires exactly once.  Call again for subsequent reads.
+ *
+ *  Only one stream reader may be active at a time — calling this
+ *  while another reader is active cancels the previous one.
+ *
+ *  @param st         Stream handle.
+ *  @param delim      Delimiter byte to search for (e.g. '\\n').
+ *  @param maxlen     Maximum bytes before yielding CCEV_ERR.
+ *  @param timeout_ms Read timeout in ms (0 = no timeout).
+ *  @param cb         Completion callback.
+ *  @param udata      User pointer for @p cb.
+ *  @return CCEV_OK or CCEV_ERR on invalid params. */
+int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
+                          int timeout_ms, ccev_stream_cb cb, void *udata);
 
 /** @brief Read exactly @p n bytes.
  *
- *  Once @p n bytes have been accumulated the callback fires exactly
- *  once.  Same single-reader semantics as ccev_conn_read_until().
+ *  Once @p n bytes have been accumulated the callback fires once.
+ *  Same single-reader semantics as ccev_stream_readline().
  *
- *  @param conn  Connection handle.
- *  @param n     Exact number of bytes to read (must be > 0).
- *  @param cb    Completion callback.
- *  @param udata User pointer for @p cb.
- *  @return CCEV_OK on success, CCEV_ERR on NULL/invalid params.
- */
-int ccev_conn_read_n(ccev_conn_t *conn, size_t n,
-                      ccev_stream_cb cb, void *udata);
+ *  @param st         Stream handle.
+ *  @param n          Exact number of bytes to read (> 0).
+ *  @param timeout_ms Read timeout in ms (0 = no timeout).
+ *  @param cb         Completion callback.
+ *  @param udata      User pointer for @p cb.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_readnum(ccev_stream_t *st, size_t n,
+                          int timeout_ms, ccev_stream_cb cb, void *udata);
 
 /** @brief Cancel the active stream reader (if any).
- *
- *  Restores the original recv callback.  Any buffered data is freed.
+ *  Restores the underlying sock's read callback.
  *  Safe to call when no reader is active.
- *
- *  @param conn  Connection handle.
- */
-void ccev_conn_read_stop(ccev_conn_t *conn);
+ *  @param st  Stream handle. */
+void ccev_stream_read_stop(ccev_stream_t *st);
 
-/* ════════════════════════════════════════════════════════════════
- *  Connection metadata & diagnostics
- * ════════════════════════════════════════════════════════════════ */
-
-/** @brief Get the user-data pointer. */
-void  *ccev_conn_get_udata(ccev_conn_t *conn);
-/** @brief Set the user-data pointer. */
-void   ccev_conn_set_udata(ccev_conn_t *conn, void *udata);
-/** @brief Get the underlying file descriptor (diagnostic use only). */
-ccsocket_t ccev_conn_fd(ccev_conn_t *conn);
+/** @brief Set the close callback on a stream.
+ *  Delegates to ccev_sock_set_close_cb() internally.
+ *  @param st     Stream handle.
+ *  @param cb     Close callback.
+ *  @param udata  User pointer. */
+void ccev_stream_set_close_cb(ccev_stream_t *st, ccev_close_cb cb, void *udata);
 
 /* ════════════════════════════════════════════════════════════════
  *  Timer subsystem
@@ -468,173 +495,97 @@ ccsocket_t ccev_conn_fd(ccev_conn_t *conn);
 
 /** @brief Add a timer.
  *
- *  The timer is managed by an internal D-ary heap (4-ary, O(log n)).
- *  When @p delay_ms elapses, @p cb is called. REPEAT timers are
- *  automatically re-inserted with expiry = now + interval.
+ *  Internal D-ary heap (4-ary, O(log n)).  REPEAT timers are
+ *  automatically re-inserted after firing.
  *
  *  @param loop      Event-loop handle.
  *  @param delay_ms  Delay in milliseconds.
  *  @param mode      CCEV_TIMER_ONCE or CCEV_TIMER_REPEAT.
  *  @param cb        Timer expiry callback.
- *  @param udata     User pointer for the callback.
- *  @return Timer handle, or NULL on failure.
- */
+ *  @param udata     User pointer.
+ *  @return Timer handle, or NULL on failure. */
 ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,
                                ccev_timer_mode_t mode,
                                ccev_timer_cb cb, void *udata);
 
-/** @brief Delete a timer.
- *
- *  The timer is lazily removed (marked inactive) and freed when the
- *  heap naturally reaches it. Safe to call from inside the timer's
- *  own callback.
- *
- *  @param loop   Event-loop handle.
- *  @param timer  Timer handle returned by ccev_timer_add().
- *  @return CCEV_OK or CCEV_ERR (if timer was already inactive).
- */
+/** @brief Delete a timer (lazy — marks inactive, freed when reached). */
 int ccev_timer_del(ccev_loop_t *loop, ccev_timer_t *timer);
 
-/** @brief Reset (re-schedule) a timer.
- *
- *  Changes the timer's expiry to now + @p delay_ms. Uses
- *  ccheap_update() with an embedded index field for O(log n)
- *  repositioning. If the timer has already expired but hasn't been
- *  freed yet, it is re-inserted into the heap.
- *
- *  @param loop      Event-loop handle.
- *  @param timer     Timer handle.
- *  @param delay_ms  New delay from now in milliseconds.
- *  @return CCEV_OK or CCEV_ERR.
- */
+/** @brief Reset a timer to a new delay from now. */
 int ccev_timer_reset(ccev_loop_t *loop, ccev_timer_t *timer,
                        uint64_t delay_ms);
+
+/** @brief Get the number of active timers. */
+int ccev_timer_count(ccev_loop_t *loop);
 
 /* ════════════════════════════════════════════════════════════════
  *  Asynchronous DNS resolver
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief DNS server address and port pair.
- *
- *  Passed as an array to ccev_dns_set_server(). The library makes
- *  internal copies of the @p server string so the caller may reuse
- *  or free the pointer immediately after the call.
- */
+/** DNS server configuration entry. */
 typedef struct ccev_dns_server {
-    const char *server;   /**< Server IP (dot-decimal or IPv6 string).      */
-    uint16_t    port;     /**< Server port (typically 53).                  */
+    const char *server;   /**< Server IP string. */
+    uint16_t    port;     /**< Server port (typically 53). */
 } ccev_dns_server_t;
 
-/** Maximum number of DNS servers that can be configured. */
 #define CCEV_DNS_MAX_SERVERS 4
 
-/** @brief Set DNS server addresses for resolution.
- *
- *  Each server may specify an independent port.  The library makes
- *  internal copies of all server strings.
- *
- *  Default: {{"1.1.1.1", 53}}.
- *  Must be called before any ccev_dns_resolve() call (not thread-safe).
- *
- *  @param servers  Array of ccev_dns_server_t structs.
- *  @param n        Number of servers in the array (max 4).
- *  @return CCEV_OK on success, CCEV_ERR on NULL/invalid input/OOM.
- */
+/** @brief Set DNS server addresses.
+ *  Default: {{"1.1.1.1", 53}}. */
 int ccev_dns_set_server(ccev_loop_t *loop,
                          const ccev_dns_server_t servers[], int n);
 
-/** @brief Resolve a domain name asynchronously.
+/** @brief Resolve a domain asynchronously.
  *
- *  If @p domain is already an IP address or a Unix socket path,
- *  the callback fires immediately (synchronously) with the string
- *  as-is.  Otherwise, sends UDP DNS queries to all configured
- *  servers simultaneously.  If both CCEV_DNS_A and CCEV_DNS_AAAA
- *  are specified, both queries are issued and the first valid
- *  response wins.
- *
- *  Cache is checked before issuing a network query, and the result
- *  is stored in the cache for subsequent lookups.
+ *  If @p domain is already an IP or UDS path, the callback fires
+ *  immediately.  Otherwise sends UDP DNS queries to all configured
+ *  servers.
  *
  *  @param loop        Event-loop handle.
- *  @param domain      Domain name, IP address, or UDS path to resolve.
- *  @param timeout_ms  Per-query timeout in ms. 0 = no timeout.
- *  @param type        CCEV_DNS_A, CCEV_DNS_AAAA, or bitwise OR for both.
- *  @param cb          Completion callback.  The @p address parameter
- *                     contains the resolved IP string on success, or
- *                     "" on timeout / error.  Do NOT free or store
- *                     the pointer — it is valid only during the call.
- *  @param udata       User pointer for the callback.
- *  @return CCEV_OK on successful initiation, CCEV_ERR on error.
- */
+ *  @param domain      Domain name, IP, or UDS path.
+ *  @param timeout_ms  Per-query timeout in ms (0 = no timeout).
+ *  @param type        CCEV_DNS_A, CCEV_DNS_AAAA, or bitwise OR.
+ *  @param cb          Completion callback.
+ *  @param udata       User pointer.
+ *  @return CCEV_OK or CCEV_ERR. */
 int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
                       unsigned int timeout_ms, ccev_dns_type_t type,
                       ccev_dns_cb cb, void *udata);
 
-/** @brief Flush the DNS cache and reload from the OS hosts file.
- *
- *  Clears all cached DNS entries (both hosts-file and network-resolved)
- *  and re-reads /etc/hosts (or the Windows equivalent) to pre-populate
- *  the cache with static entries.  After calling this, the next
- *  ccev_dns_resolve() for any domain will perform a fresh network query
- *  (unless the domain is listed in hosts).
- *
- *  Called automatically during ccev_default_loop() initialisation.
- *  Safe to call at any time from within the reactor thread.
- *
- *  @param loop  Event-loop handle (NULL-safe). */
+/** @brief Flush the DNS cache and reload from OS hosts file. */
 void ccev_dns_flush(ccev_loop_t *loop);
 
 /* ════════════════════════════════════════════════════════════════
  *  Utilities
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Wake up the event loop from another thread.
- *
- *  Writes to an internal pipe to interrupt epoll_wait(). The loop
- *  will process pending events and re-enter epoll_wait().
- *  @param loop  Event-loop handle.
- *  @return CCEV_OK or CCEV_ERR.
- */
+/** @brief Wake up the event loop from another thread. */
 int ccev_wakeup(ccev_loop_t *loop);
 
-/** @brief Get the number of active connections.
- *  @param loop  Event-loop handle.
- *  @return Connection count. */
-int ccev_conn_count(ccev_loop_t *loop);
-
-/** @brief Get the number of active timers.
- *  @param loop  Event-loop handle.
- *  @return Timer count. */
-int ccev_timer_count(ccev_loop_t *loop);
-
 /* ════════════════════════════════════════════════════════════════
- *  ICMP echo (ping) — requires CAP_NET_RAW / root on most systems
+ *  ICMP echo (ping)
  * ════════════════════════════════════════════════════════════════ */
 
 /** ICMP echo result. */
-typedef struct ccev_icmp_result_s {
+struct ccev_icmp_result_s {
     char     ip[64];         /**< Target IP string. */
     double   rtt_ms;         /**< Round-trip time in milliseconds. */
-    size_t   payload_len;    /**< Bytes echoed back. */
-    int      ttl;            /**< Time-to-live from the response packet. */
-} ccev_icmp_result_t;
-
-/** ICMP echo completion callback. */
-typedef void (*ccev_icmp_cb)(void *udata, ccev_icmp_result_t *result);
+    size_t   payload_len;    /**< Echo payload length. */
+    int      ttl;            /**< Time-to-live from ICMP reply header. */
+};
 
 /** @brief Send an ICMP echo request (ping).
  *
-  *  Uses ccicmp internally. Requires sufficient privileges
-  *  (CAP_NET_RAW on Linux, root on most systems). On Linux 3.0+
- *  and macOS, a privilege-free SOCK_DGRAM+ICMP socket is tried first.
+ *  Hostnames are resolved via the internal async DNS resolver.
+ *  Requires CAP_NET_RAW / root on most systems; some kernels
+ *  support a privilege-free SOCK_DGRAM+ICMP path.
  *
- *  @param loop       Event-loop handle.
- *  @param host       Target hostname or IP address.
- *  @param timeout_ms Per-request timeout in ms. 0 = no timeout (infinite).
- *  @param cb         Completion callback. @p result is NULL on failure/timeout.
- *  @param udata      User pointer passed to @p cb.
- *  @return CCEV_OK on successful initiation, CCEV_ERR on error.
- */
+ *  @param loop        Event-loop handle.
+ *  @param host        Target IP or hostname.
+ *  @param timeout_ms  Timeout in ms (0 = no timeout).
+ *  @param cb          Result callback (NULL on timeout/error).
+ *  @param udata       User pointer.
+ *  @return CCEV_OK or CCEV_ERR. */
 int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
                     unsigned int timeout_ms,
                     ccev_icmp_cb cb, void *udata);
@@ -643,29 +594,14 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
  *  Signal handling (default loop only)
  * ════════════════════════════════════════════════════════════════ */
 
-/** @brief Signal callback. Fired when a trapped signal arrives.
- *  @param udata   User-provided context pointer.
- *  @param signum  OS signal number (e.g. SIGINT, SIGTERM from <signal.h>). */
-typedef void (*ccev_signal_cb)(void *udata, int signum);
-
-
-
 /** @brief Register a signal handler on the default loop.
- *
- *  The handler fires inside ccev_loop_run() via the self-pipe trick —
- *  signal-safety is guaranteed.  Only one handler per signum; a second
- *  call overwrites the previous one (the old callback is discarded).
- *
- *  @param signum  OS signal number (e.g. SIGINT, SIGTERM — from <signal.h>).
- *  @param cb      Callback to invoke when the signal arrives.
- *  @param udata   User pointer passed to @p cb.
- *  @return CCEV_OK on success, CCEV_ERR if the signal is unsupported
- *          on this platform. */
+ *  @param signum  OS signal number.
+ *  @param cb      Handler callback.
+ *  @param udata   User pointer.
+ *  @return CCEV_OK or CCEV_ERR. */
 int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata);
 
-/** @brief Restore a signal to its default disposition.
- *  @param signum  ccev signal number.
- *  @return CCEV_OK or CCEV_ERR. */
+/** @brief Restore a signal to its default disposition. */
 int ccev_signal_ignore(int signum);
 
 #ifdef __cplusplus

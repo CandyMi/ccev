@@ -2,6 +2,9 @@
  * @file ccev_icmp.c
  * @brief ICMP echo (ping) support using ccicmp.
  *
+ * @author CandyMi
+ * @license MIT
+ *
  * Integrates ccicmp with the ccev reactor. Sends an ICMP echo request
  * and delivers the result via a reactor-safe callback.
  *
@@ -19,7 +22,6 @@
 
 #include "ccev_internal.h"
 #include "ccicmp.h"
-#include <string.h>
 
 /* Internal ping state — allocated per ccev_icmp_echo() call */
 typedef struct {
@@ -29,7 +31,7 @@ typedef struct {
     ccev_timer_t   *timer;       /**< Timeout timer              */
     unsigned int    timeout_ms;  /**< Saved for DNS-retry path   */
     ccicmp_t        ping;        /**< ccicmp context             */
-    ccev_conn_t    *conn;        /**< ICMP fd reactor wrapper    */
+    ccev_sock_t    *sock;        /**< ICMP fd reactor wrapper    */
     uint64_t        send_time;   /**< Monotonic ms before send   */
     char            reply_buf[64];
     size_t          reply_len;
@@ -44,10 +46,8 @@ static void ping_timeout_cb(void *udata) {
 
     if (p->cb) p->cb(p->udata, NULL);
 
-    /* Close the conn via unified path — deferred cleanup will
-     * free p via ccev__conn_free (CCEV_CONN_ICMP frees recv_udata). */
-    if (p->conn) {
-        ccev__conn_schedule_close(p->loop, p->conn);
+    if (p->sock) {
+        ccev__sock_schedule_close(p->loop, p->sock);
     } else {
         ccev__free_fn(p);
     }
@@ -55,8 +55,9 @@ static void ping_timeout_cb(void *udata) {
 
 /* ── Recv callback (EPOLLIN on ICMP fd) ───────────────────────────── */
 
-static void ping_recv_ready(void *udata) {
-    ccev_ping_t *p = (ccev_ping_t *)udata;
+static void ping_recv_ready(ccev_sock_t *sock, int events) {
+    (void)events;
+    ccev_ping_t *p = (ccev_ping_t *)sock->udata;
 
     /* Try to receive the reply */
     p->reply_len = sizeof(p->reply_buf);
@@ -81,10 +82,8 @@ static void ping_recv_ready(void *udata) {
         /* Fire user callback BEFORE close, so udata is still valid. */
         if (p->cb) p->cb(p->udata, &result);
 
-        /* Close the conn via unified path — deferred cleanup will
-         * free p via ccev__conn_free (CCEV_CONN_ICMP frees recv_udata). */
-        if (p->conn)
-            ccev__conn_schedule_close(p->loop, p->conn);
+        if (p->sock)
+            ccev__sock_schedule_close(p->loop, p->sock);
         else
             ccev__free_fn(p);
     }
@@ -107,11 +106,10 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
 
     /* Register the ICMP fd with the reactor */
     int fd = p->ping.fd;
-    p->conn = ccev_conn_create(loop, (ccsocket_t)(intptr_t)fd, p);
-    if (!p->conn) return -1;
-
-    p->conn->type = CCEV_CONN_ICMP;
-    ccev_conn_recv(p->conn, NULL, 0, ping_recv_ready, p);
+    ccev_sock_t *s = ccev_sock_create(loop, (ccsocket_t)(intptr_t)fd, p);
+    if (!s) return -1;
+    p->sock = s;
+    ccev_sock_read_start(s, ping_recv_ready);
 
     /* Set a timeout */
     if (p->timeout_ms > 0) {

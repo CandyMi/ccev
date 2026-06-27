@@ -2,6 +2,9 @@
  * @file ccev_internal.h
  * @brief Internal data structures for the ccev reactor.
  *
+ * @author CandyMi
+ * @license MIT
+ *
  * This header is private to the ccev library. It must NOT be included
  * by user code.
  */
@@ -65,89 +68,70 @@ extern void  (*ccev__free_fn)(void*);
 #include "cclink.h"
 #include "cchashmap.h"
 
-/* Maximum connections to accept per EPOLLIN dispatch on a listener.
- * Keeps the event loop responsive by not monopolising the iteration. */
+/* Maximum connections to accept per EPOLLIN dispatch on a listener. */
 #define CCEV_MAX_ACCEPT_BATCH 128
-
-/*
- */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* ════════════════════════════════════════════════════════════════
- *  Connection type tags
+ *  Socket mode tags (internal, used by dispatch)
  * ════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    CCEV_CONN_UNUSED  = 0,
-    CCEV_CONN_NORMAL,     /**< Regular connection (external fd / accept) */
-    CCEV_CONN_LISTENER,   /**< TCP listener created by ccev_listen()     */
-    CCEV_CONN_CONNECTING, /**< TCP connect in progress                   */
-    CCEV_CONN_DNS,        /**< Internal DNS socket                       */
-    CCEV_CONN_ICMP,       /**< Internal ICMP (ping) socket               */
-} ccev_conn_type_t;
+    CCEV_SOCK_INIT    = 0,   /**< Normal data socket.                    */
+    CCEV_SOCK_LISTEN,         /**< TCP listener created by ccev_listen(). */
+    CCEV_SOCK_CONNECT,        /**< TCP connect in progress.              */
+} ccev_sock_mode_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  Stream reader (forward declaration for conn struct)
+ *  Stream reader (forward declaration for sock/stream structs)
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_stream_reader_s ccev_stream_reader_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  Connection structure
+ *  Socket structure (low-level)
  * ════════════════════════════════════════════════════════════════ */
 
-struct ccev_conn_s {
-    cclist_node_t      lnode;          /**< List node (all conns)          */
+struct ccev_sock_s {
+    cclist_node_t      lnode;      /**< List node (all_socks list)       */
 
-    /* ── 8-byte fields first (pointers / size_t) ── */
-    ccev_loop_t       *loop;           /**< Owning event loop              */
-    ccev_recv_cb       recv_cb;        /**< Readable callback              */
-    void              *recv_udata;     /**< Recv callback user data        */
-    ccev_send_cb       send_cb;        /**< Write-complete callback        */
-    void              *send_udata;     /**< Send callback user data        */
-    ccev_close_cb      close_cb;       /**< Close / error callback         */
-    void              *close_udata;    /**< Close callback user data       */
-    void              *udata;          /**< User-data pointer              */
-
-    /* ── Write buffering ── */
-    cclink_t           wbuf_list;      /**< Linked list of pending buffers */
-    size_t             wbuf_len;       /**< Total bytes buffered           */
+    /* ── 8-byte fields first ── */
+    ccev_loop_t       *loop;       /**< Owning event loop                */
+    void              *udata;      /**< User-data pointer                */
+    ccev_event_cb      rcb;        /**< Read event callback (INIT mode)  */
+    ccev_event_cb      wcb;        /**< Write event callback (INIT mode) */
+    ccev_close_cb      close_cb;   /**< Close / error callback           */
+    void              *close_udata;/**< Close callback user data         */
 
     /* ── 4-byte fields ── */
-    ccev_conn_type_t   type;           /**< Connection type tag            */
-    ccsocket_t         fd;             /**< Underlying file descriptor     */
-    int                reg_events;     /**< Currently registered epoll events */
+    ccsocket_t         fd;         /**< Underlying file descriptor       */
+    uint32_t           events;     /**< epoll currently registered events*/
+    uint32_t           mode;       /**< ccev_sock_mode_t                 */
 
-    /* ── Flags (packed at end, union needs 8-byte alignment below) ── */
-    bool               closed;         /**< true once close initiated      */
-    bool               in_closing;     /**< true if in the closing list    */
-    bool               pending_write;  /**< EPOLLOUT is currently armed    */
+    /* ── Flags ── */
+    bool               closed;     /**< true once close initiated        */
+    bool               in_closing; /**< true if in the closing list      */
 
-    /* ── Stream reader (optional) ── */
-    ccev_stream_reader_t *reader;   /**< Active stream reader, or NULL.    */
+    /* ── Listen-specific (only when mode == CCEV_SOCK_LISTEN) ── */
+    struct {
+        ccev_listen_cb cb;        /**< Accept callback for new conns    */
+        void          *udata;
+    } listener;
 
-    /* ── Type-specific fields ── */
-    union {
-        struct {
-            ccev_accept_cb cb;
-            void          *udata;
-        } listener;
-
-        struct {
-            ccev_connect_cb cb;
-            void           *udata;
-            ccev_timer_t   *timer;      /**< Connection timeout timer     */
-        } connector;
-
-        struct {
-            int              sendfile_fd; /**< File fd, -1 when idle        */
-            ccev_send_cb     cb;          /**< Completion callback          */
-            void            *udata;
-        } sendfile;
-    };
+    /* ── Connect-specific (only when mode == CCEV_SOCK_CONNECT) ── */
+    struct {
+        char             host[CCEV_DOMAIN_MAXLEN];
+        uint16_t         port;
+        unsigned int     timeout_ms;
+        ccev_timer_t    *timer;
+        ccev_connect_cb  cb;
+        void            *udata;
+        bool            *dns_cancelled; /**< Set true before free so DNS
+                                         *   callback skips the dead sock.*/
+    } connector;
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -155,52 +139,82 @@ struct ccev_conn_s {
  * ════════════════════════════════════════════════════════════════ */
 
 struct ccev_timer_s {
-    ccheap_node_t       node;           /**< Heap node (embed, not pointer) */
-    ccev_loop_t        *loop;           /**< Owning event loop              */
+    ccheap_node_t       node;       /**< Heap node (embed, not pointer)  */
+    cclink_node_t       tlist;      /**< Expired list node (extract/fire)*/
+    ccev_loop_t        *loop;       /**< Owning event loop               */
 
-    uint64_t            interval;       /**< Repeat interval (0 for ONCE)   */
-    ccev_timer_mode_t   mode;           /**< ONCE or REPEAT                 */
-    ccev_timer_cb       cb;             /**< Expiry callback                */
-    void               *udata;          /**< User data                      */
-    bool                active;         /**< false = lazily deleted         */
+    uint64_t            interval;   /**< Repeat interval (0 for ONCE)    */
+    ccev_timer_mode_t   mode;       /**< ONCE or REPEAT                  */
+    ccev_timer_cb       cb;         /**< Expiry callback                 */
+    void               *udata;      /**< User data                       */
+    bool                active;     /**< false = lazily deleted          */
 };
 
 /* ════════════════════════════════════════════════════════════════
- *  Write-buffer entry (linked via cclink)
+ *  Write-buffer entry (linked via cclink, used by stream)
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_buf_s {
-    cclink_node_t node;                 /**< cclink intrusive node         */
-    void         *data;                 /**< Heap-allocated buffer         */
-    size_t        len;                  /**< Data length                   */
-    size_t        offset;               /**< Consumed bytes (for iovec)    */
+    cclink_node_t node;             /**< cclink intrusive node           */
+    void         *data;             /**< Heap-allocated buffer           */
+    size_t        len;              /**< Data length                     */
+    size_t        offset;           /**< Consumed bytes (for iovec)      */
+    ccev_send_cb  cb;               /**< Per-buf write-complete callback*/
+    void         *cb_udata;         /**< User pointer for @p cb         */
 } ccev_buf_t;
 
 /* ════════════════════════════════════════════════════════════════
  *  Stream reader (read-until / read-n)
  * ════════════════════════════════════════════════════════════════ */
 
-typedef struct ccev_stream_reader_s {
-    char            *buf;           /**< Dynamic accumulation buffer.          */
-    size_t           cap;           /**< Allocated capacity.                   */
-    size_t           len;           /**< Valid bytes in @p buf.               */
-    size_t           want;          /**< max_len (read_until) or n (read_n).  */
-    char             delim;         /**< 0 = read_n, otherwise delimiter byte.*/
-    bool             is_n;          /**< true = read_n, false = read_until.   */
-    ccev_stream_cb   cb;            /**< User completion callback.            */
-    void            *udata;         /**< User data for @p cb.                 */
-    ccev_recv_cb     old_recv_cb;   /**< Saved recv_cb while reader active.  */
-    void            *old_recv_udata;/**< Saved recv_udata while reader active.*/
-    ccev_conn_t         *conn;          /**< Owning connection (back-pointer). */
-} ccev_stream_reader_t;
+struct ccev_stream_reader_s {
+    char            *buf;           /**< Dynamic accumulation buffer.     */
+    size_t           cap;           /**< Allocated capacity.              */
+    size_t           pos;           /**< Consumed bytes offset in @p buf.*/
+    size_t           len;           /**< Valid pending bytes in @p buf.  */
+    size_t           want;          /**< maxlen (readline) or n (readnum)*/
+    char             delim;         /**< 0 = readnum, else delimiter.    */
+    bool             is_n;          /**< true = readnum, false = readline*/
+    ccev_stream_cb   cb;            /**< User completion callback.       */
+    void            *udata;         /**< User data for @p cb.            */
+    ccev_event_cb    old_rcb;       /**< Saved read callback while active*/
+    ccev_sock_t     *sock;          /**< Owning socket (back-pointer).   */
+
+    /* ── Timeout support ── */
+    ccev_timer_t    *timer;         /**< Read timeout timer, or NULL.    */
+    int              timeout_ms;    /**< Saved timeout value.            */
+};
+
+/* ════════════════════════════════════════════════════════════════
+ *  Stream structure (high-level, embeds ccev_sock_t)
+ * ════════════════════════════════════════════════════════════════ */
+
+struct ccev_stream_s {
+    ccev_sock_t        sock;        /**< Embedded sock — MUST be first. */
+
+    /* ── Write buffering ── */
+    cclink_t           wlist;       /**< Linked list of pending buffers.*/
+    size_t             wbuf_len;    /**< Total bytes buffered.           */
+    ccev_send_cb       send_cb;     /**< Global flush-complete callback.*/
+    void              *send_udata;
+    bool               pending_write;/**< EPOLLOUT currently armed.     */
+
+    /* ── Stream reader (optional) ── */
+    ccev_stream_reader_t *reader;
+
+    /* ── Sendfile state ── */
+    int                sendfile_fd; /**< File fd, -1 when idle.         */
+    ccev_send_cb       sf_cb;      /**< Sendfile completion callback.   */
+    void              *sf_udata;
+};
 
 /* ════════════════════════════════════════════════════════════════
  *  DNS state + cache
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_dns_state_s {
-    ccev_dns_server_t servers[CCEV_DNS_MAX_SERVERS];  /**< DNS server addresses + ports */
-    int                nservers;                      /**< Number of servers             */
+    ccev_dns_server_t servers[CCEV_DNS_MAX_SERVERS];
+    int                nservers;
 } ccev_dns_state_t;
 
 /** DNS cache entry — domain → IP mapping */
@@ -209,22 +223,22 @@ typedef struct ccev_dns_cache_s {
     char              domain[256];
     char              ip[65];
     int               ttl;
-    bool              cached;           /**< true = from hosts file, never expires */
-    uint64_t          cached_at;        /**< monotonic ms when cached */
+    bool              cached;       /**< true = from hosts file, never expires */
+    uint64_t          cached_at;    /**< monotonic ms when cached */
 } ccev_dns_cache_t;
 
-/** Pending DNS waiter — appended to an in-flight resolution */
+/** Pending DNS waiter */
 typedef struct ccev_dns_waiter_s {
     cclink_node_t  node;
     ccev_dns_cb    cb;
     void          *udata;
 } ccev_dns_waiter_t;
 
-/** Pending DNS resolution — domain currently in-flight */
+/** Pending DNS resolution */
 typedef struct ccev_dns_pending_s {
     cchashmap_node_t  node;
     char              domain[256];
-    cclink_t          waiters;          /**< list of ccev_dns_waiter_t */
+    cclink_t          waiters;
 } ccev_dns_pending_t;
 
 /* ════════════════════════════════════════════════════════════════
@@ -233,78 +247,82 @@ typedef struct ccev_dns_pending_s {
 
 struct ccev_loop_s {
     /* ── epoll instance ── */
-    HANDLE              epfd;           /**< epoll fd (per epoll.h types)  */
-    int                 max_events;     /**< epoll_wait() event cap         */
-    struct epoll_event *events;         /**< epoll_wait() result array      */
-    volatile sig_atomic_t stop_flag;    /**< Atomic stop flag               */
+    HANDLE              epfd;        /**< epoll fd (per epoll.h types)  */
+    int                 max_events;  /**< epoll_wait() event cap         */
+    struct epoll_event *events;      /**< epoll_wait() result array      */
+    volatile sig_atomic_t stop_flag; /**< Atomic stop flag               */
 
     /* ── Wakeup pipe ── */
-    ccsocket_t          wakefds[2];     /**< Self-pipe for async wakeup    */
-    ccev_conn_t        *wake_conn;      /**< Wrapper for wakeup fd         */
+    ccsocket_t          wakefds[2];  /**< Self-pipe for async wakeup    */
+    ccev_sock_t        *wake_sock;   /**< Wrapper for wakeup fd         */
 
-    /* ── Connection table (fd → conn) ── */
-    cclist_t            all_conns;      /**< All conns (for iteration)     */
-    int                 conn_count;     /**< Active connection count        */
+    /* ── Socket table ── */
+    cclist_t            all_socks;   /**< All socks (for iteration)     */
+    int                 sock_count;  /**< Active socket count           */
 
     /* ── Closing queue (deferred free) ── */
-    cclist_t            closing;        /**< Nodes to tear down after dispatch */
+    cclist_t            closing;     /**< Socks to tear down after dispatch */
 
     /* ── Timer heap ── */
-    ccheap_t            timers;         /**< D-ary min-heap (4-ary)        */
-    int                 timer_count;    /**< Active timer count             */
+    ccheap_t            timers;      /**< D-ary min-heap (4-ary)        */
+    int                 timer_count; /**< Active timer count             */
 
     /* ── DNS state ── */
     ccev_dns_state_t    dns;
-    cchashmap_t         dns_cache;      /**< domain → ccev_dns_cache_t */
-    cchashmap_t         dns_pending;    /**< domain → ccev_dns_pending_t */
+    cchashmap_t         dns_cache;
+    cchashmap_t         dns_pending;
 
     /* ── Signal handling (default loop only) ── */
-    ccsocket_t              signal_pipe[2]; /**< Self-pipe for signal delivery */
-    ccev_conn_t            *signal_conn;    /**< Wrapper for signal pipe read end */
+    ccsocket_t          signal_pipe[2];
+    ccev_sock_t        *signal_sock;
     struct {
         ccev_signal_cb cb;
         void          *udata;
-    } signals[64];                           /**< signum → callback table */
+    } signals[64];
 };
 
 /* ════════════════════════════════════════════════════════════════
- *  Internal function prototypes (shared across .c files)
+ *  Internal function prototypes
  * ════════════════════════════════════════════════════════════════ */
 
-/* epoll event mask conversion */
+/* ── sock core (ccev_sock.c) ── */
 
-/* Internal epoll_ctl wrapper (always ONESHOT) */
-int ccev__conn_mod_internal(ccev_loop_t *loop, ccev_conn_t *conn,
-                             int events);
+/** Internal epoll_ctl wrapper (always ONESHOT). */
+int ccev__sock_mod_internal(ccev_loop_t *loop, ccev_sock_t *sock,
+                             int epoll_events);
 
-/* Re-arm logic — re-register events that were consumed by ONESHOT */
-void ccev__conn_rearm(ccev_loop_t *loop, ccev_conn_t *conn);
+/** Re-arm logic — re-register events consumed by ONESHOT. */
+void ccev__sock_rearm(ccev_loop_t *loop, ccev_sock_t *sock);
 
-/* Flush write buffer (called from dispatch on EPOLLOUT) */
-void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn);
+/** Schedule a sock for deferred close. */
+void ccev__sock_schedule_close(ccev_loop_t *loop, ccev_sock_t *sock);
 
-/* Schedule a conn for deferred close */
-void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn);
+/** Process the closing queue (called from ccev.c). */
+void ccev__process_closing(ccev_loop_t *loop);
 
-/* Continue sendfile transfer (called from dispatch on EPOLLOUT) */
-void ccev__conn_sendfile_continue(ccev_loop_t *loop, ccev_conn_t *conn);
+/** Free a sock (internal, called after close_cb). */
+void ccev__sock_free(ccev_sock_t *sock);
 
-/* Connection cleanup (internal, frees memory) */
-void ccev__conn_free(ccev_conn_t *conn);
+/* ── stream I/O (ccev_stream.c) ── */
 
-/* Timer dispatch */
-void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
+/** Flush write buffer (called from dispatch on EPOLLOUT). */
+void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st);
 
-/* Monotonic clock in milliseconds */
+/** Continue sendfile transfer (called from dispatch on EPOLLOUT). */
+void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st);
+
+/* ── timer (ccev_timer.c) ── */
+
+/** Process expired timers. */
+int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
+
+/** Monotonic clock in milliseconds. */
 uint64_t ccev__now_ms(void);
 
-/* DNS init — parse /etc/resolv.conf, fall back to 1.1.1.1 */
+/* ── DNS (ccev_dns.c) ── */
+
+/** DNS init — parse /etc/resolv.conf, fall back to 1.1.1.1. */
 void ccev__dns_init(ccev_loop_t *loop);
-
-/* DNS cache flush + reload hosts file */
-void ccev_dns_flush(ccev_loop_t *loop);
-
-
 
 #ifdef __cplusplus
 }

@@ -1,23 +1,13 @@
 cmake_minimum_required(VERSION 3.10)
-project(ccev VERSION 0.1.0 LANGUAGES C)
+project(ccev LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── Options ──
-option(BUILD_TESTING "Build tests" ON)
+option(BUILD_TESTING  "Build tests"    ON)
 option(BUILD_EXAMPLES "Build examples" ON)
-option(CCEV_SANITIZE "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
-
-# ── Sanitizer setup (ASAN + UBSAN) ────────────────────────────
-if(CCEV_SANITIZE)
-    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fsanitize=address,undefined -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined")
-    if(APPLE)
-        set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DASAN_OPTIONS=detect_leaks=0")
-    endif()
-endif()
+option(CCEV_SANITIZE  "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 
 # ── Submodule check ──
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/include/epoll/epoll.h" OR
@@ -29,32 +19,50 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/include/epoll/epoll.h" OR
         "  Or:   scripts/init-deps.sh (POSIX) / init-deps.cmd (Windows)")
 endif()
 
-# ── epoll backend source ────────────────────────────────────
+# ── Object library: epoll backend (1 per platform) ──────────
 if(WIN32)
-    set(EPOLL_SRC deps/epoll/src/wepoll.c)
+    set(EPOLL_BACKEND deps/epoll/src/wepoll.c)
 elseif(APPLE)
-    set(EPOLL_SRC deps/epoll/src/kepoll.c)
+    set(EPOLL_BACKEND deps/epoll/src/kepoll.c)
 elseif(UNIX)
-    set(EPOLL_SRC deps/epoll/src/epoll.c)
+    set(EPOLL_BACKEND deps/epoll/src/epoll.c)
 else()
-    set(EPOLL_SRC deps/epoll/src/uepoll.c)
+    set(EPOLL_BACKEND deps/epoll/src/uepoll.c)
 endif()
 
-# ── ccev library (single .a — everything merged) ─────────────
-set(CCEV_SOURCES
+add_library(ccev_epoll OBJECT ${EPOLL_BACKEND})
+target_include_directories(ccev_epoll PRIVATE
+    deps/epoll/include/epoll
+    deps/epoll/include
+)
+
+# ── Object library: ccsocket (cross-platform socket API) ────
+add_library(ccev_ccsocket OBJECT
+    deps/ccsocket/ccsocket.c
+    deps/ccsocket/ccdns.c
+    deps/ccsocket/ccicmp.c
+)
+target_include_directories(ccev_ccsocket PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccsocket>
+)
+target_compile_definitions(ccev_ccsocket PRIVATE
+    CCICMP_MAX_PAYLOAD=65500
+    CCICMP_RECV_BUFSZ=65535
+)
+
+# ── Static library: ccev ────────────────────────────────────
+add_library(ccev STATIC
     src/ccev.c
     src/ccev_timer.c
-    src/ccev_conn.c
+    src/ccev_sock.c
     src/ccev_stream.c
     src/ccev_dns.c
     src/ccev_icmp.c
     src/ccev_signal.c
-    deps/ccsocket/ccsocket.c
-    deps/ccsocket/ccdns.c
-    deps/ccsocket/ccicmp.c
-    ${EPOLL_SRC}
+    $<TARGET_OBJECTS:ccev_epoll>
+    $<TARGET_OBJECTS:ccev_ccsocket>
 )
-add_library(ccev STATIC ${CCEV_SOURCES})
+set_target_properties(ccev PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(ccev PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -67,30 +75,43 @@ target_include_directories(ccev PRIVATE
     deps/epoll/include
 )
 
-# ccsocket compile definitions
-target_compile_definitions(ccev PRIVATE
-    CCICMP_MAX_PAYLOAD=65500
-    CCICMP_RECV_BUFSZ=65535
-)
-
+# ── Platform-specific ────────────────────────────────────────
 if(WIN32)
     target_link_libraries(ccev PUBLIC ws2_32)
 endif()
 
-# Linux timerfd
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
     target_compile_definitions(ccev PRIVATE _GNU_SOURCE)
 endif()
 
-# MSVC
+# ── Compiler-specific ────────────────────────────────────────
 if(MSVC)
     target_compile_options(ccev PRIVATE /std:c11 /wd4996)
     target_compile_definitions(ccev PRIVATE _CRT_SECURE_NO_WARNINGS)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(ccev PRIVATE -Wno-typedef-redefinition)
 endif()
 
-# Suppress SOCKET redefinition (epoll.h and ccsocket.h both define it)
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(ccev PRIVATE -Wno-typedef-redefinition)
+# ── Sanitizer (debug builds only, GCC/Clang on POSIX) ──────
+if(CCEV_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+        if(NOT WIN32)
+            target_compile_options(ccev PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            set(CMAKE_EXE_LINKER_FLAGS_DEBUG
+                "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined")
+            if(APPLE)
+                target_compile_definitions(ccev PRIVATE ASAN_OPTIONS=detect_leaks=0)
+            endif()
+        else()
+            target_compile_options(ccev PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+            set(CMAKE_EXE_LINKER_FLAGS_DEBUG
+                "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address")
+        endif()
+    elseif(MSVC)
+        target_compile_options(ccev PRIVATE /fsanitize=address)
+    else()
+        message(WARNING "CCEV_SANITIZE is set but compiler '${CMAKE_C_COMPILER_ID}' is not supported. Ignoring.")
+    endif()
 endif()
 
 # ── Install ─────────────────────────────────────────────────
@@ -111,13 +132,11 @@ install(EXPORT ccev-targets
     NAMESPACE ccev::
 )
 
-# ── Tests ──
+# ── Tests & examples ────────────────────────────────────────
 if(BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
 endif()
-
-# ── Examples ──
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()

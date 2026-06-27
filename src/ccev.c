@@ -2,20 +2,23 @@
  * @file ccev.c
  * @brief Reactor core — event-loop lifecycle, listen, connect, dispatch.
  *
+ * @author CandyMi
+ * @license MIT
+ *
  * ONESHOT compensation:
- *   When EPOLLONESHOT fires for EPOLLOUT but the user also registered
- *   EPOLLIN, the EPOLLIN event is consumed by ONESHOT. After each
- *   dispatch iteration, ccev__conn_rearm() re-registers wanted events
- *   for every active connection.
+ *   When EPOLLONESHOT fires, the event is consumed.  After dispatch,
+ *   ccev__sock_rearm() re-registers wanted events based on sock->events.
  *
  * Deferred close:
- *   ccev__conn_schedule_close() moves a connection to the closing list.
- *   The actual close_cb invocation and memory release happen after the
- *   dispatch loop finishes, preventing use-after-free in callbacks.
+ *   ccev__sock_schedule_close() moves a sock to the closing list.
+ *   ccev__process_closing() (in ccev_sock.c) fires close_cb and frees.
+ *
+ * ccev_connect DNS integration:
+ *   Hostnames are resolved via ccev_dns_resolve() before TCP connect.
+ *   The total timeout spans both DNS and TCP connect phases.
  */
 
 #include "ccev_internal.h"
-#include <string.h>
 
 /* Default allocator (libc) */
 static void *ccev_default_realloc(void *ptr, size_t sz) {
@@ -31,24 +34,6 @@ void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
                         void  (*free_fn)(void*)) {
     if (realloc_fn) ccev__realloc_fn = realloc_fn;
     if (free_fn)    ccev__free_fn    = free_fn;
-}
-
-/* ════════════════════════════════════════════════════════════════
- *  Internal helpers
- * ════════════════════════════════════════════════════════════════ */
-
-/* Process the deferred-close (closing) queue.
- * Each entry was already removed from all_conns and epoll by
- * ccev__conn_schedule_close(); here we invoke close_cb and free. */
-static void ccev__process_closing(ccev_loop_t *loop) {
-    while (!cclist_empty(&loop->closing)) {
-        cclist_node_t *cn = cclist_pop_front(&loop->closing);
-        if (!cn) continue;
-        ccev_conn_t *conn = (ccev_conn_t *)((char*)cn - offsetof(ccev_conn_t, lnode));
-        conn->in_closing = false;
-        if (conn->close_cb) conn->close_cb(conn->close_udata);
-        ccev__conn_free(conn);
-    }
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -72,16 +57,14 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     if (!loop->events) { epoll_close(loop->epfd); ccev__free_fn(loop); return NULL; }
 
     /* Init data structures */
-    cclist_init(&loop->all_conns);
+    cclist_init(&loop->all_socks);
     cclist_init(&loop->closing);
     ccheap_init(&loop->timers, NULL);
 
-    /* Init DNS state — parse resolv.conf, or fall back to 1.1.1.1 */
+    /* Init DNS state */
     ccev__dns_init(loop);
     cchashmap_init(&loop->dns_cache, NULL, NULL);
     cchashmap_init(&loop->dns_pending, NULL, NULL);
-
-    /* Pre-populate DNS cache from OS hosts file */
     ccev_dns_flush(loop);
 
     /* Wakeup pipe */
@@ -93,11 +76,11 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     }
     ccsocket_set_nonblock(loop->wakefds[1], true);
 
-    loop->wake_conn = NULL;
-    ccev_conn_t *wake = ccev_conn_create(loop, loop->wakefds[0], NULL);
+    loop->wake_sock = NULL;
+    ccev_sock_t *wake = ccev_sock_create(loop, loop->wakefds[0], NULL);
     if (wake) {
-        loop->wake_conn = wake;
-        ccev__conn_mod_internal(loop, wake, EPOLLIN);
+        loop->wake_sock = wake;
+        ccev__sock_mod_internal(loop, wake, EPOLLIN);
     }
 
     return loop;
@@ -106,20 +89,18 @@ ccev_loop_t *ccev_loop_create(int max_events) {
 void ccev_loop_destroy(ccev_loop_t *loop) {
     if (!loop) return;
 
-    /* Close write-ends not wrapped in conns */
     if (loop->wakefds[1] != (ccsocket_t)-1) ccsocket_close(loop->wakefds[1]);
     if (loop->signal_pipe[1] != (ccsocket_t)-1) ccsocket_close(loop->signal_pipe[1]);
 
-    /* Process any pending closing queue first — these conns were
-     * removed from all_conns by ccev__conn_schedule_close. */
+    /* Process any pending closing queue */
     ccev__process_closing(loop);
 
-    /* Free remaining connections via the all_conns list */
-    while (!cclist_empty(&loop->all_conns)) {
-        cclist_node_t *n = cclist_pop_front(&loop->all_conns);
+    /* Free remaining socks */
+    while (!cclist_empty(&loop->all_socks)) {
+        cclist_node_t *n = cclist_pop_front(&loop->all_socks);
         if (n) {
-            ccev_conn_t *conn = (ccev_conn_t *)((char*)n - offsetof(ccev_conn_t, lnode));
-            ccev__conn_free(conn);
+            ccev_sock_t *sock = (ccev_sock_t *)((char*)n - offsetof(ccev_sock_t, lnode));
+            ccev__sock_free(sock);
         }
     }
 
@@ -131,8 +112,6 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         ccev_timer_t *t = CCHEAP_CONTAINER(min, ccev_timer_t, node);
         ccev__free_fn(t);
     }
-
-    /* Free timer heap internal array */
     ccheap_destroy(&loop->timers);
 
     /* Free DNS cache */
@@ -149,16 +128,13 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     }
     cchashmap_destroy(&loop->dns_cache);
 
-    /* Free DNS pending entries and their waiter chains.
-     * Walk every bucket chain and free each entry; then free the
-     * buckets array via cchashmap_destroy (ccev_dns_cache_t style). */
+    /* Free DNS pending entries */
     if (loop->dns_pending.buckets) {
         for (size_t _i = 0; _i < loop->dns_pending.cap; _i++) {
             cchashmap_node_t *_n = loop->dns_pending.buckets[_i];
             while (_n) {
                 cchashmap_node_t *_next = _n->next;
                 ccev_dns_pending_t *_p = CCHASHMAP_CONTAINER(_n, ccev_dns_pending_t, node);
-                /* Free all waiters attached to this pending entry */
                 cclink_node_t *_wn = cclink_begin(&_p->waiters);
                 while (_wn) {
                     cclink_node_t *_wnext = cclink_next(_wn);
@@ -173,7 +149,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     }
     cchashmap_destroy(&loop->dns_pending);
 
-    /* Free DNS server string copies */
+    /* Free DNS server strings */
     for (int _i = 0; _i < loop->dns.nservers; _i++)
         ccev__free_fn((void *)(uintptr_t)loop->dns.servers[_i].server);
 
@@ -197,19 +173,17 @@ ccev_loop_t *ccev_default_loop(void) {
     ccsocket_set_nonblock(loop->signal_pipe[0], true);
     ccsocket_set_nonblock(loop->signal_pipe[1], true);
 
-    /* Wrap read end as a conn so the loop dispatches it */
-    ccev_conn_t *sc = ccev_conn_create(loop, loop->signal_pipe[0], NULL);
+    /* Wrap read end as a sock so the loop dispatches it */
+    ccev_sock_t *sc = ccev_sock_create(loop, loop->signal_pipe[0], NULL);
     if (!sc) {
         ccev_loop_destroy(loop);
         return NULL;
     }
-    loop->signal_conn = sc;
-    /* recv_cb is set by ccev_signal.c during ccev_signal_handle() */
-    ccev__conn_mod_internal(loop, sc, EPOLLIN);
+    loop->signal_sock = sc;
+    /* rcb is set by ccev_signal.c during ccev_signal_handle() */
+    ccev__sock_mod_internal(loop, sc, EPOLLIN);
 
-    /* Pre-populate DNS cache from hosts file */
     ccev_dns_flush(loop);
-
     return loop;
 }
 
@@ -231,23 +205,19 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     do {
         uint64_t now = ccev__now_ms();
 
-        /* 1. Process expired timers */
-        ccev__timer_process(loop, now);
+        /* 1. Process expired timers + get ms until next future timer.
+         *    Returns -1 if no timers remain. */
+        int next_ms = ccev__timer_process(loop, now);
         if (loop->stop_flag) break;
 
         /* 2. Compute epoll timeout */
-        int timeout = (mode == CCEV_RUN_ONCE) ? 0 : -1;
-        if (mode == CCEV_RUN_FOREVER) {
-            ccheap_node_t *earliest = ccheap_peek(&loop->timers);
-            if (earliest) {
-                uint64_t t = ccheap_node_get(earliest, timeout);
-                if (t > now) {
-                    uint64_t diff = t - now;
-                    timeout = (diff > (uint64_t)INT_MAX) ? -1 : (int)diff;
-                } else {
-                    timeout = 0;
-                }
-            }
+        int timeout;
+        if (mode == CCEV_RUN_ONCE) {
+            timeout = 0;
+        } else if (next_ms < 0) {
+            timeout = -1;  /* no timers — block until I/O */
+        } else {
+            timeout = next_ms;
         }
 
         /* 3. epoll_wait */
@@ -260,49 +230,50 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 4. Dispatch events */
         for (int i = 0; i < n; i++) {
             struct epoll_event *ev = &loop->events[i];
-            ccev_conn_t *conn = (ccev_conn_t *)ev->data.ptr;
-            if (!conn || conn->closed) continue;
+            ccev_sock_t *sock = (ccev_sock_t *)ev->data.ptr;
+            if (!sock || sock->closed) continue;
 
             uint32_t fired = ev->events;
 
-            /* Wakeup pipe — drain and let step 5 re-arm */
-            if (conn == loop->wake_conn) {
+            /* Wakeup pipe — drain */
+            if (sock == loop->wake_sock) {
                 char buf[64];
-                while (ccsocket_recv(conn->fd, buf, sizeof(buf), NULL) == CC_OPCODE_OK) {}
+                while (ccsocket_recv(sock->fd, buf, sizeof(buf), NULL) == CC_OPCODE_OK) {}
                 continue;
             }
 
-            /* Error / hangup — schedule deferred close; close_cb fires
-             * once in step 6 (closing queue processing) to avoid
-             * double-firing. */
-            if (fired & (EPOLLERR | EPOLLHUP)) {
-                ccev__conn_schedule_close(loop, conn);
+            /* Convert epoll events to CCEV_EVENT flags */
+            int ccev_events = 0;
+            if (fired & EPOLLIN)  ccev_events |= CCEV_EVENT_READ;
+            if (fired & EPOLLOUT) ccev_events |= CCEV_EVENT_WRITE;
+            if (fired & (EPOLLERR | EPOLLHUP))
+                ccev_events |= CCEV_EVENT_HUP;
+
+            /* HUP/ERR fast-path — schedule deferred close */
+            if (ccev_events & CCEV_EVENT_HUP) {
+                ccev__sock_schedule_close(loop, sock);
                 continue;
             }
 
-            bool fired_read  = (fired & EPOLLIN) != 0;
-            bool fired_write = (fired & EPOLLOUT) != 0;
+            /* Reset registered events (ONESHOT consumed them) */
+            sock->events = 0;
 
-            /* ONESHOT consumed the event — reset so re-arm fires */
-            conn->reg_events = 0;
-
-            if (fired_read) {
-                /* Listener — batch accept to reduce syscall overhead.
-                 * Accept at most CCEV_MAX_ACCEPT_BATCH connections per
-                 * EPOLLIN dispatch. ccsocket_accept2 returns 0 on EAGAIN. */
-                if (conn->type == CCEV_CONN_LISTENER) {
+            /* Dispatch by mode */
+            if (fired & EPOLLIN) {
+                if (sock->mode == CCEV_SOCK_LISTEN) {
+                    /* Listener — batch accept */
                     int count = 0;
                     while (count < CCEV_MAX_ACCEPT_BATCH) {
                         char addr_buf[64];
                         uint16_t port = 0;
-                        ccsocket_t afd = ccsocket_accept2(conn->fd, addr_buf, &port, 0);
+                        ccsocket_t afd = ccsocket_accept2(sock->fd, addr_buf, &port, 0);
                         if (afd == (ccsocket_t)0) break;   /* EAGAIN */
                         if (afd == (ccsocket_t)-1) break;  /* error */
-                        if (conn->listener.cb) {
-                            ccev_conn_t *new_conn = ccev_conn_create(loop, afd, NULL);
-                            if (new_conn) {
-                                conn->listener.cb(conn->listener.udata,
-                                                   new_conn, addr_buf, (int)port);
+                        if (sock->listener.cb) {
+                            ccev_sock_t *client = ccev_sock_create(loop, afd, NULL);
+                            if (client) {
+                                sock->listener.cb(sock->listener.udata,
+                                                   client, addr_buf, (int)port);
                             } else {
                                 ccsocket_close(afd);
                             }
@@ -311,55 +282,52 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
                         }
                         count++;
                     }
-                    ccev__conn_mod_internal(loop, conn, EPOLLIN);
+                    ccev__sock_mod_internal(loop, sock, EPOLLIN);
                     continue;
                 }
 
-                /* DNS + normal recv: fire callback then re-arm */
-                if (conn->recv_cb) {
-                    conn->recv_cb(conn->recv_udata);
-                    /* Only re-arm if there are events to register after
-                     * the callback (recv_cb may have changed or cleared
-                     * the callback via ccev_conn_recv inside the cb). */
-                    if (conn->recv_cb || conn->pending_write)
-                        ccev__conn_rearm(loop, conn);
-                }
+                /* Normal read — fire rcb */
+                if (sock->rcb) sock->rcb(sock, ccev_events);
             }
 
-            if (fired_write) {
-                /* Connect completion */
-                if (conn->type == CCEV_CONN_CONNECTING) {
+            if (fired & EPOLLOUT) {
+                if (sock->mode == CCEV_SOCK_CONNECT) {
+                    /* Connect completion */
                     int so_err = 0;
                     socklen_t errlen = sizeof(so_err);
-                    getsockopt((int)(intptr_t)conn->fd, SOL_SOCKET,
+                    getsockopt((int)(intptr_t)sock->fd, SOL_SOCKET,
                                 SO_ERROR, (char*)&so_err, &errlen);
-                    if (so_err == 0 && conn->connector.cb) {
-                        conn->type = CCEV_CONN_NORMAL;
-                        conn->connector.cb(conn->connector.udata, conn, CCEV_OK);
-                        /* Connect succeeded — re-arm for I/O */
-                        ccev__conn_rearm(loop, conn);
-                    } else if (conn->connector.cb) {
-                        conn->connector.cb(conn->connector.udata, conn, CCEV_ERR);
-                        ccev__conn_schedule_close(loop, conn);
+                    if (so_err == 0) {
+                        sock->mode = CCEV_SOCK_INIT;
+                        /* Clear connect timer */
+                        if (sock->connector.timer) {
+                            ccev_timer_del(loop, sock->connector.timer);
+                            sock->connector.timer = NULL;
+                        }
+                        if (sock->connector.cb)
+                            sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
+                    } else {
+                        if (sock->connector.cb)
+                            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+                        ccev__sock_schedule_close(loop, sock);
                     }
                     continue;
                 }
 
-                /* Flush write buffer (ccev__conn_flush re-arms internally) */
-                if (conn->pending_write) ccev__conn_flush(loop, conn);
-
-                /* Continue sendfile if in progress */
-                if (conn->sendfile.sendfile_fd >= 0)
-                    ccev__conn_sendfile_continue(loop, conn);
+                /* Normal write — fire wcb */
+                if (sock->wcb) sock->wcb(sock, ccev_events);
             }
+
+            /* Re-arm after ONESHOT consumption */
+            if (sock->rcb || sock->wcb)
+                ccev__sock_rearm(loop, sock);
         }
 
-        /* 5. Re-arm wake_conn for next ccev_wakeup / ccev_loop_stop */
-        if (loop->wake_conn && !loop->wake_conn->closed)
-            ccev__conn_mod_internal(loop, loop->wake_conn, EPOLLIN);
+        /* 5. Re-arm wake_sock for next ccev_wakeup / ccev_loop_stop */
+        if (loop->wake_sock && !loop->wake_sock->closed)
+            ccev__sock_mod_internal(loop, loop->wake_sock, EPOLLIN);
 
-        /* 6. Process closing queue — conn was already removed from
-         * all_conns by ccev__conn_schedule_close. */
+        /* 6. Process closing queue */
         ccev__process_closing(loop);
 
         if (loop->stop_flag) break;
@@ -373,109 +341,232 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
  *  Listener
  * ════════════════════════════════════════════════════════════════ */
 
-ccev_conn_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
+ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                            int backlog, ccev_flag_t flags,
-                           ccev_accept_cb on_accept, void *udata) {
-    if (!loop || !addr || !on_accept) return NULL;
+                           ccev_listen_cb cb, void *udata) {
+    if (!loop || !addr || !cb) return NULL;
 
-    /* Determine address family from string format */
     ccsocket_family_t family = ccsocket_get_version(addr);
     if (family == CC_FAMILY_INVALID) return NULL;
     if (family == CC_INET4 || family == CC_INET6) {
         if (addr[0] == '\0') { addr = "::"; family = CC_INET6; }
     }
 
-    int proto = (flags & CCEV_UDP) ? CC_UDP : CC_TCP;
+    int proto = CC_TCP; /* listen is TCP/UDS only, no UDP */
     ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
     if (fd == (ccsocket_t)-1) return NULL;
 
-    /* Apply flags (UDS ignores most socket options) */
-    if (family == CC_UNIX || !((flags & CCEV_REUSEADDR || flags & CCEV_REUSEPORT))) {
+    if (family == CC_UNIX || !(flags & (CCEV_REUSEADDR | CCEV_REUSEPORT))) {
         if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
     } else {
         if (!ccsocket_listen1(fd, addr, port)) { ccsocket_close(fd); return NULL; }
     }
 
-    /* Apply deferred accept when requested */
     if ((flags & CCEV_ACCEPT_DEFER) && family != CC_UNIX)
         ccsocket_enable_accept_defer(fd);
 
-    ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
-    if (!conn) { ccsocket_close(fd); return NULL; }
+    ccev_sock_t *sock = ccev_sock_create(loop, fd, udata);
+    if (!sock) { ccsocket_close(fd); return NULL; }
 
-    conn->type           = CCEV_CONN_LISTENER;
-    conn->listener.cb    = on_accept;
-    conn->listener.udata = udata;
+    sock->mode           = CCEV_SOCK_LISTEN;
+    sock->listener.cb    = cb;
+    sock->listener.udata = udata;
 
-    ccev__conn_mod_internal(loop, conn, EPOLLIN);
-    return conn;
+    ccev__sock_mod_internal(loop, sock, EPOLLIN);
+    return sock;
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  Async connect (uses ccsocket)
+ *  Async connect (with internal DNS)
  * ════════════════════════════════════════════════════════════════ */
 
-/* Timer callback for connect timeout */
-static void connect_timeout_cb(void *udata) {
-    ccev_conn_t *conn = (ccev_conn_t *)udata;
-    if (conn->type == CCEV_CONN_CONNECTING && conn->connector.cb) {
-        conn->connector.cb(conn->connector.udata, conn, CCEV_ERR);
-        ccev__conn_schedule_close(conn->loop, conn);
-    }
+/*
+ * DNS callback wrapper — prevents use-after-free when the user closes
+ * a connecting sock while DNS is in flight.  The wrapper outlives the
+ * sock; ccev__sock_free marks it dead via dns_cancelled.
+ */
+typedef struct {
+    ccev_sock_t *sock;
+    bool         alive;
+} _connect_dns_ctx_t;
+
+/*
+ * Internal state machine for ccev_connect:
+ *
+ *   ccev_connect()
+ *     ├─ host is IP → create TCP fd → EPOLLOUT → connect_cb
+ *     └─ host is domain → DNS resolve → create TCP fd → EPOLLOUT → connect_cb
+ *
+ * The total timeout (timeout_ms) spans both phases.
+ * A single timer is shared via the connector struct.
+ */
+
+/* ── Connect timeout callback ── */
+static void _connect_timeout_cb(void *udata) {
+    ccev_sock_t *sock = (ccev_sock_t *)udata;
+    if (sock->mode != CCEV_SOCK_CONNECT) return;
+    sock->connector.timer = NULL;
+
+    if (sock->connector.cb)
+        sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+    ccev__sock_schedule_close(sock->loop, sock);
 }
 
-int ccev_connect(ccev_loop_t *loop, const char *addr, uint16_t port,
-                  unsigned int timeout_ms, ccev_flag_t flags,
-                  ccev_connect_cb on_connect, void *udata) {
-    if (!loop || !addr || !on_connect) return CCEV_ERR;
+/* ── Resume connect after DNS resolution ── */
+static void _connect_dns_cb(void *udata, const char *address, int status) {
+    _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)udata;
+    if (!ctx->alive) { ccev__free_fn(ctx); return; }
 
-    ccsocket_family_t family = ccsocket_get_version(addr);
-    if (family == CC_FAMILY_INVALID) return CCEV_ERR;
-
-    int proto = (flags & CCEV_UDP) ? CC_UDP : CC_TCP;
-    ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
-    if (fd == (ccsocket_t)-1) return CCEV_ERR;
-
-    /* UDP / UDS datagram: immediate connect (non-blocking) */
-    if (proto == CC_UDP || family == CC_UNIX) {
-        if (ccsocket_connect(fd, addr, port)) {
-            ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
-            if (!conn) { ccsocket_close(fd); return CCEV_ERR; }
-            conn->type = CCEV_CONN_NORMAL;
-            on_connect(udata, conn, CCEV_OK);
-            return CCEV_OK;
-        }
-        return CCEV_ERR;
+    ccev_sock_t *sock = ctx->sock;
+    sock->connector.dns_cancelled = NULL;
+    ccev__free_fn(ctx);
+    if (status != CCEV_OK || !address || address[0] == '\0') {
+        if (sock->connector.cb)
+            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+        ccev__sock_schedule_close(sock->loop, sock);
+        return;
     }
 
-    /* TCP: non-blocking connect */
-    bool connected = ccsocket_connect(fd, addr, port);
+    /* DNS succeeded — create TCP socket and connect */
+    ccsocket_family_t family = ccsocket_get_version(address);
+    if (family == CC_FAMILY_INVALID) {
+        if (sock->connector.cb)
+            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+        ccev__sock_schedule_close(sock->loop, sock);
+        return;
+    }
+
+    ccsocket_t fd = ccsocket1(family, CC_TCP, CC_CLOEXEC | CC_NONBLOCK);
+    if (fd == (ccsocket_t)-1) {
+        if (sock->connector.cb)
+            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+        ccev__sock_schedule_close(sock->loop, sock);
+        return;
+    }
+
+    bool connected = ccsocket_connect(fd, address, sock->connector.port);
     if (connected) {
-        ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
-        if (!conn) { ccsocket_close(fd); return CCEV_ERR; }
-        conn->type = CCEV_CONN_NORMAL;
-        on_connect(udata, conn, CCEV_OK);
-        return CCEV_OK;
+        /* Immediate connect — rare but possible (loopback / UDS) */
+        sock->fd = fd;
+        sock->mode = CCEV_SOCK_INIT;
+        if (sock->connector.timer) {
+            ccev_timer_del(sock->loop, sock->connector.timer);
+            sock->connector.timer = NULL;
+        }
+        if (sock->connector.cb)
+            sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
+        return;
     }
 
     /* EINPROGRESS — wait for EPOLLOUT */
-    ccev_conn_t *conn = ccev_conn_create(loop, fd, udata);
-    if (!conn) { ccsocket_close(fd); return CCEV_ERR; }
+    sock->fd = fd;
+    ccev__sock_mod_internal(sock->loop, sock, EPOLLOUT);
+}
 
-    conn->type            = CCEV_CONN_CONNECTING;
-    conn->connector.cb    = on_connect;
-    conn->connector.udata = udata;
+/* ── Public connect API ── */
 
-    /* Register for EPOLLOUT (fires on connect completion) */
-    ccev__conn_mod_internal(loop, conn, EPOLLOUT);
+ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
+                            unsigned int timeout_ms, ccev_flag_t flags,
+                            ccev_connect_cb cb, void *udata) {
+    if (!loop || !host || !cb) return NULL;
 
+    /* Create the sock with fd=-1 (no real fd yet) */
+    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_t));
+    if (!sock) return NULL;
+    memset(sock, 0, sizeof(ccev_sock_t));
+
+    sock->loop   = loop;
+    sock->fd     = (ccsocket_t)-1;
+    sock->mode   = CCEV_SOCK_CONNECT;
+    sock->udata  = udata;
+
+    /* Init connector state */
+    size_t hlen = strlen(host);
+    if (hlen >= sizeof(sock->connector.host))
+        hlen = sizeof(sock->connector.host) - 1;
+    memcpy(sock->connector.host, host, hlen);
+    sock->connector.host[hlen] = '\0';
+    sock->connector.port      = port;
+    sock->connector.timeout_ms = timeout_ms;
+    sock->connector.cb        = cb;
+    sock->connector.udata     = udata;
+
+    /* Add to all_socks list */
+    cclist_push_back(&loop->all_socks, &sock->lnode);
+    loop->sock_count++;
+
+    /* Start total timeout timer */
     if (timeout_ms > 0) {
-        conn->connector.timer = ccev_timer_add(
-            loop, timeout_ms, CCEV_TIMER_ONCE,
-            connect_timeout_cb, conn);
+        sock->connector.timer = ccev_timer_add(loop, timeout_ms,
+                                                 CCEV_TIMER_ONCE,
+                                                 _connect_timeout_cb, sock);
     }
 
-    return CCEV_OK;
+    /* Determine if host is a raw IP or a hostname */
+    ccsocket_family_t family = ccsocket_get_version(host);
+    if (family == CC_INET4 || family == CC_INET6 || family == CC_UNIX) {
+        /* Direct connect — create TCP fd immediately */
+        int proto = (family == CC_UNIX) ? CC_TCP : CC_TCP;
+        ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
+        if (fd == (ccsocket_t)-1) {
+            if (sock->connector.timer)
+                ccev_timer_del(loop, sock->connector.timer);
+            cclist_remove(&loop->all_socks, &sock->lnode);
+            loop->sock_count--;
+            ccev__free_fn(sock);
+            return NULL;
+        }
+
+        bool connected = ccsocket_connect(fd, host, port);
+        if (connected) {
+            sock->fd   = fd;
+            sock->mode = CCEV_SOCK_INIT;
+            if (sock->connector.timer) {
+                ccev_timer_del(loop, sock->connector.timer);
+                sock->connector.timer = NULL;
+            }
+            cb(udata, sock, CCEV_OK);
+            return sock;
+        }
+
+        /* EINPROGRESS */
+        sock->fd = fd;
+        ccev__sock_mod_internal(loop, sock, EPOLLOUT);
+    } else {
+        /* Hostname — resolve via async DNS first */
+        unsigned int dns_timeout = timeout_ms;
+        if (dns_timeout == 0 || dns_timeout > 10000) dns_timeout = 10000;
+        if (dns_timeout < 1000) dns_timeout = 1000;
+
+        _connect_dns_ctx_t *dns_ctx = (_connect_dns_ctx_t *)
+        ccev__realloc_fn(NULL, sizeof(_connect_dns_ctx_t));
+    if (!dns_ctx) {
+        if (sock->connector.timer)
+            ccev_timer_del(loop, sock->connector.timer);
+        cclist_remove(&loop->all_socks, &sock->lnode);
+        loop->sock_count--;
+        ccev__free_fn(sock);
+        return NULL;
+    }
+    dns_ctx->sock     = sock;
+    dns_ctx->alive    = true;
+    sock->connector.dns_cancelled = &dns_ctx->alive;
+
+    if (ccev_dns_resolve(loop, host, dns_timeout,
+                          CCEV_DNS_A | CCEV_DNS_AAAA,
+                          _connect_dns_cb, dns_ctx) != CCEV_OK) {
+            sock->connector.dns_cancelled = NULL;
+            ccev__free_fn(dns_ctx);
+            if (sock->connector.timer)
+                ccev_timer_del(loop, sock->connector.timer);
+            cclist_remove(&loop->all_socks, &sock->lnode);
+            loop->sock_count--;
+            ccev__free_fn(sock);
+            return NULL;
+        }
+    }
+
+    return sock;
 }
 
 /* ════════════════════════════════════════════════════════════════

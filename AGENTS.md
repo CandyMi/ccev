@@ -7,7 +7,7 @@
 **ccev** — A lightweight, cross-platform reactor event-driven library.
 
 - Language: C99
-- Build: CMake ≥ 3.0
+- Build: CMake ≥ 3.10
 - License: MIT
 - Author: CandyMi
 
@@ -28,9 +28,10 @@ CMake will print a clear error if they are missing.
 |---|---|
 | src/ccev.h | Public API (Doxygen) |
 | src/ccev_internal.h | Internal structures |
-| src/ccev.c | Reactor core |
+| src/ccev.c | Reactor core (loop, listen, connect, dispatch) |
+| src/ccev_sock.c | Socket lifecycle (create, close, epoll registration) |
+| src/ccev_stream.c | Buffered I/O, write/read/sendfile state machines |
 | src/ccev_timer.c | Timer subsystem (4-ary heap) |
-| src/ccev_conn.c | Connection I/O, buffering, sendfile |
 | src/ccev_dns.c | Async DNS resolver |
 | src/ccev_icmp.c | ICMP echo (ping) |
 | src/ccev_signal.c | Signal handling (self-pipe trick) |
@@ -57,8 +58,9 @@ primary responsibility:
 | Symbol | File | Reason |
 |--------|------|--------|
 | `ccev_loop_create/destroy/run/stop`, `ccev_listen`, `ccev_connect`, `ccev_default_loop` | `ccev.c` | Core reactor lifecycle |
+| `ccev_sock_create/close/read_start/stop/write_start/stop/set_close_cb/get_fd/get_udata/set_udata/count` | `ccev_sock.c` | Socket lifecycle + epoll management |
+| `ccev_stream_open/close/write/write_batch/flush/sendfile/readline/readnum/read_stop/set_send_cb/set_close_cb/wbuf_len` | `ccev_stream.c` | Buffered I/O + stream reader |
 | `ccev_timer_add/del/reset` | `ccev_timer.c` | Timer subsystem |
-| `ccev_conn_create/close/send/recv/sendall/sendfile` | `ccev_conn.c` | Connection I/O |
 | `ccev_dns_*` | `ccev_dns.c` | DNS resolver |
 | `ccev_icmp_echo` | `ccev_icmp.c` | ICMP echo |
 | `ccev_signal_handle/ignore` | `ccev_signal.c` | Signal handling |
@@ -66,6 +68,38 @@ primary responsibility:
 Do NOT put functions in `ccev.c` that belong to a sub-module, and vice
 versa.  When a sub-module needs read-access to a core primitive (e.g.
 `ccev__g_default_loop`), declare it `extern` in `ccev_internal.h`.
+
+## Architecture — two-level socket abstraction
+
+```
+┌────────────────────────────────────────────┐
+│  Public API                                 │
+│                                             │
+│  ccev_listen() → ccev_sock_t* (TCP/UDS)    │
+│  ccev_connect() → ccev_sock_t* (+ DNS)     │
+│  ccev_sock_create(loop, fd, udata)          │
+│       → ccev_sock_t* (external fd)          │
+│                                             │
+│  Low-level (ccev_sock_t):                   │
+│    sock_read_start(sock, cb)                │
+│    sock_read_stop(sock)                     │
+│    sock_write_start(sock, cb)               │
+│    sock_write_stop(sock)                    │
+│    sock_set_close_cb(sock, cb, udata)       │
+│    sock_close(sock)                         │
+│                                             │
+│  High-level (ccev_stream_t):                │
+│    ccev_stream_open(sock) → stream          │
+│    stream_write(st, data, len, cb, udata)   │
+│    stream_write_batch(st, ...)              │
+│    stream_flush(st)                         │
+│    stream_sendfile(st, path)                │
+│    stream_readline(st, delim, maxlen,       │
+│                    timeout, cb, udata)      │
+│    stream_readnum(st, n, timeout, cb,udata) │
+│    stream_close(st)                         │
+└────────────────────────────────────────────┘
+```
 
 ## Coding conventions
 
@@ -79,12 +113,13 @@ versa.  When a sub-module needs read-access to a core primitive (e.g.
 
 | Category | Pattern | Example |
 |---|---|---|
-| Public functions | `ccev_verb_noun` | `ccev_loop_create`, `ccev_conn_send` |
-| Internal functions | `ccev__verb_noun` | `ccev__conn_rearm` |
-| Internal static | `_verb_noun` | `_dns_encode_query` |
-| Types (opaque) | `ccev_xxx_t` | `ccev_loop_t`, `ccev_conn_t` |
+| Public functions | `ccev_verb_noun` | `ccev_loop_create`, `ccev_sock_close` |
+| Internal functions | `ccev__verb_noun` | `ccev__sock_rearm` |
+| Internal static | `_verb_noun` | `_reader_dispatch` |
+| Types (opaque) | `ccev_xxx_t` | `ccev_loop_t`, `ccev_sock_t`, `ccev_stream_t` |
 | Enumerations | `CCEV_UPPER_SNAKE` | `CCEV_RUN_FOREVER` |
 | Constants | `CCEV_UPPER_SNAKE` | `CCEV_OK`, `CCEV_ERR` |
+| Event flags | `CCEV_EVENT_UPPER` | `CCEV_EVENT_READ`, `CCEV_EVENT_HUP` |
 
 ### Comment style
 
@@ -99,13 +134,14 @@ Follow ccsocket conventions:
 
 - System/platform headers (`<...>`) before project headers (`"..."`).
 - `#include` shall be minimal — do not include what you do not use.
+- `<string.h>` is provided by `ccev_internal.h` — do NOT include it in `.c` files.
 - Use `#if defined(_WIN32)` for Windows and `#else` for POSIX. No `__linux__` in public headers.
 
 ### Memory management
 
 - All internal allocations use `loop->realloc_fn` / `loop->free_fn` (replaceable).
 - Timers: lazy deletion via `active=false`. Freed when popped from heap.
-- Connections: deferred close via closing list, freed after all callbacks return.
+- Sockets: deferred close via closing list, freed after all callbacks return.
 - **DRY rule**: if you free the same struct type in more than one place, extract a `static void _xxx_free(loop, ptr)` helper.
 
 ### Error handling
@@ -113,13 +149,13 @@ Follow ccsocket conventions:
 - Return `CCEV_OK(0)` on success, `CCEV_ERR(-1)` on failure.
 - All public functions MUST guard NULL parameters at entry.
 - No `assert()`, no `abort()` in public functions.
-- Closed connections: all I/O returns `CCEV_ERR` immediately.
+- Closed sockets: all I/O returns `CCEV_ERR` immediately.
 
 ### Code reuse rules
 
 1. Every teardown/destroy pattern that appears more than once MUST be a named function.
 2. Every socket-fallback pattern (IPv4→IPv6) MUST be a shared helper.
-3. `ccev__conn_free()` was declared but never implemented — it MUST be implemented and used by both `ccev_loop_destroy` and the closing queue.
+3. `ccev__sock_free()` is the single free path for all sockets — never free a `ccev_sock_t` manually.
 
 ## Git conventions
 
@@ -137,7 +173,7 @@ Use **Conventional Commits** (English only):
 
 ### Scope
 
-Scope is the affected module: `core`, `timer`, `conn`, `dns`, `icmp`, `build`, `docs`, `tests`, `ci`.
+Scope is the affected module: `core`, `timer`, `sock`, `stream`, `dns`, `icmp`, `build`, `docs`, `tests`, `ci`.
 
 ### Commit checklist
 
@@ -152,7 +188,8 @@ Scope is the affected module: `core`, `timer`, `conn`, `dns`, `icmp`, `build`, `
 1. Every public API function MUST have at least one test in `tests/`.
 2. Every NULL-param guard MUST be tested (call with NULL, expect `CCEV_ERR`).
 3. Every "fd closed" path MUST be tested (call after close, expect `CCEV_ERR`).
-4. `ccev_conn_recv` must test all four modes.
-5. `ccev_conn_sendall` must test both `done=true` and `done=false` paths.
-6. Error-return paths (OOM, create failure) should have a test for each distinct error code.
-7. Tests MUST use the unified TEST/ASSERT/RUN macros (see test_timer.c).
+4. `ccev_stream_write` and `ccev_stream_write_batch` must test both with and without per-buffer callback.
+5. `ccev_stream_readline` and `ccev_stream_readnum` must test timeout expiration.
+6. `ccev_listen` + `ccev_connect` must have an end-to-end TCP test.
+7. Error-return paths (OOM, create failure) should have a test for each distinct error code.
+8. Tests MUST use the unified TEST/ASSERT/RUN macros (see test_timer.c).

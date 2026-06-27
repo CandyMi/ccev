@@ -1,6 +1,9 @@
 /**
  * @file ccev_timer.c
  * @brief Timer subsystem — ccheap (4-ary) with heap_index for O(log n) update.
+ *
+ * @author CandyMi
+ * @license MIT
  */
 
 #include "ccev_internal.h"
@@ -30,7 +33,12 @@ uint64_t ccev__now_ms(void) {
 #endif
 }
 
-void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
+int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
+    /* Phase 1: extract all expired timers from heap into local list.
+     *          Pure heap ops — no callbacks, no heap mutation after this. */
+    cclink_t expired;
+    cclink_init(&expired);
+
     while (1) {
         ccheap_node_t *min = ccheap_peek(&loop->timers);
         if (!min) break;
@@ -41,26 +49,39 @@ void ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
         ccheap_pop(&loop->timers);
 
         if (!timer->active) {
-            /* Already decremented by ccev_timer_del */
             ccev__free_fn(timer);
             continue;
         }
 
+        cclink_push_back(&expired, &timer->tlist);
+    }
+
+    /* Phase 2: fire all expired callbacks (timer priority > I/O). */
+    while (!cclink_empty(&expired)) {
+        cclink_node_t *n = cclink_pop_front(&expired);
+        ccev_timer_t *timer = CCLINK_CONTAINER(n, ccev_timer_t, tlist);
+
         timer->cb(timer->udata);
 
         if (timer->active && timer->mode == CCEV_TIMER_REPEAT) {
-            /* REPEAT timer not deleted in callback — re-insert */
-            ccheap_node_set(&timer->node, timeout, now_ms + timer->interval);
+            ccheap_node_set(&timer->node, timeout, ccev__now_ms() + timer->interval);
             ccheap_insert(&loop->timers, &timer->node);
         } else if (timer->active) {
-            /* ONCE timer not deleted — free and decrement */
             ccev__free_fn(timer);
             loop->timer_count--;
         } else {
-            /* Deleted inside callback — count already decremented by ccev_timer_del */
             ccev__free_fn(timer);
         }
     }
+
+    /* Phase 3: return ms until next future timer (-1 if none). */
+    ccheap_node_t *earliest = ccheap_peek(&loop->timers);
+    if (!earliest) return -1;
+    uint64_t t = ccheap_node_get(earliest, timeout);
+    uint64_t now = ccev__now_ms();
+    if (t <= now) return 0;
+    uint64_t diff = t - now;
+    return (diff > (uint64_t)INT_MAX) ? -1 : (int)diff;
 }
 
 ccev_timer_t *ccev_timer_add(ccev_loop_t *loop, uint64_t delay_ms,

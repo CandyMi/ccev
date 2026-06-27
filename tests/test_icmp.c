@@ -47,7 +47,7 @@ TEST(icmp_null_cb) {
 
 static int timeout_fired;
 
-static void on_timeout_check(void *udata, ccev_icmp_result_t *result) {
+static void on_timeout_check(void *udata, const ccev_icmp_result_t *result) {
     (void)result;
     timeout_fired = 1;
     ccev_loop_stop((ccev_loop_t *)udata);
@@ -97,7 +97,7 @@ TEST(icmp_no_timeout) {
 
 static int cleanup_ok;
 
-static void on_leak_check_cb(void *udata, ccev_icmp_result_t *result) {
+static void on_leak_check_cb(void *udata, const ccev_icmp_result_t *result) {
     (void)result;
     cleanup_ok = 0;  /* should NOT fire */
 }
@@ -124,7 +124,7 @@ TEST(icmp_destroy_while_pending) {
 
 static int dns_triggered;
 
-static void on_domain_result(void *udata, ccev_icmp_result_t *result) {
+static void on_domain_result(void *udata, const ccev_icmp_result_t *result) {
     dns_triggered = 1;
     /* result is NULL on timeout or DNS failure */
     ccev_loop_stop((ccev_loop_t *)udata);

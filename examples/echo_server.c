@@ -1,6 +1,6 @@
 /**
  * @file echo_server.c
- * @brief A simple TCP echo server using ccev.
+ * @brief A simple TCP echo server using ccev (sock-level API).
  *
  * Usage: ./echo_server [port] [address]
  *   Default: 0.0.0.0:8080
@@ -16,44 +16,42 @@
 #include <string.h>
 #include <stdlib.h>
 
-static void on_sent(void *udata) {
-    (void)udata;  /* nothing to do — echo is fire-and-forget */
-}
-
-static void on_recv(void *udata) {
-    ccev_conn_t *conn = (ccev_conn_t *)udata;
+static void on_read(ccev_sock_t *sock, int events) {
+    (void)events;
+    ccsocket_t fd = ccev_sock_get_fd(sock);
     char buf[4096];
     int n;
 
-    /* Read all available data and echo back */
     for (;;) {
-        n = ccev_conn_recv(conn, buf, sizeof(buf), NULL, NULL);
-        if (n > 0) {
-            ccev_conn_send(conn, buf, (size_t)n, on_sent, NULL);
-        } else if (n == 0) {
+        ccsocket_stcode_t rc = ccsocket_recv(fd, buf, sizeof(buf), &n);
+        if (rc == CC_OPCODE_OK && n > 0) {
+            int w;
+            ccsocket_send(fd, buf, (size_t)n, &w);
+        } else if (rc == CC_OPCODE_ERROR && n == 0) {
             printf("  [echo] client closed connection\n");
-            ccev_conn_close(conn);
+            ccev_sock_close(sock);
             return;
         } else {
-            /* EAGAIN or error (-1): return, epoll will re-arm */
+            /* EAGAIN (CC_OPCODE_WAIT) or error — return.
+             * ONESHOT re-arm happens automatically in the dispatch loop. */
             return;
         }
     }
 }
 
 static void on_close(void *udata) {
-    ccev_conn_t *conn = (ccev_conn_t *)udata;
+    ccev_sock_t *sock = (ccev_sock_t *)udata;
     printf("  [echo] connection closed\n");
-    ccev_conn_close(conn);
+    (void)sock;  /* sock is already in closing — no further action needed */
 }
 
-static void on_accept(void *udata, ccev_conn_t *conn,
+static void on_accept(void *udata, ccev_sock_t *client,
                        const char *ip, int port) {
     (void)udata;
     printf("  [echo] accept: %s:%d\n", ip, port);
 
-    ccev_conn_set_close_cb(conn, on_close, conn);
-    ccev_conn_recv(conn, NULL, 0, on_recv, conn);
+    ccev_sock_set_close_cb(client, on_close, client);
+    ccev_sock_read_start(client, on_read);
 }
 
 int main(int argc, char **argv) {
@@ -68,7 +66,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    ccev_conn_t *listener = ccev_listen(loop, host, port, 128,
+    ccev_sock_t *listener = ccev_listen(loop, host, port, 128,
                                          CCEV_REUSEADDR, on_accept, NULL);
     if (!listener) {
         fprintf(stderr, "Failed to listen on %s:%u\n", host, port);

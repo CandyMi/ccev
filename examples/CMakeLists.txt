@@ -6,3 +6,6 @@ target_link_libraries(timer_demo PRIVATE ccev)
 
 add_executable(http_bench http_bench.c)
 target_link_libraries(http_bench PRIVATE ccev)
+
+add_executable(http1_bench http1_bench.c)
+target_link_libraries(http1_bench PRIVATE ccev)
