@@ -19,7 +19,15 @@ static void ccev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
     unsigned char byte = (unsigned char)signum;
+#if defined(_WIN32)
     ccsocket_send(loop->signal_pipe[1], &byte, 1, NULL);
+#else
+    /* Pipe is non-blocking; EAGAIN means the kernel buffer is full
+     * (~64 KiB / 65536 pending signals) — the signal byte is lost
+     * but no recovery is possible from a signal handler. */
+    if (loop->signal_pipe[1] > 0)
+        (void)write(loop->signal_pipe[1], (char*)&byte, 1);
+#endif
 }
 
 /* ── Dispatch callback (fired from loop on pipe readable) ───── */

@@ -81,6 +81,9 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     cchashmap_init(&loop->dns_cache, NULL, NULL);
     cchashmap_init(&loop->dns_pending, NULL, NULL);
 
+    /* Pre-populate DNS cache from OS hosts file */
+    ccev_dns_flush(loop);
+
     /* Wakeup pipe */
     if (ccsocket_pipe(loop->wakefds) < 0) {
         ccev__free_fn(loop->events);
@@ -183,7 +186,7 @@ ccev_loop_t *ccev_default_loop(void) {
     static ccev_loop_t *loop = NULL;
     if (loop) return loop;
 
-    loop = ccev_loop_create(64);
+    loop = ccev_loop_create(2048);
     if (!loop) return NULL;
 
     /* Create self-pipe for signal delivery */

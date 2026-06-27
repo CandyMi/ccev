@@ -115,20 +115,20 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
     int sent = 0;
     ccsocket_stcode_t rc = ccsocket_sendv(conn->fd, iov, niov, &sent);
     if (rc == CC_OPCODE_OK || rc == CC_OPCODE_WAIT) {
-        int remaining_sent = sent;
+        size_t remaining_sent = (sent > 0) ? (size_t)sent : 0;
         while (remaining_sent > 0) {
             cclink_node_t *head = cclink_begin(&conn->wbuf_list);
             if (!head) break;
             ccev_buf_t *b = (ccev_buf_t *)((char*)head - offsetof(ccev_buf_t, node));
             size_t avail = b->len - b->offset;
-            if (avail <= (size_t)remaining_sent) {
-                remaining_sent -= (int)avail;
+            if (avail <= remaining_sent) {
+                remaining_sent -= avail;
                 conn->wbuf_len -= avail;
                 cclink_remove(&conn->wbuf_list, head);
                 ccev__buf_free(loop, b);
             } else {
-                b->offset += (size_t)remaining_sent;
-                conn->wbuf_len -= (size_t)remaining_sent;
+                b->offset += remaining_sent;
+                conn->wbuf_len -= remaining_sent;
                 remaining_sent = 0;
             }
         }
@@ -153,6 +153,7 @@ void ccev__conn_flush(ccev_loop_t *loop, ccev_conn_t *conn) {
 
 void ccev__conn_free(ccev_conn_t *conn) {
     if (!conn) return;
+    if (conn->loop) conn->loop->conn_count--;
     /* Close sendfile file fd if still in progress */
     if (conn->sendfile.sendfile_fd >= 0) {
         close(conn->sendfile.sendfile_fd);
@@ -190,8 +191,6 @@ void ccev__conn_schedule_close(ccev_loop_t *loop, ccev_conn_t *conn) {
     /* Remove from epoll */
     epoll_ctl(loop->epfd, EPOLL_CTL_DEL, (int)(intptr_t)conn->fd, NULL);
     conn->reg_events = 0;
-
-    loop->conn_count--;
 
     /* Remove from all_conns first, then push to closing.
      * This prevents the lnode from being in two lists simultaneously,

@@ -108,28 +108,22 @@ int ccev_dns_set_server(ccev_loop_t *loop,
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  Domain hash/equal helpers (shared by cache + pending)
+ *  Domain hash/equal helpers — FNV-1a via function pointers
+ *  Both ccev_dns_cache_t and ccev_dns_pending_t embed the domain
+ *  string right after cchashmap_node_t, so (n + 1) reaches it
+ *  at the same offset — a single pair of functions suffices.
  * ════════════════════════════════════════════════════════════════ */
 
-static uint64_t domain_hash(const char *domain, size_t seed) {
-    uint64_t h = seed;
-    while (*domain) { h = h * 31 + (unsigned char)(*domain); domain++; }
+/* FNV-1a hash: (n + 1) reaches domain for both cache & pending types */
+static uint64_t dns_domain_hash(const cchashmap_node_t *n, size_t seed) {
+    const unsigned char *p = (const unsigned char *)(n + 1);
+    uint64_t h = seed ^ 0xcbf29ce484222325ULL;
+    while (*p) { h ^= *p++; h *= 0x100000001b3ULL; }
     return h;
 }
-
-/* Generate hash/equal helpers for a DNS hashmap type that has a
- * cchashmap_node_t `node` and a `domain` char array at offset 0. */
-#define CCEV_DNS_HASH_EQUAL_DEFINE(prefix, type)                        \
-static uint64_t prefix##_hash(const cchashmap_node_t *n, size_t seed) { \
-    return domain_hash(CCHASHMAP_CONTAINER(n, type, node)->domain, seed);\
-}                                                                        \
-static bool prefix##_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {\
-    return strcmp(CCHASHMAP_CONTAINER(a, type, node)->domain,            \
-                  CCHASHMAP_CONTAINER(b, type, node)->domain) == 0;       \
+static bool dns_domain_equal(const cchashmap_node_t *a, const cchashmap_node_t *b) {
+    return strcmp((const char *)(a + 1), (const char *)(b + 1)) == 0;
 }
-
-CCEV_DNS_HASH_EQUAL_DEFINE(cache, ccev_dns_cache_t)
-CCEV_DNS_HASH_EQUAL_DEFINE(pending, ccev_dns_pending_t)
 
 /* ════════════════════════════════════════════════════════════════
  *  DNS answer collector (stack-allocated, used in recv callback)
@@ -171,7 +165,7 @@ static ccev_dns_cache_t *cache_lookup(ccev_loop_t *loop, const char *domain) {
 static void cache_insert(ccev_loop_t *loop, const char *domain,
                           const char *ip, int ttl) {
     if (!loop->dns_cache.buckets)
-        cchashmap_init(&loop->dns_cache, cache_hash, cache_equal);
+        cchashmap_init(&loop->dns_cache, dns_domain_hash, dns_domain_equal);
     ccev_dns_cache_t *old = cache_lookup(loop, domain);
     if (old) { cchashmap_del(&loop->dns_cache, &old->node); ccev__free_fn(old); }
     ccev_dns_cache_t *e = (ccev_dns_cache_t *)
@@ -211,7 +205,7 @@ void ccev_dns_flush(ccev_loop_t *loop) {
 #endif
     FILE *fp = fopen(hosts_path, "r");
     if (!fp) return;
-    char line[1024];
+    char line[4096];
     while (fgets(line, sizeof(line), fp)) {
         const char *p = line;
         while (*p && (unsigned char)*p <= ' ') p++;
@@ -231,7 +225,7 @@ void ccev_dns_flush(ccev_loop_t *loop) {
             ccev_dns_cache_t *old = cache_lookup(loop, domain);
             if (old) { cchashmap_del(&loop->dns_cache, &old->node); ccev__free_fn(old); }
             if (!loop->dns_cache.buckets)
-                cchashmap_init(&loop->dns_cache, cache_hash, cache_equal);
+                cchashmap_init(&loop->dns_cache, dns_domain_hash, dns_domain_equal);
             ccev_dns_cache_t *e = (ccev_dns_cache_t *)
                 ccev__realloc_fn(NULL, sizeof(ccev_dns_cache_t));
             if (!e) break;
@@ -265,7 +259,7 @@ static ccev_dns_pending_t *pending_lookup(ccev_loop_t *loop, const char *domain)
 /* Register a pending resolution entry */
 static ccev_dns_pending_t *pending_add(ccev_loop_t *loop, const char *domain) {
     if (!loop->dns_pending.buckets)
-        cchashmap_init(&loop->dns_pending, pending_hash, pending_equal);
+        cchashmap_init(&loop->dns_pending, dns_domain_hash, dns_domain_equal);
     ccev_dns_pending_t *p = (ccev_dns_pending_t *)
         ccev__realloc_fn(NULL, sizeof(ccev_dns_pending_t));
     if (!p) return NULL;
@@ -363,7 +357,7 @@ static void dns_recv_cb(void *udata) {
     ccev_dns_query_t *q = (ccev_dns_query_t *)udata;
     if (!q || q->finished) return;
 
-    unsigned char buf[1536];
+    unsigned char buf[4096];
     int n;
     ccsocket_stcode_t rc = ccsocket_recv(q->conn->fd, (char*)buf, sizeof(buf), &n);
     if (rc != CC_OPCODE_OK || n <= 0) return;
