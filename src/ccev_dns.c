@@ -413,10 +413,6 @@ static void dns_timeout_cb(void *udata) {
     if (!q || q->finished) return;
     q->finished = true;
     q->timer = NULL;
-#if !defined(_WIN32)
-    write(2, "T", 1);
-    if (q->cb) write(2, "C", 1);
-#endif
     ccev_dns_pending_t *p = q->pending;
 
     /* 1. Distribute waiters with timeout */

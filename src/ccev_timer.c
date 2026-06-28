@@ -41,7 +41,7 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
 
     while (1) {
         ccheap_node_t *min = ccheap_peek(&loop->timers);
-        if (!min) { write(2, "E", 1); break; }
+        if (!min) break;
 
         ccev_timer_t *timer = CCHEAP_CONTAINER(min, ccev_timer_t, node);
         if (ccheap_node_get(&timer->node, timeout) > now_ms) break;
@@ -57,15 +57,9 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
     }
 
     /* Phase 2: fire all expired callbacks (timer priority > I/O). */
-#if !defined(_WIN32)
-    { static int _dbg=0; if (_dbg++<5) { write(2, "FIRE", 5); write(2, "0123456789"+cclink_size(&expired), 1); write(2, "\n", 1); }}
-#endif
     while (!cclink_empty(&expired)) {
         cclink_node_t *n = cclink_pop_front(&expired);
         ccev_timer_t *timer = CCLINK_CONTAINER(n, ccev_timer_t, tlist);
-#if !defined(_WIN32)
-        { static int _tn=0; if (++_tn <= 5) write(2, timer->mode==CCEV_TIMER_ONCE?"1":"R", 1); }
-#endif
 
         timer->cb(timer->udata);
 

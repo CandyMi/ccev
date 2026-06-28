@@ -214,9 +214,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     int n = 0;
 
     do {
-#if !defined(_WIN32)
-        { static int _n=0; if (++_n<=3) write(2, "L", 1); }
-#endif
 #if defined(_WIN32)
         /* On Windows the signal handler stores the signum in
          * loop->sig_pending and wakes the loop.  Check it here
@@ -228,9 +225,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 1. Process expired timers + get ms until next future timer.
          *    Returns -1 if no timers remain. */
         int next_ms = ccev__timer_process(loop, now);
-#if !defined(_WIN32)
-        { static int _f=0; if (++_f<=5) { write(2, loop->stop_flag?"S":"s", 1); }}
-#endif
         if (loop->stop_flag) break;
 
         /* 2. Compute epoll timeout */
