@@ -38,16 +38,25 @@ typedef struct {
     char            host[256];   /**< Target IP or hostname      */
 } ccev_ping_t;
 
+/* ── Sock close callback — closes the ICMP fd and frees state ──── */
+
+static void ping_close_cb(void *udata) {
+    ccev_ping_t *p = (ccev_ping_t *)udata;
+    ccicmp_close(&p->ping);
+    if (p->sock) p->sock->fd = (ccsocket_t)-1;  /* prevent double-close */
+    ccev__free_fn(p);
+}
+
 /* ── Timeout callback ─────────────────────────────────────────────── */
 
 static void ping_timeout_cb(void *udata) {
     ccev_ping_t *p = (ccev_ping_t *)udata;
-    ccicmp_close(&p->ping);
 
     if (p->cb) p->cb(p->udata, NULL);
 
     if (p->sock) {
         ccev__sock_schedule_close(p->loop, p->sock);
+        /* ccicmp_close + free p handled by ping_close_cb */
     } else {
         ccev__free_fn(p);
     }
@@ -77,9 +86,8 @@ static void ping_recv_ready(ccev_sock_t *sock, int events) {
         result.payload_len = p->reply_len;
         result.ttl         = (p->ping.ttl >= 0) ? p->ping.ttl : 0;
 
-        ccicmp_close(&p->ping);
-
-        /* Fire user callback BEFORE close, so udata is still valid. */
+        /* Fire user callback BEFORE close, so udata is still valid.
+         * ccicmp_close is handled by ping_close_cb on sock close. */
         if (p->cb) p->cb(p->udata, &result);
 
         if (p->sock)
@@ -109,6 +117,7 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
     ccev_sock_t *s = ccev_sock_create(loop, (ccsocket_t)(intptr_t)fd, p);
     if (!s) return -1;
     p->sock = s;
+    ccev_sock_set_close_cb(s, ping_close_cb, p);
     ccev_sock_read_start(s, ping_recv_ready);
 
     /* Set a timeout */
@@ -116,8 +125,9 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
         p->timer = ccev_timer_add(loop, p->timeout_ms, CCEV_TIMER_ONCE,
                                    ping_timeout_cb, p);
         if (!p->timer) {
+            /* close_cb fires from process_closing → ccicmp_close + free p */
             ccev__sock_schedule_close(loop, s);
-            return -1;  /* OOM — no timer would cause indefinite hang */
+            return -1;
         }
     }
 
@@ -163,9 +173,14 @@ static void ccev__icmp_dns_cb(void *udata, const char *address, int status) {
 
     /* Send echo to the resolved IP address (not the original hostname) */
     if (ccev__icmp_send_echo(p, address) != 0) {
-        ccicmp_close(&p->ping);
-        if (p->cb) p->cb(p->udata, NULL);
-        ccev__free_fn(p);
+        if (!p->sock) {
+            /* sock was never created — cleanup directly */
+            ccicmp_close(&p->ping);
+            if (p->cb) p->cb(p->udata, NULL);
+            ccev__free_fn(p);
+        }
+        /* sock was created but setup failed (OOM) — cleanup deferred
+         * to ping_close_cb; user callback already fired by OOM path */
     }
 }
 
@@ -201,8 +216,10 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
         }
 
         if (ccev__icmp_send_echo(p, host) != 0) {
-            ccicmp_close(&p->ping);
-            ccev__free_fn(p);
+            if (!p->sock) {
+                ccicmp_close(&p->ping);
+                ccev__free_fn(p);
+            }
             return CCEV_ERR;
         }
         return CCEV_OK;

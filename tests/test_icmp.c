@@ -165,7 +165,22 @@ TEST(icmp_domain_nonexistent) {
  *  Main
  * ════════════════════════════════════════════════════════════════ */
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#include <signal.h>
+
+static void test_timeout(int sig) {
+    (void)sig;
+    write(STDERR_FILENO, "TIMEOUT: test_icmp hung, aborting\n", 33);
+    _exit(1);
+}
+#endif
+
 int main(void) {
+#if !defined(_WIN32)
+    signal(SIGALRM, test_timeout);
+    alarm(10);
+#endif
     passed = failed = 0;
 
     printf("icmp NULL guards:\n");
