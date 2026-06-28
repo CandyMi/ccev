@@ -16,18 +16,27 @@
 #include "ccev_internal.h"
 #include <signal.h>
 
+/* Async-signal-safe: stores the most recent signal number.
+ * On POSIX the self-pipe is the primary mechanism; on Windows
+ * Winsock send() is not safe inside signal() handlers, so we
+ * use this flag and wake the loop via ccev_wakeup() instead. */
+static volatile sig_atomic_t ccev__pending_signal;
+
 /* ── Signal handler (async-signal-safe) ─────────────────────── */
 
 static void ccev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
-    unsigned char byte = (unsigned char)signum;
 #if defined(_WIN32)
-    ccsocket_send(loop->signal_pipe[1], &byte, 1, NULL);
+    /* On Windows, Winsock calls are not safe from signal handlers.
+     * Store the signum and wake the loop via the wakeup pipe. */
+    ccev__pending_signal = (sig_atomic_t)signum;
+    ccev_wakeup(loop);
 #else
     /* Pipe is non-blocking; EAGAIN means the kernel buffer is full
      * (~64 KiB / 65536 pending signals) — the signal byte is lost
      * but no recovery is possible from a signal handler. */
+    unsigned char byte = (unsigned char)signum;
     if (loop->signal_pipe[1] > 0)
         (void)write(loop->signal_pipe[1], (char*)&byte, 1);
 #endif
@@ -40,6 +49,16 @@ void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
 
+#if defined(_WIN32)
+    /* On Windows, the signal handler stores the signum in a volatile
+     * flag and wakes the loop.  Read the flag here. */
+    int signum = (int)ccev__pending_signal;
+    if (signum != 0) {
+        ccev__pending_signal = 0;
+        if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
+            loop->signals[signum].cb(loop->signals[signum].udata, signum);
+    }
+#else
     unsigned char byte;
     while (ccsocket_recv(loop->signal_pipe[0], (char*)&byte, 1, NULL)
            == CC_OPCODE_OK) {
@@ -48,6 +67,7 @@ void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
             loop->signals[signum].cb(loop->signals[signum].udata, signum);
     }
     /* Re-arm is handled by the event loop after recv_cb returns */
+#endif
 }
 
 /* ── Public API ─────────────────────────────────────────────── */

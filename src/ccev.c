@@ -95,11 +95,13 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     /* Process any pending closing queue */
     ccev__process_closing(loop);
 
-    /* Free remaining socks */
+    /* Free remaining socks (not in closing list).
+     * Fire close_cb so any udata-backed resources (e.g. DNS query) are freed. */
     while (!cclist_empty(&loop->all_socks)) {
         cclist_node_t *n = cclist_pop_front(&loop->all_socks);
         if (n) {
             ccev_sock_t *sock = (ccev_sock_t *)((char*)n - offsetof(ccev_sock_t, lnode));
+            if (sock->close_cb) sock->close_cb(sock->close_udata);
             ccev__sock_free(sock);
         }
     }
