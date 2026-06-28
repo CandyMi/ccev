@@ -273,6 +273,7 @@ struct ccev_loop_s {
     cchashmap_t         dns_pending;
 
     /* ── Signal handling (default loop only) ── */
+    volatile sig_atomic_t sig_pending; /**< Non-zero = signal pending (Win)*/
     ccsocket_t          signal_pipe[2];
     ccev_sock_t        *signal_sock;
     struct {

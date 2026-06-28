@@ -211,6 +211,12 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     int n = 0;
 
     do {
+#if defined(_WIN32)
+        /* On Windows the signal handler stores the signum in
+         * loop->sig_pending and wakes the loop.  Check it here
+         * on every iteration. */
+        ccev__signal_dispatch(NULL, 0);
+#endif
         uint64_t now = ccev__now_ms();
 
         /* 1. Process expired timers + get ms until next future timer.

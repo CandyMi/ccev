@@ -21,14 +21,17 @@
 static void ccev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
-    unsigned char byte = (unsigned char)signum;
 #if defined(_WIN32)
-    if (loop->signal_pipe[1] != (ccsocket_t)-1)
-        (void)ccsocket_send(loop->signal_pipe[1], (char*)&byte, 1, NULL);
+    /* On Windows, epoll_wait(0) can race with TCP loopback delivery
+     * of the signal byte.  Use a per-loop volatile flag instead of
+     * the self-pipe; the loop checks sig_pending on every iteration. */
+    loop->sig_pending = (sig_atomic_t)signum;
+    ccev_wakeup(loop);
 #else
     /* Pipe is non-blocking; EAGAIN means the kernel buffer is full
      * (~64 KiB / 65536 pending signals) — the signal byte is lost
      * but no recovery is possible from a signal handler. */
+    unsigned char byte = (unsigned char)signum;
     if (loop->signal_pipe[1] > 0)
         (void)write(loop->signal_pipe[1], (char*)&byte, 1);
 #endif
@@ -41,6 +44,17 @@ void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
 
+#if defined(_WIN32)
+    /* On Windows the signal handler sets loop->sig_pending and calls
+     * ccev_wakeup().  This function is also polled from ccev_loop_run
+     * on every iteration. */
+    int signum = (int)loop->sig_pending;
+    if (signum != 0) {
+        loop->sig_pending = 0;
+        if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
+            loop->signals[signum].cb(loop->signals[signum].udata, signum);
+    }
+#else
     unsigned char byte;
     while (ccsocket_recv(loop->signal_pipe[0], (char*)&byte, 1, NULL)
            == CC_OPCODE_OK) {
@@ -48,6 +62,7 @@ void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
         if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
             loop->signals[signum].cb(loop->signals[signum].udata, signum);
     }
+#endif
     /* Re-arm is handled by the event loop after recv_cb returns */
 }
 
