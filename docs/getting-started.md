@@ -155,7 +155,7 @@ int main(void) {
 2. `ccev_listen()` creates a TCP listener (returns `ccev_sock_t*`).
 3. On every incoming connection, `on_accept` is called with a new `ccev_sock_t*`.
 4. The user may use the sock directly (`ccev_sock_read_start`) or upgrade to a stream (`ccev_stream_open`) for buffered I/O.
-5. `ccev_loop_run(CCEV_RUN_FOREVER)` drives the event loop.
+5. `ccev_loop_run(CCEV_RUN_FOREVER)` drives the event loop. Timers are extracted from the heap in batch, then callbacks fire, then I/O dispatch — timer priority > I/O.
 6. All I/O uses **EPOLLONESHOT** internally — after each callback the library re-arms automatically.
 
 ## Quick Start: Timer Demo

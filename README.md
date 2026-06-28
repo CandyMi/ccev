@@ -34,30 +34,34 @@ ccev provides two levels of socket abstraction:
 ```
 ccev_loop_run(loop, mode)
  |
- +-- 1. Process expired timers (ccheap_pop --> callbacks)
- |       ONCE --> free, REPEAT --> re-insert
+ +-- 1. now = ccev__now_ms()
  |
- +-- 2. Check stop_flag (from ccev_loop_stop)
+ +-- 2. ccev__timer_process(loop, now):
+ |       Phase 1: extract all expired from heap into cclink
+ |       Phase 2: fire callbacks (ONCE free, REPEAT re-insert)
+ |       Phase 3: return ms until next future timer (-1 if none)
  |
- +-- 3. Compute epoll_wait timeout
- |       nearest timer --> remaining ms
- |       no timer      --> -1 (infinite)
+ +-- 3. Check stop_flag (from ccev_loop_stop)
  |
- +-- 4. epoll_wait(epfd, events, max_events, timeout)
+ +-- 4. Compute epoll_wait timeout
+ |       next_ms < 0  --> -1 (infinite, wait for I/O)
+ |       next_ms >= 0 --> next_ms (block until next timer)
  |
- +-- 5. Dispatch n fired events:
- |       [wake pipe]    drain only (re-arm at step 6)
+ +-- 5. epoll_wait(epfd, events, max_events, timeout)
+ |
+ +-- 6. Dispatch n fired events:
+ |       [wake pipe]    drain only (re-arm at step 7)
  |       [HUP/ERR]      ccev__sock_schedule_close
  |       [listener]     accept2 --> sock_create --> listen_cb + re-arm
  |       [connecting]   getsockopt SO_ERROR --> connect_cb + re-arm
  |       [EPOLLIN]      rcb(sock, events) + re-arm
  |       [EPOLLOUT]     wcb(sock, events) + re-arm
  |
- +-- 6. Re-arm wake_sock for next ccev_wakeup / ccev_loop_stop
+ +-- 7. Re-arm wake_sock
  |
- +-- 7. Process closing queue (close_cb --> sock_free)
+ +-- 8. Process closing queue (close_cb --> sock_free)
  |
- +-- 8. stop_flag set? --> return
+ +-- 9. stop_flag set? --> return
  |       mode ONCE  --> return
  |       FOREVER    --> goto 1
 ```
@@ -83,7 +87,7 @@ static void on_readable(ccev_sock_t *sock, int events) {
     if (rc == CC_OPCODE_OK && n > 0) {
         ccev_stream_t *st = (ccev_stream_t *)ccev_sock_get_udata(sock);
         ccev_stream_write(st, buf, (size_t)n, on_sent, NULL);
-    } else if (n == 0) {
+    } else if (rc == CC_OPCODE_ERROR && n == 0) {
         ccev_sock_close(sock);
     }
 }

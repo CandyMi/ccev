@@ -171,13 +171,16 @@ Run the event loop. In `CCEV_RUN_FOREVER` mode, does not return until
 of events processed.
 
 **Dispatch order per iteration:**
-1. Process expired timers
-2. Compute epoll timeout from nearest timer
-3. `epoll_wait()`
-4. Dispatch events — listeners (batch accept up to 128), connecting
+1. `ccev__now_ms()` — capture current time
+2. `ccev__timer_process()` — extract all expired timers from heap into
+   local list, fire callbacks (never interleaved with heap ops), return
+   ms until next future timer (-1 if none)
+3. Compute epoll timeout from `next_ms`
+4. `epoll_wait()`
+5. Dispatch events — listeners (batch accept up to 128), connecting
    (check SO_ERROR), HUP (schedule close), EPOLLIN/EPOLLOUT (fire callbacks)
-5. Re-arm wake pipe
-6. Process closing queue (fire close_cb, free sockets)
+6. Re-arm wake pipe
+7. Process closing queue (fire close_cb, free sockets)
 
 ### Low-level Socket API (ccev_sock_t)
 
@@ -237,7 +240,7 @@ callback. Returns `CCEV_OK` or `CCEV_ERR` (closed).
 int ccev_sock_read_stop(ccev_sock_t *sock);
 ```
 
-Disarm read events. The callback is cleared. Returns `CCEV_OK` or
+Disarm read events. Sets the read callback to NULL. Returns `CCEV_OK` or
 `CCEV_ERR`.
 
 #### `ccev_sock_write_start`
@@ -554,8 +557,18 @@ called during `ccev_default_loop()` initialization.
 ### Utilities
 
 ```c
-int ccev_wakeup(ccev_loop_t *loop);      /* Wake the loop from another thread. */
+int ccev_wakeup(ccev_loop_t *loop);       /* Wake the loop from another thread. */
+```
+
+### Socket count (declared in ccev_sock.c)
+
+```c
 int ccev_sock_count(ccev_loop_t *loop);   /* Active sockets (incl. wake sock). */
+```
+
+### Timer count (declared in ccev_timer.c)
+
+```c
 int ccev_timer_count(ccev_loop_t *loop);  /* Active timers. */
 ```
 
