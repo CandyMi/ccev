@@ -311,6 +311,11 @@ void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st);
 /** Continue sendfile transfer (called from dispatch on EPOLLOUT). */
 void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st);
 
+/* ── signal (ccev_signal.c) ── */
+
+/** Signal pipe dispatch callback. */
+void ccev__signal_dispatch(ccev_sock_t *sock, int events);
+
 /* ── timer (ccev_timer.c) ── */
 
 /** Process expired timers. */

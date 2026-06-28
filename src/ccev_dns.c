@@ -405,6 +405,10 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
         cache_insert(q->loop, q->domain, addr, col.best_ttl);
 
     ccev__sock_schedule_close(q->loop, q->sock);
+
+    ccdns_close(&q->ctx_a);
+    ccdns_close(&q->ctx_aaaa);
+    ccev__free_fn(q);
 }
 
 static void dns_timeout_cb(void *udata) {
@@ -431,6 +435,10 @@ static void dns_timeout_cb(void *udata) {
     /* 4. No cache write on timeout */
 
     if (q->sock) ccev__sock_schedule_close(q->loop, q->sock);
+
+    ccdns_close(&q->ctx_a);
+    ccdns_close(&q->ctx_aaaa);
+    ccev__free_fn(q);
 }
 
 /* ════════════════════════════════════════════════════════════════

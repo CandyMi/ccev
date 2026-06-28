@@ -180,7 +180,13 @@ ccev_loop_t *ccev_default_loop(void) {
         return NULL;
     }
     loop->signal_sock = sc;
-    /* rcb is set by ccev_signal.c during ccev_signal_handle() */
+    /* Always set rcb so the signal pipe is dispatched even before
+     * ccev_signal_handle() is called.  Without it, a signal can fire
+     * while ONESHOT is armed but rcb is NULL — the event is consumed
+     * but the byte is never read, and the next re-arm has no rcb to
+     * re-arm for.  On Windows epoll emulation this can manifest as
+     * lost signals. */
+    sc->rcb = ccev__signal_dispatch;
     ccev__sock_mod_internal(loop, sc, EPOLLIN);
 
     ccev_dns_flush(loop);

@@ -35,7 +35,7 @@ static void ccev__sig_handler(int signum) {
 
 /* ── Dispatch callback (fired from loop on pipe readable) ───── */
 
-static void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
+void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
     (void)sock; (void)events;
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
