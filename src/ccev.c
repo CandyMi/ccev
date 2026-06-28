@@ -207,6 +207,9 @@ void ccev_loop_stop(ccev_loop_t *loop) {
 
 int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     if (!loop) return CCEV_ERR;
+    /* Honour any stop request that was set before entering the loop
+     * (e.g. from a synchronous DNS or ICMP callback). */
+    if (loop->stop_flag) return 0;
     loop->stop_flag = false;
     int n = 0;
 
