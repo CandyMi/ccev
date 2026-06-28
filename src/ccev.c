@@ -211,12 +211,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     int n = 0;
 
     do {
-#if defined(_WIN32)
-        /* On Windows, the signal handler cannot safely call any Winsock
-         * function.  Instead it sets ccev__pending_signal (volatile flag).
-         * Check it here on every loop iteration. */
-        ccev__signal_dispatch(NULL, 0);
-#endif
         uint64_t now = ccev__now_ms();
 
         /* 1. Process expired timers + get ms until next future timer.
