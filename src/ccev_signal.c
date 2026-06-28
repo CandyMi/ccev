@@ -28,10 +28,10 @@ static void ccev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
 #if defined(_WIN32)
-    /* On Windows, Winsock calls are not safe from signal handlers.
-     * Store the signum and wake the loop via the wakeup pipe. */
+    /* On Windows, Winsock calls (including ccev_wakeup → send()) are
+     * not safe inside signal() handlers.  Just store the signum in a
+     * volatile flag; ccev_loop_run checks it on every iteration. */
     ccev__pending_signal = (sig_atomic_t)signum;
-    ccev_wakeup(loop);
 #else
     /* Pipe is non-blocking; EAGAIN means the kernel buffer is full
      * (~64 KiB / 65536 pending signals) — the signal byte is lost
