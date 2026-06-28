@@ -58,7 +58,7 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
 
     /* Phase 2: fire all expired callbacks (timer priority > I/O). */
 #if !defined(_WIN32)
-    { static int _dbg=0; if (_dbg++<5) write(2, "FIRE\n", 5); }
+    { static int _dbg=0; if (_dbg++<5) { write(2, "FIRE", 5); write(2, "0123456789"+cclink_size(&expired), 1); write(2, "\n", 1); }}
 #endif
     while (!cclink_empty(&expired)) {
         cclink_node_t *n = cclink_pop_front(&expired);
