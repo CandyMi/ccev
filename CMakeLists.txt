@@ -20,15 +20,15 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/include/epoll/epoll.h" OR
 endif()
 
 # ── Object library: epoll backend (1 per platform) ──────────
-# Detect kqueue availability (macOS, FreeBSD, DragonFly, etc.)
-include(CheckIncludeFile)
-check_include_file(sys/event.h HAVE_SYS_EVENT_H)
-
+# kqueue: Apple, FreeBSD, DragonFly BSD, NetBSD, OpenBSD
+#   epoll: Linux, Android
+# wepoll: Windows
+# uepoll: other POSIX (select/poll fallback)
 if(WIN32)
     set(EPOLL_BACKEND deps/epoll/src/wepoll.c)
-elseif(HAVE_SYS_EVENT_H)
+elseif(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD|DragonFly")
     set(EPOLL_BACKEND deps/epoll/src/kepoll.c)
-elseif(UNIX)
+elseif(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
     set(EPOLL_BACKEND deps/epoll/src/epoll.c)
 else()
     set(EPOLL_BACKEND deps/epoll/src/uepoll.c)
