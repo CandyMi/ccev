@@ -20,6 +20,9 @@
 
 #include "ccev_internal.h"
 
+/* Fallback compiler barrier — extern so compiler cannot see the body */
+void ccev__compiler_barrier(void) {}
+
 /* Default allocator (libc) */
 static void *ccev_default_realloc(void *ptr, size_t sz) {
     if (sz == 0) { free(ptr); return NULL; }
@@ -196,6 +199,7 @@ ccev_loop_t *ccev_default_loop(void) {
 void ccev_loop_stop(ccev_loop_t *loop) {
     if (!loop) return;
     loop->stop_flag = true;
+    CCEV_COMPILER_BARRIER();
     ccev_wakeup(loop);
 }
 
@@ -207,6 +211,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     if (!loop) return CCEV_ERR;
     /* Honour any stop request that was set before entering the loop
      * (e.g. from a synchronous DNS or ICMP callback). */
+    CCEV_COMPILER_BARRIER();
     if (loop->stop_flag) return 0;
     int n = 0;
 
@@ -222,6 +227,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 1. Process expired timers + get ms until next future timer.
          *    Returns -1 if no timers remain. */
         int next_ms = ccev__timer_process(loop, now);
+        CCEV_COMPILER_BARRIER();
         if (loop->stop_flag) break;
 
         /* 2. Compute epoll timeout */
@@ -234,12 +240,10 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
             timeout = next_ms;
         }
 
-        /* 3. epoll_wait */
-        n = epoll_wait(loop->epfd, loop->events, loop->max_events, timeout);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
+        /* 3. epoll_wait (retry on EINTR — don't re-enter loop body) */
+        do {
+            n = epoll_wait(loop->epfd, loop->events, loop->max_events, timeout);
+        } while (n < 0 && errno == EINTR);
 
         /* 4. Dispatch events */
         for (int i = 0; i < n; i++) {
@@ -344,6 +348,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 6. Process closing queue */
         ccev__process_closing(loop);
 
+        CCEV_COMPILER_BARRIER();
         if (loop->stop_flag) break;
 
     } while (mode == CCEV_RUN_FOREVER);
@@ -351,7 +356,9 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     /* Clear the stop flag that was set during dispatch (e.g. by
      * ccev_loop_stop in a signal callback) so the next call to
      * ccev_loop_run doesn't see a stale flag and skip. */
+    CCEV_COMPILER_BARRIER();
     loop->stop_flag = false;
+    CCEV_COMPILER_BARRIER();
     return mode == CCEV_RUN_ONCE ? n : 0;
 }
 

@@ -42,6 +42,24 @@ jobs:
       - run: cmake --build build -j$(nproc)
       - run: ctest --test-dir build --output-on-failure
 
+  # ── Linux: Intel ICC (oneAPI) ─────────────────────────────
+  linux-icc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Intel oneAPI
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y wget gnupg
+          wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | sudo gpg --dearmor --output /usr/share/keyrings/intel-oneapi.gpg
+          echo "deb [signed-by=/usr/share/keyrings/intel-oneapi.gpg] https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list
+          sudo apt-get update -qq && sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp-and-cpp-classic
+      - run: . /opt/intel/oneapi/setvars.sh && cmake -B build -DCMAKE_BUILD_TYPE=Debug
+      - run: . /opt/intel/oneapi/setvars.sh && cmake --build build -j$(nproc)
+      - run: . /opt/intel/oneapi/setvars.sh && ctest --test-dir build --output-on-failure
+
   # ── macOS: AppleClang + ASAN/UBSAN ────────────────────────
   macos-arm64:
     runs-on: macos-latest

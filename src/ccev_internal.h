@@ -41,6 +41,21 @@ typedef int socklen_t;
 #include "epoll/epoll.h"
 #include "ccsocket.h"
 
+/* ── Compiler barrier (prevents reordering around volatile/atomic ops) ── */
+#if defined(_WIN32)
+#   if defined(_MSC_VER)
+#     define CCEV_COMPILER_BARRIER() _ReadWriteBarrier()
+#   else
+#     define CCEV_COMPILER_BARRIER() __sync_synchronize()
+#   endif
+#elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+#   define CCEV_COMPILER_BARRIER() __asm__ volatile("" ::: "memory")
+#elif defined(__CC_ARM)
+#   define CCEV_COMPILER_BARRIER() __schedule_barrier()
+#else
+#   define CCEV_COMPILER_BARRIER() do {} while(0)
+#endif
+
 /* ── Global allocator (set via ccev_set_allocator, visible to all .c files) ── */
 extern void *(*ccev__realloc_fn)(void*, size_t);
 extern void  (*ccev__free_fn)(void*);

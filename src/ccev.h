@@ -345,7 +345,7 @@ void   ccev_sock_set_udata(ccev_sock_t *sock, void *udata);
 /** @brief Get the number of active sockets.
  *  @param loop  Event-loop handle.
  *  @return Socket count. */
-int ccev_sock_count(ccev_loop_t *loop);
+int ccev_sock_count(const ccev_loop_t *loop);
 
 /* ════════════════════════════════════════════════════════════════
  *  High-level stream API (ccev_stream_t)

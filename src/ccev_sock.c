@@ -134,9 +134,9 @@ void ccev__process_closing(ccev_loop_t *loop) {
 ccev_sock_t *ccev_sock_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     if (!loop || fd == (ccsocket_t)-1) return NULL;
 
-    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_t));
+    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_stream_t));
     if (!sock) return NULL;
-    memset(sock, 0, sizeof(ccev_sock_t));
+    memset(sock, 0, sizeof(ccev_stream_t));
 
     sock->loop   = loop;
     sock->fd     = fd;
@@ -213,7 +213,7 @@ void ccev_sock_set_udata(ccev_sock_t *sock, void *udata) {
     if (sock) sock->udata = udata;
 }
 
-int ccev_sock_count(ccev_loop_t *loop) {
+int ccev_sock_count(const ccev_loop_t *loop) {
     return loop ? loop->sock_count : 0;
 }
 
@@ -336,9 +336,9 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
                             ccev_connect_cb cb, void *udata) {
     if (!loop || !host || !cb) return NULL;
 
-    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_t));
+    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_stream_t));
     if (!sock) return NULL;
-    memset(sock, 0, sizeof(ccev_sock_t));
+    memset(sock, 0, sizeof(ccev_stream_t));
 
     sock->loop   = loop;
     sock->fd     = (ccsocket_t)-1;

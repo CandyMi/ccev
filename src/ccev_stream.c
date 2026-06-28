@@ -439,10 +439,7 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
 ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     if (!sock || sock->closed || sock->in_closing) return NULL;
 
-    ccev_sock_t *old_sock = sock;
-    ccev_stream_t *st = (ccev_stream_t *)ccev__realloc_fn(sock,
-                                 sizeof(ccev_stream_t));
-    if (!st) return NULL;
+    ccev_stream_t *st = (ccev_stream_t *)sock;
 
     /* Zero out fields beyond the embedded sock */
     memset((char*)&st->sock + sizeof(ccev_sock_t), 0,
@@ -451,17 +448,6 @@ ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     cclink_init(&st->wlist);
     st->sendfile_fd = -1;
     st->reader      = NULL;
-
-    /* If realloc moved the memory, update epoll's data.ptr
-     * so future events don't dereference the old (freed) address. */
-    if ((ccev_sock_t *)st != old_sock && st->sock.events != 0) {
-        struct epoll_event ee;
-        memset(&ee, 0, sizeof(ee));
-        ee.events = st->sock.events | EPOLLONESHOT;
-        ee.data.ptr = &st->sock;
-        epoll_ctl(st->sock.loop->epfd, EPOLL_CTL_MOD,
-                  (int)(intptr_t)st->sock.fd, &ee);
-    }
 
     /* Take over sock's event callbacks */
     st->sock.rcb = _stream_on_readable;
