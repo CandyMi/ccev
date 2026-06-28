@@ -128,7 +128,10 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
         p->timer = ccev_timer_add(loop, p->timeout_ms, CCEV_TIMER_ONCE,
                                    ping_timeout_cb, p);
         if (!p->timer) {
-            /* close_cb fires from process_closing → ccicmp_close + free p */
+            /* OOM: no timeout — fire error callback so the caller
+             * does not hang waiting for a result.  close_cb will
+             * handle ccicmp_close + free p when the sock closes. */
+            if (p->cb) p->cb(p->udata, NULL);
             ccev__sock_schedule_close(loop, s);
             return -1;
         }
