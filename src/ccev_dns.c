@@ -16,8 +16,9 @@
  * DNS cache (per-loop):
  *   - Domain → IP mapping stored in a cchashmap.
  *   - Pre-populated from the OS hosts file at loop initialisation.
- *   - hosts entries are marked cached=true (never expire by TTL).
- *   - DNS-resolved entries are cached with their TTL.
+ *   - hosts entries stored with expires=UINT64_MAX (never expire).
+ *   - DNS-resolved entries cached with expires=now+ttl*1000ms.
+ *   - Queries with ttl=0 are never cached.
  *   - ccev_dns_flush() clears all entries and reloads hosts.
  */
 
@@ -36,77 +37,76 @@
 void ccev__dns_init(ccev_loop_t *loop) {
     if (!loop) return;
 
-    loop->dns.nservers = 0;
+    loop->dns.initialized = false;
 
 #if !defined(_WIN32)
     FILE *fp = fopen("/etc/resolv.conf", "r");
     if (fp) {
         char line[512];
-        while (fgets(line, sizeof(line), fp) &&
-               loop->dns.nservers < CCEV_DNS_MAX_SERVERS) {
+        bool ipv6_broken = false;
+        while (fgets(line, sizeof(line), fp)) {
             const char *p = line;
             while (*p && (unsigned char)*p <= ' ') p++;
             if (*p == '#' || *p == '\0' || *p == '\n') continue;
             if (strncmp(p, "nameserver", 10) != 0) continue;
             p += 10;
             while (*p && (unsigned char)*p <= ' ') p++;
-            char ip[64];
+            char ip[CCEV_DOMAIN_MAXLEN];
             int  pos = 0;
             while (*p && (unsigned char)*p > ' ' && pos < (int)sizeof(ip) - 1)
                 ip[pos++] = *p++;
             ip[pos] = '\0';
             if (pos == 0) continue;
-            if (ccsocket_get_version(ip) == CC_FAMILY_INVALID) continue;
 
-            size_t len = (size_t)pos;
-            char *copy = (char *)ccev__realloc_fn(NULL, len + 1);
-            if (!copy) continue;
-            memcpy(copy, ip, len + 1);
-            loop->dns.servers[loop->dns.nservers].server = copy;
-            loop->dns.servers[loop->dns.nservers].port   = 53;
-            loop->dns.nservers++;
+            ccsocket_family_t fam = ccsocket_get_version(ip);
+            if (fam == CC_INET4) {
+                memcpy(loop->dns.server, ip, (size_t)pos + 1);
+                loop->dns.port = 53;
+                loop->dns.initialized = true;
+                break;
+            }
+            if (fam == CC_INET6) {
+                if (ipv6_broken) continue;
+                ccsocket_t probe = ccsocket(CC_INET6, CC_UDP);
+                if (probe != (ccsocket_t)-1) {
+                    ccsocket_close(probe);
+                    memcpy(loop->dns.server, ip, (size_t)pos + 1);
+                    loop->dns.port = 53;
+                    loop->dns.initialized = true;
+                    break;
+                }
+                ipv6_broken = true;
+                /* continue to next line */
+            }
         }
         fclose(fp);
     }
 #endif /* !_WIN32 */
 
-    if (loop->dns.nservers == 0) {
-        char *srv = (char *)ccev__realloc_fn(NULL, 8);
-        if (srv) {
-            memcpy(srv, "1.1.1.1", 8);
-            loop->dns.servers[0].server = srv;
-            loop->dns.servers[0].port   = 53;
-            loop->dns.nservers          = 1;
-        }
+    if (!loop->dns.initialized) {
+        memcpy(loop->dns.server, "1.1.1.1", 8);
+        loop->dns.port = 53;
+        loop->dns.initialized = true;
     }
 }
 
-int ccev_dns_set_server(ccev_loop_t *loop,
-                         const ccev_dns_server_t servers[], int n) {
-    if (!loop || !servers || n <= 0 || n > CCEV_DNS_MAX_SERVERS) return CCEV_ERR;
+int ccev_dns_set_server(ccev_loop_t *loop, const char *address, uint16_t port) {
+    if (!loop || !address) return CCEV_ERR;
 
-    /* Free all old server strings first */
-    for (int i = 0; i < loop->dns.nservers; i++)
-        ccev__free_fn((void *)(uintptr_t)loop->dns.servers[i].server);
+    ccsocket_family_t fam = ccsocket_get_version(address);
+    if (fam == CC_FAMILY_INVALID) return CCEV_ERR;
 
-    loop->dns.nservers = 0;  /* temporarily empty — clean OOM rollback */
-
-    for (int i = 0; i < n; i++) {
-        if (!servers[i].server) return CCEV_ERR;
-        size_t len = strlen(servers[i].server);
-        char *copy = (char *)ccev__realloc_fn(NULL, len + 1);
-        if (!copy) {
-            /* OOM: free already-copied entries, state stays clean */
-            for (int j = 0; j < i; j++)
-                ccev__free_fn((void *)(uintptr_t)loop->dns.servers[j].server);
-            return CCEV_ERR;
-        }
-        memcpy(copy, servers[i].server, len + 1);
-        loop->dns.servers[i].server = copy;
-        loop->dns.servers[i].port   = servers[i].port > 0 ? servers[i].port : 53;
+    if (fam == CC_INET6) {
+        ccsocket_t probe = ccsocket(CC_INET6, CC_UDP);
+        if (probe == (ccsocket_t)-1) return CCEV_ERR;
+        ccsocket_close(probe);
     }
 
-    loop->dns.nservers = n;
+    size_t len = strlen(address);
+    if (len >= sizeof(loop->dns.server)) return CCEV_ERR;
+    memcpy(loop->dns.server, address, len + 1);
+    loop->dns.port = port > 0 ? port : 53;
+    loop->dns.initialized = true;
     return CCEV_OK;
 }
 
@@ -155,9 +155,8 @@ static ccev_dns_cache_t *cache_lookup(ccev_loop_t *loop, const char *domain) {
     cchashmap_node_t *n = cchashmap_get(&loop->dns_cache, &probe.node);
     if (!n) return NULL;
     ccev_dns_cache_t *e = CCHASHMAP_CONTAINER(n, ccev_dns_cache_t, node);
-    if (e->cached) return e;
-    uint64_t now = ccev__now_ms();
-    if (e->cached_at + (uint64_t)e->ttl * 1000ULL <= now) {
+    if (e->expires == UINT64_MAX) return e;              /* hosts, never expires */
+    if (ccev__now_ms() >= e->expires) {                  /* expired */
         cchashmap_del(&loop->dns_cache, n);
         ccev__free_fn(e);
         return NULL;
@@ -166,7 +165,7 @@ static ccev_dns_cache_t *cache_lookup(ccev_loop_t *loop, const char *domain) {
 }
 
 static void cache_insert(ccev_loop_t *loop, const char *domain,
-                          const char *ip, int ttl) {
+                          const char *ip, uint64_t expires) {
     if (!loop->dns_cache.buckets)
         cchashmap_init(&loop->dns_cache, dns_domain_hash, dns_domain_equal);
     ccev_dns_cache_t *old = cache_lookup(loop, domain);
@@ -182,7 +181,7 @@ static void cache_insert(ccev_loop_t *loop, const char *domain,
     size_t ilen = strlen(ip);
     if (ilen >= sizeof(e->ip)) ilen = sizeof(e->ip) - 1;
     memcpy(e->ip, ip, ilen);
-    e->ttl = ttl; e->cached = false; e->cached_at = ccev__now_ms();
+    e->expires = expires;
     cchashmap_set(&loop->dns_cache, &e->node, NULL);
 }
 
@@ -233,9 +232,11 @@ void ccev_dns_flush(ccev_loop_t *loop) {
                 ccev__realloc_fn(NULL, sizeof(ccev_dns_cache_t));
             if (!e) break;
             memset(e, 0, sizeof(*e));
+            if ((size_t)dpos >= sizeof(e->domain)) dpos = (int)sizeof(e->domain) - 1;
             memcpy(e->domain, domain, (size_t)dpos);
+            if ((size_t)pos >= sizeof(e->ip)) pos = (int)sizeof(e->ip) - 1;
             memcpy(e->ip, ip, (size_t)pos);
-            e->ttl = 0; e->cached = true;
+            e->expires = UINT64_MAX;
             cchashmap_set(&loop->dns_cache, &e->node, NULL);
         }
     }
@@ -343,12 +344,9 @@ static int ccev__dns_send_one(ccev_loop_t *loop, ccsocket_t fd,
     unsigned char buf[512];
     uint16_t qlen = ccdns_encode(ctx, buf, sizeof(buf), domain, qtype);
     if (qlen == 0) return CCEV_ERR;
-    for (int i = 0; i < loop->dns.nservers; i++) {
-        int sent = 0;
-        ccsocket_sendto(fd, (const char*)buf, qlen,
-                        loop->dns.servers[i].server,
-                        loop->dns.servers[i].port, &sent);
-    }
+    int sent = 0;
+    ccsocket_sendto(fd, (const char*)buf, qlen,
+                    loop->dns.server, loop->dns.port, &sent);
     return CCEV_OK;
 }
 
@@ -400,9 +398,11 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
         q->pending = NULL;
     }
 
-    /* 4. Write cache AFTER all callbacks */
-    if (status == CCEV_OK)
-        cache_insert(q->loop, q->domain, addr, col.best_ttl);
+    /* 4. Write cache AFTER all callbacks (skip ttl=0 — never cache) */
+    if (status == CCEV_OK && col.best_ttl > 0) {
+        uint64_t expires = ccev__now_ms() + (uint64_t)col.best_ttl * 1000ULL;
+        cache_insert(q->loop, q->domain, addr, expires);
+    }
 
     ccev__sock_schedule_close(q->loop, q->sock);
     /* q is freed by close_cb (set in ccev_dns_resolve) */
@@ -496,7 +496,11 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     ccdns_init(&q->ctx_a);
     ccdns_init(&q->ctx_aaaa);
 
-    ccsocket_t fd = ccsocket(CC_INET4, CC_UDP);
+    ccsocket_family_t fam = ccsocket_get_version(loop->dns.server);
+    if (fam != CC_INET4 && fam != CC_INET6) fam = CC_INET4;
+    ccsocket_t fd = ccsocket(fam, CC_UDP);
+    if (fd == (ccsocket_t)-1 && fam == CC_INET6)
+        fd = ccsocket(CC_INET4, CC_UDP);  /* fallback */
     if (fd == (ccsocket_t)-1) { pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
     ccsocket_set_nonblock(fd, true);
 

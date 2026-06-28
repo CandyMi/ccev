@@ -213,8 +213,9 @@ struct ccev_stream_s {
  * ════════════════════════════════════════════════════════════════ */
 
 typedef struct ccev_dns_state_s {
-    ccev_dns_server_t servers[CCEV_DNS_MAX_SERVERS];
-    int                nservers;
+    char     server[CCEV_DOMAIN_MAXLEN]; /**< DNS server IP string (embedded, no alloc). */
+    uint16_t port;                       /**< DNS server port (typically 53). */
+    bool     initialized;                /**< true once configured. */
 } ccev_dns_state_t;
 
 /** DNS cache entry — domain → IP mapping */
@@ -222,9 +223,7 @@ typedef struct ccev_dns_cache_s {
     cchashmap_node_t  node;
     char              domain[256];
     char              ip[65];
-    int               ttl;
-    bool              cached;       /**< true = from hosts file, never expires */
-    uint64_t          cached_at;    /**< monotonic ms when cached */
+    uint64_t          expires;      /**< expiry timestamp (ms), UINT64_MAX = never (hosts). */
 } ccev_dns_cache_t;
 
 /** Pending DNS waiter */

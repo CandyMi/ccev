@@ -522,24 +522,15 @@ int ccev_timer_count(ccev_loop_t *loop);
  *  Asynchronous DNS resolver
  * ════════════════════════════════════════════════════════════════ */
 
-/** DNS server configuration entry. */
-typedef struct ccev_dns_server {
-    const char *server;   /**< Server IP string. */
-    uint16_t    port;     /**< Server port (typically 53). */
-} ccev_dns_server_t;
-
-#define CCEV_DNS_MAX_SERVERS 4
-
-/** @brief Set DNS server addresses.
- *  Default: {{"1.1.1.1", 53}}. */
-int ccev_dns_set_server(ccev_loop_t *loop,
-                         const ccev_dns_server_t servers[], int n);
+/** @brief Set the DNS server address.
+ *  Default: "1.1.1.1", port 53. */
+int ccev_dns_set_server(ccev_loop_t *loop, const char *address, uint16_t port);
 
 /** @brief Resolve a domain asynchronously.
  *
  *  If @p domain is already an IP or UDS path, the callback fires
- *  immediately.  Otherwise sends UDP DNS queries to all configured
- *  servers.
+ *  immediately.  Otherwise sends UDP DNS queries to the configured
+ *  server.
  *
  *  @param loop        Event-loop handle.
  *  @param domain      Domain name, IP, or UDS path.

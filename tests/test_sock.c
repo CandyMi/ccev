@@ -173,6 +173,46 @@ TEST(count_after_create) {
 #endif
 }
 
+/* ── Dummy accept callback for listen failure tests ── */
+static void _dummy_accept(void *udata, ccev_sock_t *client,
+                           const char *ip, int port) {
+    (void)udata; (void)client; (void)ip; (void)port;
+}
+
+/* ═══ ccev_listen failure modes ───────────────────── */
+
+TEST(listen_null_loop_returns_null) {
+    ASSERT(ccev_listen(NULL, "127.0.0.1", 8080, 5, CCEV_REUSEADDR,
+                       _dummy_accept, NULL) == NULL);
+}
+
+TEST(listen_null_addr_returns_null) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ASSERT(ccev_listen(loop, NULL, 8080, 5, CCEV_REUSEADDR,
+                       _dummy_accept, NULL) == NULL);
+    ccev_loop_destroy(loop);
+}
+
+TEST(listen_null_cb_returns_null) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ASSERT(ccev_listen(loop, "127.0.0.1", 8080, 5, CCEV_REUSEADDR,
+                       NULL, NULL) == NULL);
+    ccev_loop_destroy(loop);
+}
+
+TEST(listen_invalid_addr_returns_null) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    /* "invalid" is not a valid IP format — ccsocket_get_version returns
+     * CC_FAMILY_INVALID, so ccev_listen should return NULL immediately. */
+    ccev_sock_t *l = ccev_listen(loop, "invalid", 8080, 5, CCEV_REUSEADDR,
+                                  _dummy_accept, NULL);
+    ASSERT(l == NULL);
+    ccev_loop_destroy(loop);
+}
+
 /* ═══ ccev_listen + ccev_connect (end-to-end) ─────── */
 
 static int  listen_accept_flag;
@@ -263,6 +303,12 @@ int main(void) {
     /* count */
     RUN(count_null_returns_zero);
     RUN(count_after_create);
+
+    /* listen failure */
+    RUN(listen_null_loop_returns_null);
+    RUN(listen_null_addr_returns_null);
+    RUN(listen_null_cb_returns_null);
+    RUN(listen_invalid_addr_returns_null);
 
     /* listen + connect */
     RUN(listen_then_connect);

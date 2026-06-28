@@ -151,9 +151,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     }
     cchashmap_destroy(&loop->dns_pending);
 
-    /* Free DNS server strings */
-    for (int _i = 0; _i < loop->dns.nservers; _i++)
-        ccev__free_fn((void *)(uintptr_t)loop->dns.servers[_i].server);
+    /* DNS server string is embedded (no heap alloc) — nothing to free */
 
     ccev__free_fn(loop->events);
     epoll_close(loop->epfd);

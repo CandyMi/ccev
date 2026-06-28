@@ -7,7 +7,6 @@
 | `CCEV_OK` | `0` | Operation completed successfully. |
 | `CCEV_ERR` | `-1` | Operation failed / fd is closed / error. |
 | `CCEV_DOMAIN_MAXLEN` | `256` | Maximum host string length (IPv4/IPv6/UDS/FQDN). |
-| `CCEV_DNS_MAX_SERVERS` | `4` | Maximum number of DNS servers. |
 
 ## Event Flags
 
@@ -513,25 +512,19 @@ Get the number of active timers.
 
 ### DNS
 
-#### `ccev_dns_server_t`
-
-```c
-typedef struct ccev_dns_server {
-    const char *server;   /* Server IP (dot-decimal or IPv6). */
-    uint16_t    port;     /* Server port (typically 53).      */
-} ccev_dns_server_t;
-```
-
 #### `ccev_dns_set_server`
 
 ```c
-int ccev_dns_set_server(ccev_loop_t *loop,
-                         const ccev_dns_server_t servers[], int n);
+int ccev_dns_set_server(ccev_loop_t *loop, const char *address, uint16_t port);
 ```
 
-Set DNS server addresses. The library deep-copies all strings.
-Default: reads `/etc/resolv.conf` (POSIX), falls back to
-`{{"1.1.1.1", 53}}`.
+Set the DNS server address. The server IP string must be a valid IPv4
+or IPv6 address (hostnames are not accepted).  IPv6 addresses are
+verified by creating a test socket — if the system does not support
+IPv6 UDP sockets the call returns `CCEV_ERR`.  Port 0 defaults to 53.
+
+Default: reads the first reachable nameserver from `/etc/resolv.conf`
+(POSIX), falls back to `"1.1.1.1"`, port 53.
 
 #### `ccev_dns_resolve`
 
