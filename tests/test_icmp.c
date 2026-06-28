@@ -179,7 +179,7 @@ static void test_timeout(int sig) {
 int main(void) {
 #if !defined(_WIN32)
     signal(SIGALRM, test_timeout);
-    alarm(10);
+    alarm(5);
 #endif
     passed = failed = 0;
 
