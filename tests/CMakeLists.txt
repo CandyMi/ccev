@@ -7,6 +7,7 @@ if(BUILD_TESTING)
         add_test(NAME ${name} COMMAND ${name})
     endfunction()
 
+    add_ccev_test(test_oom    test_oom.c)
     add_ccev_test(test_timer  test_timer.c)
     add_ccev_test(test_sock   test_sock.c)
     add_ccev_test(test_stream test_stream.c)

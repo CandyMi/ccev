@@ -71,34 +71,147 @@ versa.  When a sub-module needs read-access to a core primitive (e.g.
 
 ## Architecture — two-level socket abstraction
 
+```mermaid
+flowchart LR
+    subgraph Public["Public API"]
+        L["ccev_listen() → ccev_sock_t*"]
+        C["ccev_connect() → ccev_sock_t*"]
+        S["ccev_sock_create(loop, fd, udata)\n→ ccev_sock_t*"]
+    end
+    subgraph Low["Low-level (ccev_sock_t)"]
+        RS["sock_read_start / _stop"]
+        WS["sock_write_start / _stop"]
+        SC["sock_set_close_cb"]
+        CL["sock_close"]
+    end
+    subgraph High["High-level (ccev_stream_t)"]
+        O["ccev_stream_open(sock)\n→ stream"]
+        W["stream_write / write_batch / flush"]
+        SF["stream_sendfile"]
+        RL["stream_readline / readnum\n/ read_stop"]
+    end
+    Public --> Low
+    Public --> High
+    O -. "realloc in-place\n(same address)" .-> Low
 ```
-┌────────────────────────────────────────────┐
-│  Public API                                 │
-│                                             │
-│  ccev_listen() → ccev_sock_t* (TCP/UDS)    │
-│  ccev_connect() → ccev_sock_t* (+ DNS)     │
-│  ccev_sock_create(loop, fd, udata)          │
-│       → ccev_sock_t* (external fd)          │
-│                                             │
-│  Low-level (ccev_sock_t):                   │
-│    sock_read_start(sock, cb)                │
-│    sock_read_stop(sock)                     │
-│    sock_write_start(sock, cb)               │
-│    sock_write_stop(sock)                    │
-│    sock_set_close_cb(sock, cb, udata)       │
-│    sock_close(sock)                         │
-│                                             │
-│  High-level (ccev_stream_t):                │
-│    ccev_stream_open(sock) → stream          │
-│    stream_write(st, data, len, cb, udata)   │
-│    stream_write_batch(st, ...)              │
-│    stream_flush(st)                         │
-│    stream_sendfile(st, path)                │
-│    stream_readline(st, delim, maxlen,       │
-│                    timeout, cb, udata)      │
-│    stream_readnum(st, n, timeout, cb,udata) │
-│    stream_close(st)                         │
-└────────────────────────────────────────────┘
+
+## Reactor loop lifecycle
+
+```mermaid
+flowchart TD
+    %% ── Lifecycle ──
+    CR["ccev_loop_create(max_events)"]
+    CR --> CR1["alloc loop struct + memset 0"]
+    CR1 --> CR2["epoll_create(1)"]
+    CR2 --> CR3["alloc events[max_events]"]
+    CR3 --> CR4["init all_socks / closing\ncclist + ccheap"]
+    CR4 --> CR5["ccev__dns_init()\ncchashmap_init ×2\nccev_dns_flush()"]
+    CR5 --> CR6["ccsocket_pipe(wakefds)\nset_nonblock(write_end)"]
+    CR6 --> CR7["ccev_sock_create(wakefds[0])\nccev__sock_mod(EPOLLIN)"]
+    CR7 --> CR8["✅ return loop"]
+    CR2 -. "fail → free loop ❌" .-> CR2F["return NULL"]
+    CR3 -. "fail → epoll_close + free ❌" .-> CR3F["return NULL"]
+    
+    DL["ccev_default_loop()"]
+    DL --> DL1["static singleton\nccev_loop_create(2048)"]
+    DL1 --> DL2["ccsocket_pipe(signal_pipe)"]
+    DL2 --> DL3["set_nonblock both ends"]
+    DL3 --> DL4["ccev_sock_create(signal_pipe[0])\nset rcb = ccev__signal_dispatch\nccev__sock_mod(EPOLLIN)"]
+    DL4 --> DL5["ccev_dns_flush()"]
+    DL5 --> DL6["✅ return singleton"]
+
+    ST["ccev_loop_stop(loop)"]
+    ST --> ST1["loop->stop_flag = true"]
+    ST1 --> ST2["CCEV_COMPILER_BARRIER()"]
+    ST2 --> ST3["ccev_wakeup(loop)\nwrite 1 byte to wake pipe"]
+
+    DS["ccev_loop_destroy(loop)"]
+    DS --> DS1["ccev__process_closing()"]
+    DS1 --> DS2["close(wakefds[1])\nclose(signal_pipe[1])"]
+    DS2 --> DS3["pop all_socks →\nfire close_cb →\nccev__sock_free"]
+    DS3 --> DS4["pop timer heap →\nccev__free_fn(timer)"]
+    DS4 --> DS5["free DNS cache\nentries + buckets"]
+    DS5 --> DS6["free DNS pending\nentries + waiters + buckets"]
+    DS6 --> DS7["free(events)\nepoll_close(epfd)\nfree(loop)"]
+
+    %% ── Main loop — 1 iteration ──
+    subgraph Run["ccev_loop_run(loop, mode)"]
+        direction TB
+        ENTER["entry"] --> Q0{"stop_flag?"}
+        Q0 -->|"Yes"| EXIT0["return 0"]
+        Q0 -->|"No"| WIN["Win32: ccev__signal_dispatch"]
+        
+        WIN --> T1["ccev__timer_process(now)\n→ next_ms (-1 if none)"]
+        T1 --> Q1{"stop_flag?"}
+        Q1 -->|"Yes"| EXIT
+        Q1 -->|"No"| TO["Compute epoll timeout"]
+        
+        TO --> TOC{{"mode?"}}
+        TOC -->|"RUN_ONCE"| TO0["timeout = 0"]
+        TOC -->|"RUN_FOREVER\n+ no timers"| TOM1["timeout = -1\n(block indefinitely)"]
+        TOC -->|"RUN_FOREVER\n+ next timer"| TOM2["timeout = next_ms"]
+        
+        TO0 --> EW["epoll_wait(EINTR retry)\n→ n events"]
+        TOM1 --> EW
+        TOM2 --> EW
+        
+        EW --> DISPATCH["For each of n events..."]
+        
+        DISPATCH --> EVT{"ev dispatch"}
+        EVT -->|"null / closed"| SKIP["continue"]
+        EVT -->|"wake_sock"| WAKE["drain pipe\ncontinue"]
+        EVT -->|"EPOLLERR|HUP"| HUP["ccev__sock_schedule_close\ncontinue"]
+        EVT -->|"LISTEN + IN"| LISTEN["batch accept (≤128)\nfor each: ccev_sock_create\n→ listen_cb\nre-arm EPOLLIN\ncontinue"]
+        EVT -->|"CONNECT + OUT"| CONN["getsockopt SO_ERROR"]
+        CONN -->|"error == 0"| CONNOK["mode = INIT\ndel connect timer\nconnect_cb(OK)\ncontinue"]
+        CONN -->|"error != 0"| CONNERR["connect_cb(ERR)\nschedule_close\ncontinue"]
+        EVT -->|"normal IN"| READ["fire rcb(sock, events)"]
+        EVT -->|"normal OUT"| WRITE["fire wcb(sock, events)"]
+        
+        READ --> REARM["ccev__sock_rearm\n(if rcb/wcb present)"]
+        WRITE --> REARM
+        
+        EW --> POST["Post-dispatch"]
+        POST --> RWAKE["Re-arm wake_sock\nepoll_ctl MOD\n(EPOLLIN|ONESHOT)"]
+        RWAKE --> CLOSING["ccev__process_closing()"]
+        CLOSING --> Q2{"stop_flag?"}
+        Q2 -->|"No"| Q3{"mode ==\nFOREVER?"}
+        Q3 -->|"Yes"| WIN
+    end
+    
+    Q2 -->|"Yes"| EXIT["Clear stop_flag\nreturn (ONCE?n:0)"]
+    Q3 -->|"No"| EXIT
+```
+
+The reactor loop runs in `ccev_loop_run()`:
+
+1. **Phase 0** (Win32 only): Poll the `sig_pending` flag — Windows signal delivery.
+2. **Phase 1 — Timers**: `ccev__timer_process()` pops expired timers from the 4-ary heap and fires their callbacks before any I/O dispatch. Returns `ms` until the next future timer, or `-1` if none remain.
+3. **Phase 2 — Timeout**: Choose epoll timeout — `0` for RUN_ONCE, `-1` (block) when no timers, or the precise `next_ms` to meet the earliest timer.
+4. **Phase 3 — Poll**: `epoll_wait()` with EINTR retry. Returns `n` ready events.
+5. **Phase 4 — Dispatch**: For each event, route by socket mode:
+   - `wake_sock`: Drain the pipe, skip re-arm (handled post-loop).
+   - `HUP/ERR`: Immediate deferred close — no user callback.
+   - `LISTEN + EPOLLIN`: Batch accept up to `CCEV_MAX_ACCEPT_BATCH` (128), wrap each in `ccev_sock_t`, fire `listen_cb`, then re-arm listener.
+   - `CONNECT + EPOLLOUT`: Connect completion — `getsockopt(SO_ERROR)`. Zero → transition to `CCEV_SOCK_INIT`, fire `connect_cb(OK)`. Non-zero → fire `connect_cb(ERR)`, schedule close.
+   - Normal `EPOLLIN`/`EPOLLOUT`: Fire `rcb`/`wcb`, then re-arm via `ccev__sock_rearm()` (re-registers ONESHOT for whichever callbacks are still set).
+6. **Phase 5**: Unconditionally re-arm `wake_sock` (`epoll_ctl MOD`, EPOLLIN|ONESHOT) — even if no wakeup fired, this is a harmless no-op refresh.
+7. **Phase 6**: `ccev__process_closing()` — fire `close_cb` and free every socket in the closing list.
+8. Check `stop_flag` — break if set, or loop if `CCEV_RUN_FOREVER`.
+
+```mermaid
+flowchart LR
+    subgraph states["Socket state machine"]
+        INIT["CCEV_SOCK_INIT\n(active data)"] -->|"ccev_sock_close"| CLOSED["sock->closed = true"]
+        INIT -->|"ccev_listen"| LISTEN["CCEV_SOCK_LISTEN"]
+        INIT -.->|"ccev_stream_open"| STREAM["(ccev_stream_t)"]
+        LISTEN -->|"accept → client"| INIT
+    end
+    subgraph close["Deferred close flow"]
+        CLOSED -->|"ccev__sock_schedule_close"| CLIST["move to closing list\nepoll_ctl DEL"]
+        CLIST -->|"ccev__process_closing\n(next loop iteration)"| FIRE["fire close_cb"]
+        FIRE --> FREE["ccev__sock_free\nclose(fd) + free"]
+    end
 ```
 
 ## Coding conventions

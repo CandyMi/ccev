@@ -22,49 +22,119 @@ ctest --test-dir build --output-on-failure
 ccev provides two levels of socket abstraction:
 
 - **`ccev_sock_t`** — raw fd + event callbacks (reactor primitive).  
-  Create via `ccev_sock_create()`, `ccev_listen()`, or `ccev_connect()`.
+  Create via `ccev_sock_create()`, `ccev_listen()`, or `ccev_connect()`.  
   Register interest with `ccev_sock_read_start()` / `ccev_sock_write_start()`.
 
 - **`ccev_stream_t`** — buffered I/O + stream reader (protocol primitive).  
-  Upgrade a sock via `ccev_stream_open()`.  
+  Upgrade a sock via `ccev_stream_open()` (same address, in-place realloc).  
   Provides `ccev_stream_write()`, `ccev_stream_readline()`, `ccev_stream_readnum()`, `ccev_stream_sendfile()`.
+
+```mermaid
+flowchart LR
+    subgraph Public["Public API"]
+        L["ccev_listen() → ccev_sock_t*"]
+        C["ccev_connect() → ccev_sock_t*"]
+        S["ccev_sock_create(loop, fd, udata)\n→ ccev_sock_t*"]
+    end
+    subgraph Low["Low-level (ccev_sock_t)"]
+        RS["sock_read_start / _stop"]
+        WS["sock_write_start / _stop"]
+        SC["sock_set_close_cb"]
+        CL["sock_close"]
+    end
+    subgraph High["High-level (ccev_stream_t)"]
+        O["ccev_stream_open(sock)\n→ stream"]
+        W["stream_write / write_batch / flush"]
+        SF["stream_sendfile"]
+        RL["stream_readline / readnum\n/ read_stop"]
+    end
+    Public --> Low
+    Public --> High
+    O -. "realloc in-place\n(same address)" .-> Low
+```
 
 ## Reactor loop lifecycle
 
+```mermaid
+flowchart TD
+    subgraph Run["ccev_loop_run(loop, mode) — one iteration"]
+        direction TB
+        ENTER["entry"] --> Q0{"stop_flag?"}
+        Q0 -->|"Yes"| EXIT0["return 0"]
+        Q0 -->|"No"| WIN["Win32: ccev__signal_dispatch"]
+        
+        WIN --> T1["ccev__timer_process(now)\n→ next_ms (-1 if none)"]
+        T1 --> Q1{"stop_flag?"}
+        Q1 -->|"Yes"| EXIT
+        Q1 -->|"No"| TO["Compute epoll timeout"]
+        
+        TO --> TOC{{"mode?"}}
+        TOC -->|"RUN_ONCE"| TO0["timeout = 0"]
+        TOC -->|"RUN_FOREVER\n+ no timers"| TOM1["timeout = -1\n(block indefinitely)"]
+        TOC -->|"RUN_FOREVER\n+ next timer"| TOM2["timeout = next_ms"]
+        
+        TO0 --> EW["epoll_wait(EINTR retry)\n→ n events"]
+        TOM1 --> EW
+        TOM2 --> EW
+        
+        EW --> DISPATCH["For each of n events..."]
+        
+        DISPATCH --> EVT{"ev dispatch"}
+        EVT -->|"null / closed"| SKIP["continue"]
+        EVT -->|"wake_sock"| WAKE["drain pipe\ncontinue"]
+        EVT -->|"EPOLLERR|HUP"| HUP["ccev__sock_schedule_close\ncontinue"]
+        EVT -->|"LISTEN + IN"| LISTEN["batch accept (≤128)\nfor each: ccev_sock_create\n→ listen_cb\nre-arm EPOLLIN\ncontinue"]
+        EVT -->|"CONNECT + OUT"| CONN["getsockopt SO_ERROR"]
+        CONN -->|"error == 0"| CONNOK["mode = INIT\ndel connect timer\nconnect_cb(OK)\ncontinue"]
+        CONN -->|"error != 0"| CONNERR["connect_cb(ERR)\nschedule_close\ncontinue"]
+        EVT -->|"normal IN"| READ["fire rcb(sock, events)"]
+        EVT -->|"normal OUT"| WRITE["fire wcb(sock, events)"]
+        
+        READ --> REARM["ccev__sock_rearm\n(if rcb/wcb present)"]
+        WRITE --> REARM
+        
+        EW --> POST["Post-dispatch"]
+        POST --> RWAKE["Re-arm wake_sock\nepoll_ctl MOD\n(EPOLLIN|ONESHOT)"]
+        RWAKE --> CLOSING["ccev__process_closing()"]
+        CLOSING --> Q2{"stop_flag?"}
+        Q2 -->|"No"| Q3{"mode ==\nFOREVER?"}
+        Q3 -->|"Yes"| WIN
+    end
+    
+    Q2 -->|"Yes"| EXIT["Clear stop_flag\nreturn (ONCE?n:0)"]
+    Q3 -->|"No"| EXIT
 ```
-ccev_loop_run(loop, mode)
- |
- +-- 1. now = ccev__now_ms()
- |
- +-- 2. ccev__timer_process(loop, now):
- |       Phase 1: extract all expired from heap into cclink
- |       Phase 2: fire callbacks (ONCE free, REPEAT re-insert)
- |       Phase 3: return ms until next future timer (-1 if none)
- |
- +-- 3. Check stop_flag (from ccev_loop_stop)
- |
- +-- 4. Compute epoll_wait timeout
- |       next_ms < 0  --> -1 (infinite, wait for I/O)
- |       next_ms >= 0 --> next_ms (block until next timer)
- |
- +-- 5. epoll_wait(epfd, events, max_events, timeout)
- |
- +-- 6. Dispatch n fired events:
- |       [wake pipe]    drain only (re-arm at step 7)
- |       [HUP/ERR]      ccev__sock_schedule_close
- |       [listener]     accept2 --> sock_create --> listen_cb + re-arm
- |       [connecting]   getsockopt SO_ERROR --> connect_cb + re-arm
- |       [EPOLLIN]      rcb(sock, events) + re-arm
- |       [EPOLLOUT]     wcb(sock, events) + re-arm
- |
- +-- 7. Re-arm wake_sock
- |
- +-- 8. Process closing queue (close_cb --> sock_free)
- |
- +-- 9. stop_flag set? --> return
- |       mode ONCE  --> return
- |       FOREVER    --> goto 1
+
+```mermaid
+flowchart LR
+    subgraph states["Socket state machine"]
+        INIT["CCEV_SOCK_INIT\n(active data)"] -->|"ccev_sock_close"| CLOSED["sock->closed = true"]
+        INIT -->|"ccev_listen"| LISTEN["CCEV_SOCK_LISTEN"]
+        INIT -.->|"ccev_stream_open"| STREAM["(ccev_stream_t)"]
+        LISTEN -->|"accept → client"| INIT
+    end
+    subgraph close["Deferred close flow"]
+        CLOSED -->|"ccev__sock_schedule_close"| CLIST["move to closing list\nepoll_ctl DEL"]
+        CLIST -->|"ccev__process_closing\n(next loop iteration)"| FIRE["fire close_cb"]
+        FIRE --> FREE["ccev__sock_free\nclose(fd) + free"]
+    end
 ```
+
+### Lifecycle phases
+
+1. **Phase 0** (Win32): Poll `sig_pending` flag.
+2. **Phase 1 — Timers**: `ccev__timer_process()` pops expired timers from the 4-ary heap and fires callbacks before I/O dispatch.
+3. **Phase 2 — Timeout**: 0 for RUN_ONCE, -1 (block) when no timers, or `next_ms` to meet the earliest timer.
+4. **Phase 3 — Poll**: `epoll_wait()` with EINTR retry.
+5. **Phase 4 — Dispatch**: Route each event by socket mode:
+   - `wake_sock`: drain pipe, skip re-arm.
+   - `HUP/ERR`: deferred close — no user callback.
+   - `LISTEN`: batch accept (≤128), fire `listen_cb` per client, re-arm.
+   - `CONNECT`: `getsockopt SO_ERROR` — 0 → OK, else ERR + close.
+   - Normal I/O: fire `rcb`/`wcb`, then `ccev__sock_rearm()`.
+6. **Phase 5**: Unconditionally re-arm `wake_sock` (`epoll_ctl MOD`, EPOLLIN|ONESHOT).
+7. **Phase 6**: `ccev__process_closing()` — fire `close_cb` and free.
+8. Check `stop_flag`: break if set, loop if `CCEV_RUN_FOREVER`.
 
 ## Quick start — echo server
 

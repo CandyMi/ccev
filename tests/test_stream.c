@@ -511,6 +511,171 @@ TEST(stream_sendfile_smoke) {
 #endif
 }
 
+/* ═══ ccev_stream_set_send_cb ──────────────────────── */
+
+static int  global_send_cb_fired;
+static void on_global_send(void *udata) {
+    global_send_cb_fired = 1;
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+TEST(stream_set_send_cb_fires_on_drain) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[1], true);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    global_send_cb_fired = 0;
+    ccev_stream_set_send_cb(st, on_global_send, loop);
+
+    /* Write data — flush should consume immediately on a socketpair */
+    int rc = ccev_stream_write(st, "hello", 5, NULL, NULL);
+    ASSERT(rc > 0);
+
+    /* Drain the peer so kernel buffer empties and callback fires */
+    char drain[64];
+    int nd;
+    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &nd);
+
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ASSERT(global_send_cb_fired == 1);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+/* ═══ ccev_stream_read_stop ─────────────────────────── */
+
+TEST(stream_read_stop_cancels) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    stream_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.loop = loop;
+
+    ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_on_data, &ctx) == CCEV_OK);
+
+    /* Cancel the reader mid-flight */
+    ccev_stream_read_stop(st);
+
+    /* Write data — should NOT trigger the read callback */
+    write(sv[1], "hello\n", 6);
+
+    /* Safety timer to stop the loop */
+    ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(ctx.called == 0);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+/* ═══ ccev_stream_set_close_cb ──────────────────────── */
+
+static int stream_close_cb_fired;
+static void on_stream_close(void *udata) {
+    (void)udata;
+    stream_close_cb_fired = 1;
+}
+
+TEST(stream_set_close_cb_fires) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    stream_close_cb_fired = 0;
+    ccev_stream_set_close_cb(st, on_stream_close, NULL);
+    ccev_stream_close(st);
+
+    /* Run to process closing queue */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ASSERT(stream_close_cb_fired == 1);
+
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+/* ═══ Write batch — verified per-buffer callback ───── */
+
+TEST(stream_write_batch_perbuf_callback_verified) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[1], true);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    send_ctx_t cb_ctx;
+    memset(&cb_ctx, 0, sizeof(cb_ctx));
+
+    /* Write a modest chunk with per-buffer callback */
+    const char *payload = "verify-perbuf-callback";
+    size_t plen = strlen(payload);
+    int rc = ccev_stream_write_batch(st, payload, plen, true,
+                                      on_sent, &cb_ctx);
+    ASSERT(rc > 0);
+
+    /* Drain whatever the kernel already accepted */
+    char drain[64];
+    int nd;
+    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &nd);
+
+    /* Run the loop — this processes the closing queue and fires
+     * the per-buffer callback when data leaves the wlist */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ASSERT(cb_ctx.called == 1);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ════════════════════════════════════════════════════ */
 
 int main(void) {
@@ -542,6 +707,18 @@ int main(void) {
 
     /* stream sendfile */
     RUN(stream_sendfile_smoke);
+
+    /* stream set_send_cb */
+    RUN(stream_set_send_cb_fires_on_drain);
+
+    /* stream read_stop */
+    RUN(stream_read_stop_cancels);
+
+    /* stream set_close_cb */
+    RUN(stream_set_close_cb_fires);
+
+    /* stream write batch — verified per-buf cb */
+    RUN(stream_write_batch_perbuf_callback_verified);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;
