@@ -41,7 +41,7 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
 
     while (1) {
         ccheap_node_t *min = ccheap_peek(&loop->timers);
-        if (!min) break;
+        if (!min) { write(2, "E", 1); break; }
 
         ccev_timer_t *timer = CCHEAP_CONTAINER(min, ccev_timer_t, node);
         if (ccheap_node_get(&timer->node, timeout) > now_ms) break;
