@@ -39,6 +39,13 @@ target_include_directories(ccev_epoll PRIVATE
     deps/epoll/include/epoll
     deps/epoll/include
 )
+# The kepoll and uepoll backends use atomic spinlocks.
+# EPOLL_USE_ATOMIC selects C11 <stdatomic.h> when available.
+find_file(_have_atomic NAMES stdatomic.h)
+if(_have_atomic)
+    target_compile_definitions(ccev_epoll PUBLIC EPOLL_USE_ATOMIC=1)
+endif()
+unset(_have_atomic)
 
 # ── Object library: ccsocket (cross-platform socket API) ────
 add_library(ccev_ccsocket OBJECT
