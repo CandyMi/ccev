@@ -68,33 +68,36 @@ static void ping_recv_ready(ccev_sock_t *sock, int events) {
     (void)events;
     ccev_ping_t *p = (ccev_ping_t *)sock->udata;
 
+    /* Cancel the timeout timer — the ICMP socket is readable, so the
+     * echo exchange is complete (reply, error, or spurious wakeup). */
+    if (p->timer) {
+        ccev_timer_del(p->loop, p->timer);
+        p->timer = NULL;
+    }
+
     /* Try to receive the reply */
     p->reply_len = sizeof(p->reply_buf);
     bool rc = ccicmp_reply(&p->ping, p->reply_buf, &p->reply_len);
-    if (rc && p->reply_len > 0) {
-        /* Cancel timeout timer */
-        if (p->timer) {
-            ccev_timer_del(p->loop, p->timer);
-            p->timer = NULL;
-        }
 
-        /* Build result — compute RTT from recorded send_time, read TTL
-         * from ccicmp (populated via CMSG in ccicmp_reply). */
+    if (rc && p->reply_len > 0) {
         ccev_icmp_result_t result;
         memset(&result, 0, sizeof(result));
         result.rtt_ms      = (double)(ccev__now_ms() - p->send_time);
         result.payload_len = p->reply_len;
         result.ttl         = (p->ping.ttl >= 0) ? p->ping.ttl : 0;
 
-        /* Fire user callback BEFORE close, so udata is still valid.
-         * ccicmp_close is handled by ping_close_cb on sock close. */
         if (p->cb) p->cb(p->udata, &result);
-
-        if (p->sock)
-            ccev__sock_schedule_close(p->loop, p->sock);
-        else
-            ccev__free_fn(p);
+    } else {
+        /* No valid reply — fire error callback so the caller is
+         * notified even on spurious socket events. */
+        if (p->cb) p->cb(p->udata, NULL);
     }
+
+    if (p->sock)
+        ccev__sock_schedule_close(p->loop, p->sock);
+    else
+        ccev__free_fn(p);
+    /* ccicmp_close + free p handled by ping_close_cb on sock close */
 }
 
 /* ── Common: send echo and register with reactor ──────────────────── */
