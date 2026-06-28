@@ -23,6 +23,9 @@
 #include <limits.h>
 #include <errno.h>
 #include <signal.h> /* sig_atomic_t */
+#if !defined(_WIN32)
+#include <unistd.h> /* write() for debug probes */
+#endif
 
 #ifdef _WIN32
 #  include <winsock2.h>
