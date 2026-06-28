@@ -63,6 +63,9 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
     while (!cclink_empty(&expired)) {
         cclink_node_t *n = cclink_pop_front(&expired);
         ccev_timer_t *timer = CCLINK_CONTAINER(n, ccev_timer_t, tlist);
+#if !defined(_WIN32)
+        { static int _tn=0; if (++_tn <= 5) write(2, timer->mode==CCEV_TIMER_ONCE?"1":"R", 1); }
+#endif
 
         timer->cb(timer->udata);
 
