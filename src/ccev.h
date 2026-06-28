@@ -36,6 +36,35 @@ extern "C" {
 #endif
 
 /* ════════════════════════════════════════════════════════════════
+ *  Thread-safety model
+ * ════════════════════════════════════════════════════════════════
+ *
+ * ccev is designed as a **single-threaded reactor**.  One thread owns
+ * the loop and calls ccev_loop_run(); all I/O callbacks and timer
+ * callbacks fire on that thread.  The following rules apply:
+ *
+ * Thread-safe (may be called from any thread):
+ *   - ccev_loop_stop()     — writes to an atomic flag + wakes the loop
+ *   - ccev_wakeup()        — writes one byte to the wakeup pipe
+ *   - ccev_set_allocator() — must be called before ccev_loop_create()
+ *
+ * Loop-thread only (may be called from callbacks or from the thread
+ * that called ccev_loop_run()):
+ *   - All ccev_sock_* functions
+ *   - All ccev_stream_* functions
+ *   - All ccev_timer_* functions
+ *   - ccev_connect(), ccev_listen()
+ *   - ccev_dns_* functions
+ *   - ccev_icmp_echo()
+ *   - ccev_signal_handle(), ccev_signal_ignore()
+ *
+ * Not thread-safe (must NOT be called concurrently with any other
+ * function on the same loop):
+ *   - ccev_loop_create() / ccev_loop_destroy()
+ *   - ccev_loop_run()
+ *   - ccev_default_loop()
+ *
+ * ════════════════════════════════════════════════════════════════
  *  Constants
  * ════════════════════════════════════════════════════════════════ */
 

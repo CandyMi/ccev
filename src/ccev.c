@@ -92,11 +92,15 @@ ccev_loop_t *ccev_loop_create(int max_events) {
 void ccev_loop_destroy(ccev_loop_t *loop) {
     if (!loop) return;
 
+    /* Process any pending closing queue first — close_cb may reference
+     * the wake/signal pipes, so keep them open until callbacks finish. */
+    ccev__process_closing(loop);
+
+    /* Now close the write-ends of wake/signal pipes.  The read-ends
+     * are closed below inside ccev__sock_free (wake_sock / signal_sock
+     * are freed via the all_socks loop). */
     if (loop->wakefds[1] != (ccsocket_t)-1) ccsocket_close(loop->wakefds[1]);
     if (loop->signal_pipe[1] != (ccsocket_t)-1) ccsocket_close(loop->signal_pipe[1]);
-
-    /* Process any pending closing queue */
-    ccev__process_closing(loop);
 
     /* Free remaining socks (not in closing list).
      * Fire close_cb so any udata-backed resources (e.g. DNS query) are freed. */

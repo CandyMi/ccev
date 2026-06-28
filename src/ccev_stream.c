@@ -439,6 +439,9 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
 ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     if (!sock || sock->closed || sock->in_closing) return NULL;
 
+    /* Safe cast: ccev_stream_t embeds ccev_sock_t as its first field,
+     * and ccev_sock_create() always allocates sizeof(ccev_stream_t).
+     * See ccev_sock.c for the static_assert that verifies this layout. */
     ccev_stream_t *st = (ccev_stream_t *)sock;
 
     /* Zero out fields beyond the embedded sock */

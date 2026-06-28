@@ -111,6 +111,200 @@ TEST(udata_set_and_get) {
 #endif
 }
 
+/* ═══ ccev_sock_read_start / read_stop ──────────────── */
+
+static int  read_ev_fired;
+static int  read_ev_events;
+static ccev_loop_t *read_ev_loop;
+
+static void on_read_event(ccev_sock_t *sock, int events) {
+    (void)sock;
+    read_ev_fired  = 1;
+    read_ev_events = events;
+    ccev_loop_stop(read_ev_loop);
+}
+
+TEST(read_start_fires_on_data) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    read_ev_loop = ccev_loop_create(64);
+    ASSERT(read_ev_loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(read_ev_loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(sock != NULL);
+
+    read_ev_fired  = 0;
+    read_ev_events = 0;
+
+    ASSERT(ccev_sock_read_start(sock, on_read_event) == CCEV_OK);
+    write(sv[1], "x", 1);
+    ccev_loop_run(read_ev_loop, CCEV_RUN_FOREVER);
+
+    ASSERT(read_ev_fired == 1);
+    ASSERT(read_ev_events & CCEV_EVENT_READ);
+
+    ccev_sock_close(sock);
+    ccev_loop_destroy(read_ev_loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(read_stop_suppresses_event) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(sock != NULL);
+
+    read_ev_fired  = 0;
+    read_ev_loop   = loop;
+
+    ASSERT(ccev_sock_read_start(sock, on_read_event) == CCEV_OK);
+    ASSERT(ccev_sock_read_stop(sock) == CCEV_OK);
+
+    /* Write data — callback should NOT fire because read is stopped */
+    write(sv[1], "x", 1);
+
+    /* Safety timer to stop the loop if the callback doesn't fire */
+    ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(read_ev_fired == 0);
+
+    ccev_sock_close(sock);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(read_start_null_sock_returns_err) {
+    ASSERT(ccev_sock_read_start(NULL, on_read_event) == CCEV_ERR);
+}
+
+TEST(read_stop_null_sock_returns_err) {
+    ASSERT(ccev_sock_read_stop(NULL) == CCEV_ERR);
+}
+
+TEST(read_start_on_closed_returns_err) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_close(sock);
+    ASSERT(ccev_sock_read_start(sock, on_read_event) == CCEV_ERR);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+/* ═══ ccev_sock_write_start / write_stop ─────────────── */
+
+static int  write_ev_fired;
+static ccev_loop_t *write_ev_loop;
+
+static void on_write_event(ccev_sock_t *sock, int events) {
+    (void)sock;
+    write_ev_fired = 1;
+    ccev_loop_stop(write_ev_loop);
+}
+
+TEST(write_start_fires_on_writable) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    write_ev_loop = ccev_loop_create(64);
+    ASSERT(write_ev_loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(write_ev_loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(sock != NULL);
+
+    write_ev_fired = 0;
+    ASSERT(ccev_sock_write_start(sock, on_write_event) == CCEV_OK);
+    ccev_loop_run(write_ev_loop, CCEV_RUN_FOREVER);
+
+    ASSERT(write_ev_fired == 1);
+
+    ccev_sock_close(sock);
+    ccev_loop_destroy(write_ev_loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(write_stop_suppresses_event) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ASSERT(sock != NULL);
+
+    write_ev_fired = 0;
+    write_ev_loop  = loop;
+
+    ASSERT(ccev_sock_write_start(sock, on_write_event) == CCEV_OK);
+    ASSERT(ccev_sock_write_stop(sock) == CCEV_OK);
+
+    ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
+                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(write_ev_fired == 0);
+
+    ccev_sock_close(sock);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(write_start_null_sock_returns_err) {
+    ASSERT(ccev_sock_write_start(NULL, on_write_event) == CCEV_ERR);
+}
+
+TEST(write_stop_null_sock_returns_err) {
+    ASSERT(ccev_sock_write_stop(NULL) == CCEV_ERR);
+}
+
+TEST(write_start_on_closed_returns_err) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_close(sock);
+    ASSERT(ccev_sock_write_start(sock, on_write_event) == CCEV_ERR);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ═══ ccev_sock_set_close_cb ───────────────────────── */
 
 TEST(set_close_cb_null_is_safe) {
@@ -295,6 +489,20 @@ int main(void) {
     RUN(get_udata_null_returns_null);
     RUN(set_udata_null_is_safe);
     RUN(udata_set_and_get);
+
+    /* read_start / read_stop */
+    RUN(read_start_fires_on_data);
+    RUN(read_stop_suppresses_event);
+    RUN(read_start_null_sock_returns_err);
+    RUN(read_stop_null_sock_returns_err);
+    RUN(read_start_on_closed_returns_err);
+
+    /* write_start / write_stop */
+    RUN(write_start_fires_on_writable);
+    RUN(write_stop_suppresses_event);
+    RUN(write_start_null_sock_returns_err);
+    RUN(write_stop_null_sock_returns_err);
+    RUN(write_start_on_closed_returns_err);
 
     /* close callback */
     RUN(set_close_cb_null_is_safe);

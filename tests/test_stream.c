@@ -394,6 +394,123 @@ TEST(stream_readnum_timeout) {
 #endif
 }
 
+/* ═══ Stream write with per-buffer callback ─────────── */
+
+static int  write_cb_called;
+static void *write_cb_udata;
+
+static void on_write_complete(void *udata) {
+    write_cb_called = 1;
+    write_cb_udata  = udata;
+}
+
+TEST(stream_write_callback_fires) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[1], true);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    write_cb_called = 0;
+    write_cb_udata  = NULL;
+
+    int marker = 1234;
+    int rc = ccev_stream_write(st, "hello", 5, on_write_complete, &marker);
+    ASSERT(rc > 0);
+
+    /* Drain the receiving end so the kernel buffer can flush */
+    char drain[64];
+    int nd;
+    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &nd);
+
+    /* Run the loop to trigger the write-complete callback */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+
+    ASSERT(write_cb_called == 1);
+    ASSERT(write_cb_udata == &marker);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_write_null_data_returns_err) {
+#ifndef _WIN32
+    int sv[2];
+    if (pair_create(sv) != 0) { passed++; return; }
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    int rc = ccev_stream_write(st, NULL, 0, NULL, NULL);
+    ASSERT(rc == 0);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+/* ═══ Stream sendfile ─────────────────────────────── */
+
+TEST(stream_sendfile_smoke) {
+#ifndef _WIN32
+    char tmpname[] = "/tmp/ccev_sendfile_test_XXXXXX";
+    int tfd = mkstemp(tmpname);
+    if (tfd < 0) { passed++; return; }
+
+    const char *payload = "sendfile-test-payload-12345";
+    size_t plen = strlen(payload);
+    ASSERT(write(tfd, payload, plen) == (ssize_t)plen);
+    close(tfd);
+
+    int sv[2];
+    if (pair_create(sv) != 0) { close(tfd); unlink(tmpname); passed++; return; }
+
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop,
+                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    write_cb_called = 0;
+    ASSERT(ccev_stream_sendfile(st, tmpname, on_write_complete, NULL) == CCEV_OK);
+
+    /* Drain the receiving end */
+    char buf[128];
+    int n;
+    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], buf, sizeof(buf) - 1, &n);
+
+    if (n > 0) {
+        buf[n] = '\0';
+        ASSERT(strcmp(buf, payload) == 0);
+    }
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    close(sv[1]);
+    unlink(tmpname);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ════════════════════════════════════════════════════ */
 
 int main(void) {
@@ -414,10 +531,17 @@ int main(void) {
     RUN(stream_readline_timeout);
     RUN(stream_readnum_timeout);
 
+    /* stream write */
+    RUN(stream_write_callback_fires);
+    RUN(stream_write_null_data_returns_err);
+
     /* stream write batch */
     RUN(stream_write_batch_without_cb);
     RUN(stream_write_batch_with_cb);
     RUN(stream_write_batch_flush_only);
+
+    /* stream sendfile */
+    RUN(stream_sendfile_smoke);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;

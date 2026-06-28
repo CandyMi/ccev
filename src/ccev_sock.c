@@ -18,6 +18,25 @@
 #include "ccev_internal.h"
 
 /* ════════════════════════════════════════════════════════════════
+ *  Compile-time assertions
+ * ════════════════════════════════════════════════════════════════ */
+
+/* C99-compatible static assertion (typedef cannot be negative). */
+#define CCEV_STATIC_ASSERT(cond, tag) \
+    typedef char ccev__static_assert_##tag[(cond) ? 1 : -1]
+
+/* ccev_stream_t embeds ccev_sock_t as its first field; ccev_sock_create
+ * allocates sizeof(ccev_stream_t) so the pointer can be safely cast to
+ * ccev_stream_t later by ccev_stream_open().  Verify the layout. */
+CCEV_STATIC_ASSERT(sizeof(ccev_sock_t) <= sizeof(ccev_stream_t),
+    sock_fits_in_stream);
+CCEV_STATIC_ASSERT(offsetof(ccev_stream_t, sock) == 0,
+    stream_first_field_is_sock);
+
+/* ccev_buf_t embeds cclink_node_t at offset 0 — verify container_of
+ * via offsetof(ccev_buf_t, node) is used, which is always correct. */
+
+/* ════════════════════════════════════════════════════════════════
  *  Internal helpers
  * ════════════════════════════════════════════════════════════════ */
 
@@ -134,6 +153,10 @@ void ccev__process_closing(ccev_loop_t *loop) {
 ccev_sock_t *ccev_sock_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     if (!loop || fd == (ccsocket_t)-1) return NULL;
 
+    /* Allocate sizeof(ccev_stream_t) even for a plain sock so that
+     * ccev_stream_open() can reinterpret the same pointer as a stream
+     * without reallocating — ccev_stream_t embeds ccev_sock_t as its
+     * first field.  Verified by CCEV_STATIC_ASSERT above. */
     ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_stream_t));
     if (!sock) return NULL;
     memset(sock, 0, sizeof(ccev_stream_t));
