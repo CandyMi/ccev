@@ -405,7 +405,7 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
         cache_insert(q->loop, q->domain, addr, col.best_ttl);
 
     ccev__sock_schedule_close(q->loop, q->sock);
-    /* q is freed by sock's close_cb (set in ccev_dns_resolve). */
+    ccev__free_fn(q);
 }
 
 static void dns_timeout_cb(void *udata) {
@@ -432,7 +432,7 @@ static void dns_timeout_cb(void *udata) {
     /* 4. No cache write on timeout */
 
     if (q->sock) ccev__sock_schedule_close(q->loop, q->sock);
-    /* q is freed by sock's close_cb (set in ccev_dns_resolve). */
+    ccev__free_fn(q);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -504,8 +504,6 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     ccev_sock_t *sock = ccev_sock_create(loop, fd, q);
     if (!sock) { ccsocket_close(fd); pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
     q->sock = sock;
-    /* close_cb frees q — fires on both normal close and loop_destroy */
-    ccev_sock_set_close_cb(sock, (ccev_close_cb)ccev__free_fn, q);
     ccev_sock_read_start(sock, dns_recv_cb);
 
     if (timeout_ms > 0)
