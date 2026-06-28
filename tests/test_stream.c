@@ -91,6 +91,7 @@ TEST(wbuf_len_null_returns_zero) {
 /* ═══ Stream read-until (basic smoke) ─────────────── */
 
 typedef struct {
+    ccev_loop_t *loop;
     char   data[256];
     size_t len;
     int    status;
@@ -107,6 +108,8 @@ static void stream_on_data(void *udata, const char *data, size_t len, int status
         memcpy(ctx->data, data, cp);
         ctx->data[cp] = '\0';
     }
+    /* Stop the loop so the test doesn't wait for the safety timer. */
+    ccev_loop_stop(ctx->loop);
 }
 
 TEST(stream_readline_smoke) {
@@ -124,8 +127,10 @@ TEST(stream_readline_smoke) {
     stream_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    /* Safety timer */
-    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+    ctx.loop = loop;
+
+    /* Safety timer (100ms — only fires if read never lands) */
+    ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
                    (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
 
     ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_on_data, &ctx) == CCEV_OK);
@@ -163,7 +168,9 @@ TEST(stream_readnum_smoke) {
     stream_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
+    ctx.loop = loop;
+
+    ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
                    (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
 
     ASSERT(ccev_stream_readnum(st, 5, 0, stream_on_data, &ctx) == CCEV_OK);
