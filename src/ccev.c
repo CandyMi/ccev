@@ -174,6 +174,12 @@ ccev_loop_t *ccev_default_loop(void) {
     }
     ccsocket_set_nonblock(loop->signal_pipe[0], true);
     ccsocket_set_nonblock(loop->signal_pipe[1], true);
+#if defined(_WIN32)
+    /* Windows uses TCP loopback for ccsocket_pipe; disable Nagle so
+     * the 1-byte write from the signal handler arrives immediately. */
+    ccsocket_set_nodelay(loop->signal_pipe[0], true);
+    ccsocket_set_nodelay(loop->signal_pipe[1], true);
+#endif
 
     /* Wrap read end as a sock so the loop dispatches it */
     ccev_sock_t *sc = ccev_sock_create(loop, loop->signal_pipe[0], NULL);

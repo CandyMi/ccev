@@ -115,6 +115,10 @@ static int ccev__icmp_send_echo(ccev_ping_t *p, const char *ip) {
     if (p->timeout_ms > 0) {
         p->timer = ccev_timer_add(loop, p->timeout_ms, CCEV_TIMER_ONCE,
                                    ping_timeout_cb, p);
+        if (!p->timer) {
+            ccev__sock_schedule_close(loop, s);
+            return -1;  /* OOM — no timer would cause indefinite hang */
+        }
     }
 
     return 0;
