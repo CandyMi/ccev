@@ -52,14 +52,31 @@ static void ping_close_cb(void *udata) {
 static void ping_timeout_cb(void *udata) {
     ccev_ping_t *p = (ccev_ping_t *)udata;
 
-    if (p->cb) p->cb(p->udata, NULL);
+#if !defined(_WIN32)
+    write(2, "t", 1);
+#endif
+    if (p->cb) {
+#if !defined(_WIN32)
+        write(2, "c", 1);
+#endif
+        p->cb(p->udata, NULL);
+#if !defined(_WIN32)
+        write(2, "d", 1);
+#endif
+    }
 
     if (p->sock) {
         ccev__sock_schedule_close(p->loop, p->sock);
         /* ccicmp_close + free p handled by ping_close_cb */
+#if !defined(_WIN32)
+        write(2, "x", 1);
+#endif
     } else {
         ccev__free_fn(p);
     }
+#if !defined(_WIN32)
+    write(2, "e\n", 2);
+#endif
 }
 
 /* ── Recv callback (EPOLLIN on ICMP fd) ───────────────────────────── */
