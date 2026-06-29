@@ -183,6 +183,11 @@ typedef void (*ccev_icmp_cb)(void *udata, const ccev_icmp_result_t *result);
  *  @param signum OS signal number. */
 typedef void (*ccev_signal_cb)(void *udata, int signum);
 
+/** @brief Per-iteration callback.  Fires once at the end of each
+ *  event-loop iteration, after dispatch and closing queue processing.
+ *  @param loop  The event-loop instance. */
+typedef void (*ccev_loop_each_cb)(ccev_loop_t *loop);
+
 /* ════════════════════════════════════════════════════════════════
  *  Enumerations & flag constants
  * ════════════════════════════════════════════════════════════════ */
@@ -631,6 +636,21 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata);
 
 /** @brief Restore a signal to its default disposition. */
 int ccev_signal_ignore(int signum);
+
+/** @brief Register a per-iteration callback.
+ *
+ *  The callback fires at the end of every loop iteration, after
+ *  event dispatch and the closing queue have been processed.
+ *  Useful for metrics collection, idle background work, or
+ *  integrating with external polling mechanisms.
+ *
+ *  Only one callback may be registered at a time — calling this
+ *  again replaces the previous one.  Pass NULL to clear.
+ *
+ *  @param loop  Event-loop handle.
+ *  @param cb    Callback, or NULL to clear.
+ *  @return CCEV_OK or CCEV_ERR (NULL loop). */
+int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb);
 
 #ifdef __cplusplus
 }

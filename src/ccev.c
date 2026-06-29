@@ -113,12 +113,12 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         }
     }
 
-    /* Free all timers */
-    while (1) {
-        ccheap_node_t *min = ccheap_peek(&loop->timers);
-        if (!min) break;
-        ccheap_pop(&loop->timers);
-        ccev_timer_t *t = CCHEAP_CONTAINER(min, ccev_timer_t, node);
+    /* Free all timers — O(n) direct data[] traversal instead of O(n log n)
+     * ccheap_pop loop.  The heap is about to be destroyed so maintaining
+     * the heap invariant during cleanup is unnecessary. */
+    for (size_t _ti = 0; _ti < loop->timers.len; _ti++) {
+        ccev_timer_t *t = CCHEAP_CONTAINER(loop->timers.data[_ti],
+                                            ccev_timer_t, node);
         ccev__free_fn(t);
     }
     ccheap_destroy(&loop->timers);
@@ -226,11 +226,17 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
          * on every iteration. */
         ccev__signal_dispatch(NULL, 0);
 #endif
-        uint64_t now = ccev__now_ms();
-
-        /* 1. Process expired timers + get ms until next future timer.
-         *    Returns -1 if no timers remain. */
-        int next_ms = ccev__timer_process(loop, now);
+        /* P1: skip clock_gettime when no timers are registered.
+         *     ccev__now_ms() is a vdso call on Linux (~30ns) but a full
+         *     syscall on older kernels/containers. */
+        int next_ms;
+        uint64_t now;
+        if (loop->timer_count > 0) {
+            now = ccev__now_ms();
+            next_ms = ccev__timer_process(loop, now);
+        } else {
+            next_ms = -1;
+        }
         CCEV_COMPILER_BARRIER();
         if (loop->stop_flag) break;
 
@@ -352,6 +358,9 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 6. Process closing queue */
         ccev__process_closing(loop);
 
+        /* 7. Per-iteration callback (registered via ccev_each) */
+        if (loop->ecb) loop->ecb(loop);
+
         CCEV_COMPILER_BARRIER();
         if (loop->stop_flag) break;
 
@@ -367,6 +376,16 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 }
 
 /* ccev_listen and ccev_connect moved to ccev_sock.c */
+
+/* ════════════════════════════════════════════════════════════════
+ *  Per-iteration callback
+ * ════════════════════════════════════════════════════════════════ */
+
+int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb) {
+    if (!loop) return CCEV_ERR;
+    loop->ecb = cb;
+    return CCEV_OK;
+}
 
 /* ════════════════════════════════════════════════════════════════
  *  Wakeup

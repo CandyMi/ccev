@@ -83,6 +83,7 @@ static void _buf_free(ccev_buf_t *buf) {
  * ════════════════════════════════════════════════════════════════ */
 
 static void _stream_on_writable(ccev_sock_t *sock, int events);
+/* Forward declaration: _stream_on_writable calls this before its definition. */
 static void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st);
 
 static void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st) {

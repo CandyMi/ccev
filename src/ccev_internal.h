@@ -287,6 +287,9 @@ struct ccev_loop_s {
     cchashmap_t         dns_cache;
     cchashmap_t         dns_pending;
 
+    /* ── Per-iteration callback (optional, set via ccev_each) ── */
+    ccev_loop_each_cb   ecb;
+
     /* ── Signal handling (default loop only) ── */
     volatile sig_atomic_t sig_pending; /**< Non-zero = signal pending (Win)*/
     ccsocket_t          signal_pipe[2];
