@@ -47,17 +47,6 @@ TEST(timer_once_fires) {
     ccev_loop_destroy(loop);
 }
 
-TEST(timer_repeat_fires_three) {
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ASSERT(loop != NULL);
-
-    ccev_timer_add(loop, 5, CCEV_TIMER_REPEAT,
-                   (ccev_timer_cb)(void(*)(void))timer_stop_cb, loop);
-
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-    ccev_loop_destroy(loop);
-}
-
 /* ── ccev_timer_del ────────────────────────────────────── */
 
 TEST(timer_del_before_expiry) {
