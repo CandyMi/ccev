@@ -22,11 +22,11 @@ static void ccev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
 #if defined(_WIN32)
-    /* On Windows, epoll_wait(0) can race with TCP loopback delivery
-     * of the signal byte.  Use a per-loop volatile flag instead of
-     * the self-pipe; the loop checks sig_pending on every iteration. */
+    /* Windows: set a per-loop volatile flag.  ccev_loop_run() polls
+     * sig_pending on every iteration, so no wakeup call is needed.
+     * Avoid ccev_wakeup() / ccsocket_send() here — they are NOT
+     * async-signal-safe in the CRT signal() context. */
     loop->sig_pending = (sig_atomic_t)signum;
-    ccev_wakeup(loop);
 #else
     /* Pipe is non-blocking; EAGAIN means the kernel buffer is full
      * (~64 KiB / 65536 pending signals) — the signal byte is lost
@@ -45,9 +45,9 @@ void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
     if (!loop) return;
 
 #if defined(_WIN32)
-    /* On Windows the signal handler sets loop->sig_pending and calls
-     * ccev_wakeup().  This function is also polled from ccev_loop_run
-     * on every iteration. */
+    /* On Windows the signal handler sets loop->sig_pending.
+     * This function is also polled from ccev_loop_run
+     * on every iteration for prompt delivery. */
     int signum = (int)loop->sig_pending;
     if (signum != 0) {
         loop->sig_pending = 0;

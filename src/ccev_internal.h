@@ -165,7 +165,7 @@ struct ccev_connector_s {
     ccev_timer_t      *timer;
     ccev_connect_cb    cb;
     void              *udata;
-    bool              *dns_cancelled;
+    void              *dns_ctx;   /**< _connect_dns_ctx_t*, owned by close_cb when set */
 };
 
 typedef struct ccev_listener_s  ccev_listener_t;
