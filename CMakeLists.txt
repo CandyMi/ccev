@@ -91,6 +91,10 @@ if(WIN32)
     target_link_libraries(ccev PUBLIC ws2_32)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
+    target_link_libraries(ccev PUBLIC socket nsl sendfile)
+endif()
+
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
     target_compile_definitions(ccev PRIVATE _GNU_SOURCE)
 endif()
