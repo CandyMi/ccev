@@ -248,9 +248,10 @@ static void _dispatch_events(ccev_loop_t *loop, int n) {
          *   LISTEN:  just close. */
         if (ccev_events & CCEV_EVENT_HUP) {
             if (sock->mode == CCEV_SOCK_CONNECT) {
+                ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
                 ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
-                if (sock->connector.cb)
-                    sock->connector.cb(sock->connector.udata, sock,
+                if (any->connector.cb)
+                    any->connector.cb(any->connector.udata, sock,
                                        st == CC_CONNECTED ? CCEV_OK : CCEV_ERR);
                 ccev__sock_schedule_close(loop, sock);
                 continue;
@@ -280,11 +281,12 @@ static void _dispatch_events(ccev_loop_t *loop, int n) {
                     ccsocket_t afd = ccsocket_accept2(sock->fd, addr_buf, &port, 0);
                     if (afd == (ccsocket_t)0) break;   /* EAGAIN */
                     if (afd == (ccsocket_t)-1) break;  /* error */
-                    if (sock->listener.cb) {
+                    ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
+                    if (any->listener.cb) {
                         ccev_sock_t *client = ccev_sock_create(loop, afd, NULL);
                         if (client) {
-                            sock->listener.cb(sock->listener.udata,
-                                               client, addr_buf, (int)port);
+                            any->listener.cb(any->listener.udata,
+                                              client, addr_buf, (int)port);
                         } else {
                             ccsocket_close(afd);
                         }
@@ -307,19 +309,20 @@ static void _dispatch_events(ccev_loop_t *loop, int n) {
                  * connect operation has finished.  Use ccsocket_is_connected
                  * for a cross-platform read-only probe (SO_ERROR + getpeername
                  * on POSIX, connect(s,NULL,0) on Windows). */
+                ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
                 ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
                 if (st == CC_CONNECTED) {
                     sock->mode = CCEV_SOCK_INIT;
                     /* Clear connect timer */
-                    if (sock->connector.timer) {
-                        ccev_timer_del(loop, sock->connector.timer);
-                        sock->connector.timer = NULL;
+                    if (any->connector.timer) {
+                        ccev_timer_del(loop, any->connector.timer);
+                        any->connector.timer = NULL;
                     }
-                    if (sock->connector.cb)
-                        sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
+                    if (any->connector.cb)
+                        any->connector.cb(any->connector.udata, sock, CCEV_OK);
                 } else {
-                    if (sock->connector.cb)
-                        sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+                    if (any->connector.cb)
+                        any->connector.cb(any->connector.udata, sock, CCEV_ERR);
                     ccev__sock_schedule_close(loop, sock);
                 }
                 continue;

@@ -26,7 +26,7 @@ ccev provides two levels of socket abstraction:
   Register interest with `ccev_sock_read_start()` / `ccev_sock_write_start()`.
 
 - **`ccev_stream_t`** — buffered I/O + stream reader (protocol primitive).  
-  Upgrade a sock via `ccev_stream_open()` (same address, in-place realloc).  
+  Upgrade a sock via `ccev_stream_open()` (same address, backed by `ccev_sock_any_t`).  
   Provides `ccev_stream_write()`, `ccev_stream_readline()`, `ccev_stream_readnum()`, `ccev_stream_sendfile()`.
 
 ```mermaid
@@ -50,7 +50,7 @@ flowchart LR
     end
     Public --> Low
     Public --> High
-    O -. "realloc in-place\n(same address)" .-> Low
+    O -. "cast via ccev_sock_any_t\n(same address)" .-> Low
 ```
 
 ## Reactor loop lifecycle

@@ -407,6 +407,56 @@ TEST(listen_invalid_addr_returns_null) {
     ccev_loop_destroy(loop);
 }
 
+/* ═══ Connect timeout before DNS resolves (R4.1 race) ── */
+
+static int   ctdr_flag;
+static int   ctdr_status;
+static ccev_loop_t *ctdr_loop;
+
+static void ctdr_on_connect(void *udata, ccev_sock_t *sock, int status) {
+    (void)udata; (void)sock;
+    ctdr_flag   = 1;
+    ctdr_status = status;
+    ccev_loop_stop(ctdr_loop);
+}
+
+TEST(connect_timeout_before_dns_resolves) {
+#ifndef _WIN32
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ctdr_loop   = loop;
+    ctdr_flag   = 0;
+    ctdr_status = -99;
+
+    /* Point DNS to non-routable TEST-NET-2 so queries won't resolve
+     * within the 1ms connect timeout.  The timeout fires first; the
+     * eventual DNS response should be safely discarded (context->alive
+     * set false by _connect_timeout_cb). */
+    ccev_dns_set_server(loop, "198.51.100.1", 53);
+
+    /* Requires DNS resolution — not in cache, not localhost */
+    ccev_sock_t *conn = ccev_connect(loop, "connect-timeout-race.test", 8080,
+                                      1, 0,
+                                      ctdr_on_connect, loop);
+    ASSERT(conn != NULL);
+
+    /* Loop runs until timeout fires → cb(ERR) → loop_stop */
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(ctdr_flag   == 1);
+    ASSERT(ctdr_status == CCEV_ERR);
+
+    /* Drain any delayed DNS activity — no crash = test passes */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+
+    ccev_loop_destroy(loop);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
 /* ═══ ccev_listen + ccev_connect (end-to-end) ─────── */
 
 static int  listen_accept_flag;
@@ -517,6 +567,9 @@ int main(void) {
     RUN(listen_null_addr_returns_null);
     RUN(listen_null_cb_returns_null);
     RUN(listen_invalid_addr_returns_null);
+
+    /* connect timeout + DNS race */
+    RUN(connect_timeout_before_dns_resolves);
 
     /* listen + connect */
     RUN(listen_then_connect);

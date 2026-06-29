@@ -314,14 +314,14 @@ Returns 0 for NULL loop.
 ccev_stream_t *ccev_stream_open(ccev_sock_t *sock);
 ```
 
-Upgrade a `ccev_sock_t` to a `ccev_stream_t`. Internally this is a
-`realloc` — the returned stream address may differ from the sock address;
-the library updates epoll's `data.ptr` automatically.
+Upgrade a `ccev_sock_t` to a `ccev_stream_t`. The returned stream
+address is always the same as the passed sock address — all socket
+variants share a single allocation via the internal `ccev_sock_any_t`
+union.
 
 After this call, use the stream pointer; the original sock pointer is
-still valid (same address if realloc didn't move it) but should be
-treated as a stream. The stream takes over the sock's event callbacks
-to drive buffered I/O and the stream reader.
+still valid (same address). The stream takes over the sock's event
+callbacks to drive buffered I/O and the stream reader.
 
 Returns `NULL` on failure (OOM / closed sock).
 

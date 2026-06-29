@@ -69,7 +69,13 @@ Do NOT put functions in `ccev.c` that belong to a sub-module, and vice
 versa.  When a sub-module needs read-access to a core primitive (e.g.
 `ccev__g_default_loop`), declare it `extern` in `ccev_internal.h`.
 
-## Architecture — two-level socket abstraction
+## Architecture — socket variant union + two-level abstraction
+
+All socket types share a single allocation via `ccev_sock_any_t` (a union of
+`ccev_sock_t` / `ccev_stream_t` / `ccev_listener_t` / `ccev_connector_t`).
+The `stype` field identifies which variant is active.  `ccev__sock_free()` does
+generic cleanup only (close fd, free union); each variant's close function
+releases its own resources before scheduling the sock for deferred close.
 
 ```mermaid
 flowchart LR
@@ -92,7 +98,7 @@ flowchart LR
     end
     Public --> Low
     Public --> High
-    O -. "realloc in-place\n(same address)" .-> Low
+    O -. "cast via ccev_sock_any_t\n(same address)" .-> Low
 ```
 
 ## Reactor loop lifecycle

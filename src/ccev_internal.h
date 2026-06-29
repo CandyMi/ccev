@@ -99,6 +99,20 @@ typedef enum {
     CCEV_SOCK_CONNECT,        /**< TCP connect in progress.              */
 } ccev_sock_mode_t;
 
+/**
+ * @brief Socket variant type tag — identifies union member.
+ *
+ * Set once at allocation, never changes (except sock → stream upgrade).
+ * Used by ccev__sock_free() to dispatch per-variant cleanup.
+ * Fills the 2-byte padding gap after mode/closed/in_closing.
+ */
+typedef enum {
+    CCEV_STYPE_SOCK      = 0,  /**< Plain socket (ccev_sock_create).       */
+    CCEV_STYPE_STREAM    = 1,  /**< Stream (via ccev_stream_open upgrade). */
+    CCEV_STYPE_LISTENER  = 2,  /**< Listener (via ccev_listen).           */
+    CCEV_STYPE_CONNECTOR = 3,  /**< Connector (via ccev_connect).         */
+} ccev_stype_t;
+
 /* ════════════════════════════════════════════════════════════════
  *  Stream reader (forward declaration for sock/stream structs)
  * ════════════════════════════════════════════════════════════════ */
@@ -106,7 +120,7 @@ typedef enum {
 typedef struct ccev_stream_reader_s ccev_stream_reader_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  Socket structure (low-level)
+ *  Base socket — reactor primitive, no variant-specific fields
  * ════════════════════════════════════════════════════════════════ */
 
 struct ccev_sock_s {
@@ -125,28 +139,37 @@ struct ccev_sock_s {
     uint32_t           events;     /**< epoll currently registered events*/
     uint32_t           mode;       /**< ccev_sock_mode_t                 */
 
-    /* ── Flags ── */
+    /* ── Flags (pack as 2+1+1 to fill 8-byte boundary) ── */
+    uint16_t           stype;      /**< ccev_stype_t variant tag         */
     bool               closed;     /**< true once close initiated        */
     bool               in_closing; /**< true if in the closing list      */
-
-    /* ── Listen-specific (only when mode == CCEV_SOCK_LISTEN) ── */
-    struct {
-        ccev_listen_cb cb;        /**< Accept callback for new conns    */
-        void          *udata;
-    } listener;
-
-    /* ── Connect-specific (only when mode == CCEV_SOCK_CONNECT) ── */
-    struct {
-        char             host[CCEV_DOMAIN_MAXLEN];
-        uint16_t         port;
-        unsigned int     timeout_ms;
-        ccev_timer_t    *timer;
-        ccev_connect_cb  cb;
-        void            *udata;
-        bool            *dns_cancelled; /**< Set true before free so DNS
-                                         *   callback skips the dead sock.*/
-    } connector;
 };
+
+/* ════════════════════════════════════════════════════════════════
+ *  Listener variant (ccev_listen)
+ * ════════════════════════════════════════════════════════════════ */
+
+struct ccev_listener_s {
+    ccev_sock_t        sock;
+    ccev_listen_cb     cb;
+    void              *udata;
+};
+
+/* ════════════════════════════════════════════════════════════════
+ *  Connector variant (ccev_connect)
+ * ════════════════════════════════════════════════════════════════ */
+
+struct ccev_connector_s {
+    ccev_sock_t        sock;
+    uint16_t           port;
+    ccev_timer_t      *timer;
+    ccev_connect_cb    cb;
+    void              *udata;
+    bool              *dns_cancelled;
+};
+
+typedef struct ccev_listener_s  ccev_listener_t;
+typedef struct ccev_connector_s ccev_connector_t;
 
 /* ════════════════════════════════════════════════════════════════
  *  Timer structure (includes heap_index for O(log n) update)
@@ -221,6 +244,29 @@ struct ccev_stream_s {
     int                sendfile_fd; /**< File fd, -1 when idle.         */
     bool               pending_write;/**< EPOLLOUT currently armed.     */
 };
+
+/* ════════════════════════════════════════════════════════════════
+ *  Socket allocation union — one allocation fits any variant
+ * ════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Allocation union for all socket variants.
+ *
+ * ccev_sock_create() allocates one of these.  The pointer can be
+ * reinterpreted as any variant (sock, stream, listener, connector)
+ * because every variant has ccev_sock_t as its first field —
+ * guaranteed safe by the common-initial-sequence rule (C11 §6.5.2.3p6).
+ *
+ * stype distinguishes which member is active.  Add future variants
+ * (e.g. ccev_dgram_t) here; the union size grows automatically.
+ */
+typedef union {
+    ccev_sock_t        sock;
+    ccev_stream_t      stream;
+    ccev_listener_t    listener;
+    ccev_connector_t   connector;
+    /* ccev_dgram_t    dgram; */
+} ccev_sock_any_t;
 
 /* ════════════════════════════════════════════════════════════════
  *  DNS state + cache
@@ -321,6 +367,10 @@ void ccev__process_closing(ccev_loop_t *loop);
 void ccev__sock_free(ccev_sock_t *sock);
 
 /* ── stream I/O (ccev_stream.c) ── */
+
+/** Free stream-specific resources (wlist, reader, sendfile).
+ *  Called by ccev_stream_close() before scheduling the sock for close. */
+void ccev__stream_cleanup(ccev_stream_t *st);
 
 /* ── signal (ccev_signal.c) ── */
 

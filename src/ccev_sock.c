@@ -18,25 +18,6 @@
 #include "ccev_internal.h"
 
 /* ════════════════════════════════════════════════════════════════
- *  Compile-time assertions
- * ════════════════════════════════════════════════════════════════ */
-
-/* C99-compatible static assertion (typedef cannot be negative). */
-#define CCEV_STATIC_ASSERT(cond, tag) \
-    typedef char ccev__static_assert_##tag[(cond) ? 1 : -1]
-
-/* ccev_stream_t embeds ccev_sock_t as its first field; ccev_sock_create
- * allocates sizeof(ccev_stream_t) so the pointer can be safely cast to
- * ccev_stream_t later by ccev_stream_open().  Verify the layout. */
-CCEV_STATIC_ASSERT(sizeof(ccev_sock_t) <= sizeof(ccev_stream_t),
-    sock_fits_in_stream);
-CCEV_STATIC_ASSERT(offsetof(ccev_stream_t, sock) == 0,
-    stream_first_field_is_sock);
-
-/* ccev_buf_t embeds cclink_node_t at offset 0 — verify container_of
- * via offsetof(ccev_buf_t, node) is used, which is always correct. */
-
-/* ════════════════════════════════════════════════════════════════
  *  Internal helpers
  * ════════════════════════════════════════════════════════════════ */
 
@@ -96,22 +77,8 @@ void ccev__sock_rearm(ccev_loop_t *loop, ccev_sock_t *sock) {
 void ccev__sock_free(ccev_sock_t *sock) {
     if (!sock) return;
     if (sock->loop) sock->loop->sock_count--;
-
-    /* Close the socket fd */
     if (sock->fd != (ccsocket_t)-1) ccsocket_close(sock->fd);
     sock->fd = (ccsocket_t)-1;
-
-    /* Cancel connect timer and mark DNS as dead if still pending */
-    if (sock->mode == CCEV_SOCK_CONNECT) {
-        if (sock->connector.timer) {
-            ccev_timer_del(sock->loop, sock->connector.timer);
-            sock->connector.timer = NULL;
-        }
-        if (sock->connector.dns_cancelled) {
-            *sock->connector.dns_cancelled = false;
-        }
-    }
-
     ccev__free_fn(sock);
 }
 
@@ -153,13 +120,14 @@ void ccev__process_closing(ccev_loop_t *loop) {
 ccev_sock_t *ccev_sock_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     if (!loop || fd == (ccsocket_t)-1) return NULL;
 
-    /* Allocate sizeof(ccev_stream_t) even for a plain sock so that
-     * ccev_stream_open() can reinterpret the same pointer as a stream
-     * without reallocating — ccev_stream_t embeds ccev_sock_t as its
-     * first field.  Verified by CCEV_STATIC_ASSERT above. */
-    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_stream_t));
-    if (!sock) return NULL;
-    memset(sock, 0, sizeof(ccev_stream_t));
+    /* Allocate via ccev_sock_any_t union so the same pointer can later
+     * be reinterpreted as a ccev_stream_t (or future variants) without
+     * reallocating.  All variants share ccev_sock_t as their first field. */
+    ccev_sock_any_t *any = (ccev_sock_any_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_any_t));
+    if (!any) return NULL;
+    memset(any, 0, sizeof(ccev_sock_any_t));
+
+    ccev_sock_t *sock = &any->sock;
 
     sock->loop   = loop;
     sock->fd     = fd;
@@ -271,9 +239,11 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     ccev_sock_t *sock = ccev_sock_create(loop, fd, udata);
     if (!sock) { ccsocket_close(fd); return NULL; }
 
-    sock->mode           = CCEV_SOCK_LISTEN;
-    sock->listener.cb    = cb;
-    sock->listener.udata = udata;
+    ccev_sock_any_t *any  = (ccev_sock_any_t *)sock;
+    any->sock.stype       = CCEV_STYPE_LISTENER;
+    any->sock.mode        = CCEV_SOCK_LISTEN;
+    any->listener.cb      = cb;
+    any->listener.udata   = udata;
 
     ccev__sock_mod_internal(loop, sock, EPOLLIN);
     return sock;
@@ -295,13 +265,23 @@ typedef struct {
 
 /* ── Connect timeout callback ── */
 static void _connect_timeout_cb(void *udata) {
-    ccev_sock_t *sock = (ccev_sock_t *)udata;
-    if (sock->mode != CCEV_SOCK_CONNECT) return;
-    sock->connector.timer = NULL;
+    ccev_sock_any_t *any = (ccev_sock_any_t *)udata;
+    if (any->sock.mode != CCEV_SOCK_CONNECT) return;
+    any->connector.timer = NULL;
 
-    if (sock->connector.cb)
-        sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
-    ccev__sock_schedule_close(sock->loop, sock);
+    /* Prevent DNS callback from using this sock after it's scheduled
+     * for close — the timeout and DNS response can arrive in the same
+     * loop iteration (timer fires first, then epoll dispatches the
+     * DNS recv callback).  Without this guard, _connect_dns_cb would
+     * see ctx->alive still true and create a new fd on a dying sock. */
+    if (any->connector.dns_cancelled) {
+        *any->connector.dns_cancelled = false;
+        any->connector.dns_cancelled = NULL;
+    }
+
+    if (any->connector.cb)
+        any->connector.cb(any->connector.udata, &any->sock, CCEV_ERR);
+    ccev__sock_schedule_close(any->sock.loop, &any->sock);
 }
 
 /* ── Create socket, initiate non-blocking connect, register with reactor ── */
@@ -324,14 +304,15 @@ static int _connect_try_register(ccev_sock_t *sock,
     ccsocket_connect(fd, address, port);
 
     if (ccsocket_is_connected(fd) == CC_CONNECTED) {
+        ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
         sock->fd   = fd;
         sock->mode = CCEV_SOCK_INIT;
-        if (sock->connector.timer) {
-            ccev_timer_del(sock->loop, sock->connector.timer);
-            sock->connector.timer = NULL;
+        if (any->connector.timer) {
+            ccev_timer_del(sock->loop, any->connector.timer);
+            any->connector.timer = NULL;
         }
-        if (sock->connector.cb)
-            sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
+        if (any->connector.cb)
+            any->connector.cb(any->connector.udata, sock, CCEV_OK);
         return 1;
     }
 
@@ -348,28 +329,29 @@ static void _connect_dns_cb(void *udata, const char *address, int status) {
     _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)udata;
     if (!ctx->alive) { ccev__free_fn(ctx); return; }
 
-    ccev_sock_t *sock = ctx->sock;
-    sock->connector.dns_cancelled = NULL;
+    ccev_sock_any_t *any = (ccev_sock_any_t *)ctx->sock;
+    ccev_sock_t *sock = &any->sock;
+    any->connector.dns_cancelled = NULL;
     ccev__free_fn(ctx);
     if (status != CCEV_OK || !address || address[0] == '\0') {
-        if (sock->connector.cb)
-            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+        if (any->connector.cb)
+            any->connector.cb(any->connector.udata, sock, CCEV_ERR);
         ccev__sock_schedule_close(sock->loop, sock);
         return;
     }
 
     ccsocket_family_t family = ccsocket_get_version(address);
     if (family == CC_FAMILY_INVALID) {
-        if (sock->connector.cb)
-            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+        if (any->connector.cb)
+            any->connector.cb(any->connector.udata, sock, CCEV_ERR);
         ccev__sock_schedule_close(sock->loop, sock);
         return;
     }
 
-    int rc = _connect_try_register(sock, family, address, sock->connector.port);
+    int rc = _connect_try_register(sock, family, address, any->connector.port);
     if (rc < 0) {
-        if (sock->connector.cb)
-            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+        if (any->connector.cb)
+            any->connector.cb(any->connector.udata, sock, CCEV_ERR);
         ccev__sock_schedule_close(sock->loop, sock);
         return;
     }
@@ -382,43 +364,39 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
                             ccev_connect_cb cb, void *udata) {
     if (!loop || !host || !cb) return NULL;
 
-    ccev_sock_t *sock = (ccev_sock_t *)ccev__realloc_fn(NULL, sizeof(ccev_stream_t));
-    if (!sock) return NULL;
-    memset(sock, 0, sizeof(ccev_stream_t));
+    ccev_sock_any_t *any = (ccev_sock_any_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_any_t));
+    if (!any) return NULL;
+    memset(any, 0, sizeof(ccev_sock_any_t));
 
+    ccev_sock_t *sock = &any->sock;
     sock->loop   = loop;
     sock->fd     = (ccsocket_t)-1;
     sock->mode   = CCEV_SOCK_CONNECT;
     sock->udata  = udata;
+    sock->stype  = CCEV_STYPE_CONNECTOR;
 
-    size_t hlen = strlen(host);
-    if (hlen >= sizeof(sock->connector.host))
-        hlen = sizeof(sock->connector.host) - 1;
-    memcpy(sock->connector.host, host, hlen);
-    sock->connector.host[hlen] = '\0';
-    sock->connector.port      = port;
-    sock->connector.timeout_ms = timeout_ms;
-    sock->connector.cb        = cb;
-    sock->connector.udata     = udata;
+    any->connector.port      = port;
+    any->connector.cb        = cb;
+    any->connector.udata     = udata;
 
     cclist_push_back(&loop->all_socks, &sock->lnode);
     loop->sock_count++;
 
     if (timeout_ms > 0) {
-        sock->connector.timer = ccev_timer_add(loop, timeout_ms,
-                                                 CCEV_TIMER_ONCE,
-                                                 _connect_timeout_cb, sock);
+        any->connector.timer = ccev_timer_add(loop, timeout_ms,
+                                                CCEV_TIMER_ONCE,
+                                                _connect_timeout_cb, sock);
     }
 
     ccsocket_family_t family = ccsocket_get_version(host);
     if (family == CC_INET4 || family == CC_INET6 || family == CC_UNIX) {
         int rc = _connect_try_register(sock, family, host, port);
         if (rc < 0) {
-            if (sock->connector.timer)
-                ccev_timer_del(loop, sock->connector.timer);
+            if (any->connector.timer)
+                ccev_timer_del(loop, any->connector.timer);
             cclist_remove(&loop->all_socks, &sock->lnode);
             loop->sock_count--;
-            ccev__free_fn(sock);
+            ccev__free_fn(any);
             return NULL;
         }
         if (rc > 0) return sock;  /* connected immediately — cb already fired */
@@ -436,27 +414,27 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
         _connect_dns_ctx_t *dns_ctx = (_connect_dns_ctx_t *)
             ccev__realloc_fn(NULL, sizeof(_connect_dns_ctx_t));
         if (!dns_ctx) {
-            if (sock->connector.timer)
-                ccev_timer_del(loop, sock->connector.timer);
+            if (any->connector.timer)
+                ccev_timer_del(loop, any->connector.timer);
             cclist_remove(&loop->all_socks, &sock->lnode);
             loop->sock_count--;
-            ccev__free_fn(sock);
+            ccev__free_fn(any);
             return NULL;
         }
         dns_ctx->sock     = sock;
         dns_ctx->alive    = true;
-        sock->connector.dns_cancelled = &dns_ctx->alive;
+        any->connector.dns_cancelled = &dns_ctx->alive;
 
         if (ccev_dns_resolve(loop, host, dns_timeout,
                               CCEV_DNS_A | CCEV_DNS_AAAA,
                               _connect_dns_cb, dns_ctx) != CCEV_OK) {
-            sock->connector.dns_cancelled = NULL;
+            any->connector.dns_cancelled = NULL;
             ccev__free_fn(dns_ctx);
-            if (sock->connector.timer)
-                ccev_timer_del(loop, sock->connector.timer);
+            if (any->connector.timer)
+                ccev_timer_del(loop, any->connector.timer);
             cclist_remove(&loop->all_socks, &sock->lnode);
             loop->sock_count--;
-            ccev__free_fn(sock);
+            ccev__free_fn(any);
             return NULL;
         }
     }

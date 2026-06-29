@@ -395,10 +395,10 @@ int ccev_sock_count(const ccev_loop_t *loop);
 
 /** @brief Upgrade a ccev_sock_t to a ccev_stream_t.
  *
- *  Internally this is a realloc — the returned stream address is the
- *  same as the passed sock address.  After this call, use the
- *  returned stream pointer; the original sock pointer is still valid
- *  (same address) but should be treated as a stream.
+ *  The returned stream address is the same as the passed sock address;
+ *  all socket variants share a common allocation via the internal
+ *  ccev_sock_any_t union.  After this call, use the returned stream
+ *  pointer; the original sock pointer is still valid (same address).
  *
  *  The stream takes ownership of the sock's event callbacks internally,
  *  routing them through buffered I/O and the stream reader.

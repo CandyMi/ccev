@@ -42,7 +42,8 @@
  * ════════════════════════════════════════════════════════════════ */
 
 static inline ccev_stream_t *_sock_to_stream(ccev_sock_t *sock) {
-    /* ccev_stream_t's first field is ccev_sock_t — safe cast */
+    /* ccev_stream_t's first field is ccev_sock_t — safe cast.
+     * Backed by the ccev_sock_any_t union (see ccev_internal.h). */
     return (ccev_stream_t *)sock;
 }
 
@@ -442,9 +443,10 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
 ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     if (!sock || sock->closed || sock->in_closing) return NULL;
 
-    /* Safe cast: ccev_stream_t embeds ccev_sock_t as its first field,
-     * and ccev_sock_create() always allocates sizeof(ccev_stream_t).
-     * See ccev_sock.c for the static_assert that verifies this layout. */
+    /* Safe cast: ccev_sock_create() allocates via the ccev_sock_any_t
+     * union, ensuring enough space for ccev_stream_t.  Since
+     * ccev_sock_t is the first field of ccev_stream_t, the address
+     * is the same.  Future variants join the same union. */
     ccev_stream_t *st = (ccev_stream_t *)sock;
 
     /* Zero out fields beyond the embedded sock */
@@ -455,6 +457,9 @@ ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     st->sendfile_fd = -1;
     st->reader      = NULL;
 
+    /* Mark variant type for cleanup dispatch */
+    sock->stype = CCEV_STYPE_STREAM;
+
     /* Take over sock's event callbacks */
     st->sock.rcb = _stream_on_readable;
     st->sock.wcb = _stream_on_writable;
@@ -462,12 +467,8 @@ ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     return st;
 }
 
-int ccev_stream_close(ccev_stream_t *st) {
-    if (!st) return CCEV_ERR;
-
-    /* Run cleanup even when sock->closed is true (HUP close path).
-     * Only skip the final ccev__sock_schedule_close in that case. */
-    bool already_closed = st->sock.closed;
+void ccev__stream_cleanup(ccev_stream_t *st) {
+    if (!st) return;
 
     /* Free write buffers */
     while (!cclink_empty(&st->wlist)) {
@@ -491,8 +492,16 @@ int ccev_stream_close(ccev_stream_t *st) {
         ccev__free_fn(st->reader);
         st->reader = NULL;
     }
+}
 
-    /* Close the underlying sock (no-op if already in closing) */
+int ccev_stream_close(ccev_stream_t *st) {
+    if (!st) return CCEV_ERR;
+
+    /* Release stream resources, then schedule the sock for deferred close.
+     * The union pointer is freed later by ccev__sock_free (base cleanup only). */
+    bool already_closed = st->sock.closed;
+    ccev__stream_cleanup(st);
+
     if (!already_closed)
         ccev__sock_schedule_close(st->sock.loop, &st->sock);
     return already_closed ? CCEV_ERR : CCEV_OK;
