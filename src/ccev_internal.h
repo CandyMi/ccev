@@ -14,6 +14,7 @@
 
 #include "ccev.h"
 #include "ccsocket.h"
+#include "epoll/epoll.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -38,9 +39,6 @@ typedef int socklen_t;
 
 /* struct timespec (used by ccev__now_ms on Linux/POSIX) */
 #include <time.h>
-
-#include "epoll/epoll.h"
-#include "ccsocket.h"
 
 /* ── Compiler barrier (prevents reordering around volatile/atomic ops) ── */
 #if defined(_WIN32)

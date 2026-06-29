@@ -242,8 +242,26 @@ static void _dispatch_events(ccev_loop_t *loop, int n) {
         if (fired & (EPOLLERR | EPOLLHUP))
             ccev_events |= CCEV_EVENT_HUP;
 
-        /* HUP/ERR fast-path — schedule deferred close */
+        /* HUP/ERR — handle by socket mode.
+         *   CONNECT: probe connection state, fire connect_cb, then close.
+         *   INIT:    deliver HUP via rcb so user can read final data, then close.
+         *   LISTEN:  just close. */
         if (ccev_events & CCEV_EVENT_HUP) {
+            if (sock->mode == CCEV_SOCK_CONNECT) {
+                ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
+                if (sock->connector.cb)
+                    sock->connector.cb(sock->connector.udata, sock,
+                                       st == CC_CONNECTED ? CCEV_OK : CCEV_ERR);
+                ccev__sock_schedule_close(loop, sock);
+                continue;
+            }
+            if (sock->mode == CCEV_SOCK_INIT) {
+                sock->events = 0;
+                if (sock->rcb) sock->rcb(sock, ccev_events);
+                ccev__sock_schedule_close(loop, sock);
+                continue;
+            }
+            /* LISTEN (or unknown) — just close */
             ccev__sock_schedule_close(loop, sock);
             continue;
         }
@@ -285,12 +303,12 @@ static void _dispatch_events(ccev_loop_t *loop, int n) {
 
         if (fired & EPOLLOUT) {
             if (sock->mode == CCEV_SOCK_CONNECT) {
-                /* Connect completion */
-                int so_err = 0;
-                socklen_t errlen = sizeof(so_err);
-                getsockopt((int)(intptr_t)sock->fd, SOL_SOCKET,
-                            SO_ERROR, (char*)&so_err, &errlen);
-                if (so_err == 0) {
+                /* Connect completion — pure EPOLLOUT (no HUP) means the
+                 * connect operation has finished.  Use ccsocket_is_connected
+                 * for a cross-platform read-only probe (SO_ERROR + getpeername
+                 * on POSIX, connect(s,NULL,0) on Windows). */
+                ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
+                if (st == CC_CONNECTED) {
                     sock->mode = CCEV_SOCK_INIT;
                     /* Clear connect timer */
                     if (sock->connector.timer) {

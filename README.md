@@ -82,11 +82,11 @@ flowchart TD
         DISPATCH --> EVT{"ev dispatch"}
         EVT -->|"null / closed"| SKIP["continue"]
         EVT -->|"wake_sock"| WAKE["drain pipe\ncontinue"]
-        EVT -->|"EPOLLERR|HUP"| HUP["ccev__sock_schedule_close\ncontinue"]
+        EVT -->|"EPOLLERR|HUP"| HUP["mode dispatch\nCONNECT→is_connected+cb\nINIT→rcb(HUP)+close\nLISTEN→close"]
         EVT -->|"LISTEN + IN"| LISTEN["batch accept (≤128)\nfor each: ccev_sock_create\n→ listen_cb\nre-arm EPOLLIN\ncontinue"]
-        EVT -->|"CONNECT + OUT"| CONN["getsockopt SO_ERROR"]
-        CONN -->|"error == 0"| CONNOK["mode = INIT\ndel connect timer\nconnect_cb(OK)\ncontinue"]
-        CONN -->|"error != 0"| CONNERR["connect_cb(ERR)\nschedule_close\ncontinue"]
+        EVT -->|"CONNECT + OUT"| CONN["ccsocket_is_connected"]
+        CONN -->|"CC_CONNECTED"| CONNOK["mode = INIT\ndel connect timer\nconnect_cb(OK)\ncontinue"]
+        CONN -->|"CC_CONNERROR"| CONNERR["connect_cb(ERR)\nschedule_close\ncontinue"]
         EVT -->|"normal IN"| READ["fire rcb(sock, events)"]
         EVT -->|"normal OUT"| WRITE["fire wcb(sock, events)"]
         
@@ -128,9 +128,9 @@ flowchart LR
 4. **Phase 3 — Poll**: `epoll_wait()` with EINTR retry.
 5. **Phase 4 — Dispatch**: Route each event by socket mode:
    - `wake_sock`: drain pipe, skip re-arm.
-   - `HUP/ERR`: deferred close — no user callback.
+   - `HUP/ERR`: Mode-based dispatch — CONNECT→`ccsocket_is_connected`+`connect_cb`, INIT→`rcb(HUP)`+close, LISTEN→close.
    - `LISTEN`: batch accept (≤128), fire `listen_cb` per client, re-arm.
-   - `CONNECT`: `getsockopt SO_ERROR` — 0 → OK, else ERR + close.
+   - `CONNECT`: `ccsocket_is_connected()` — `CC_CONNECTED`→OK, `CC_CONNERROR`→ERR+close.
    - Normal I/O: fire `rcb`/`wcb`, then `ccev__sock_rearm()`.
 6. **Phase 5**: Unconditionally re-arm `wake_sock` (`epoll_ctl MOD`, EPOLLIN|ONESHOT).
 7. **Phase 6**: `ccev__process_closing()` — fire `close_cb` and free.

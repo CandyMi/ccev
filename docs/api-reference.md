@@ -177,7 +177,8 @@ of events processed.
 3. Compute epoll timeout from `next_ms`
 4. `epoll_wait()`
 5. Dispatch events — listeners (batch accept up to 128), connecting
-   (check SO_ERROR), HUP (schedule close), EPOLLIN/EPOLLOUT (fire callbacks)
+   (`ccsocket_is_connected`), HUP (mode-based: connect_cb/rcb+close),
+   EPOLLIN/EPOLLOUT (fire callbacks)
 6. Re-arm wake pipe
 7. Process closing queue (fire close_cb, free sockets)
 
