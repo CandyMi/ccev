@@ -42,17 +42,17 @@ typedef int socklen_t;
 
 /* ── Compiler barrier (prevents reordering around volatile/atomic ops) ── */
 #if defined(_WIN32)
-#   if defined(_MSC_VER)
-#     define CCEV_COMPILER_BARRIER() _ReadWriteBarrier()
-#   else
-#     define CCEV_COMPILER_BARRIER() __sync_synchronize()
-#   endif
+#  if defined(_MSC_VER)
+#    define CCEV_COMPILER_BARRIER() _ReadWriteBarrier()
+#  else
+#    define CCEV_COMPILER_BARRIER() __sync_synchronize()
+#  endif
 #elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
-#   define CCEV_COMPILER_BARRIER() __asm__ volatile("" ::: "memory")
+#  define CCEV_COMPILER_BARRIER() __asm__ volatile("" ::: "memory")
 #elif defined(__CC_ARM)
-#   define CCEV_COMPILER_BARRIER() __schedule_barrier()
+#  define CCEV_COMPILER_BARRIER() __schedule_barrier()
 #else
-#   define CCEV_COMPILER_BARRIER() do {} while(0)
+#  define CCEV_COMPILER_BARRIER() do {} while(0)
 #endif
 
 /* ── Global allocator (set via ccev_set_allocator, visible to all .c files) ── */
@@ -158,9 +158,9 @@ struct ccev_timer_s {
     ccev_loop_t        *loop;       /**< Owning event loop               */
 
     uint64_t            interval;   /**< Repeat interval (0 for ONCE)    */
-    ccev_timer_mode_t   mode;       /**< ONCE or REPEAT                  */
     ccev_timer_cb       cb;         /**< Expiry callback                 */
     void               *udata;      /**< User data                       */
+    ccev_timer_mode_t   mode;       /**< ONCE or REPEAT                  */
     bool                active;     /**< false = lazily deleted          */
 };
 
@@ -187,16 +187,16 @@ struct ccev_stream_reader_s {
     size_t           pos;           /**< Consumed bytes offset in @p buf.*/
     size_t           len;           /**< Valid pending bytes in @p buf.  */
     size_t           want;          /**< maxlen (readline) or n (readnum)*/
-    char             delim;         /**< 0 = readnum, else delimiter.    */
-    bool             is_n;          /**< true = readnum, false = readline*/
     ccev_stream_cb   cb;            /**< User completion callback.       */
     void            *udata;         /**< User data for @p cb.            */
     ccev_event_cb    old_rcb;       /**< Saved read callback while active*/
     ccev_sock_t     *sock;          /**< Owning socket (back-pointer).   */
-
-    /* ── Timeout support ── */
     ccev_timer_t    *timer;         /**< Read timeout timer, or NULL.    */
+
+    /* ── Timeout / delim state ── */
     int              timeout_ms;    /**< Saved timeout value.            */
+    char             delim;         /**< 0 = readnum, else delimiter.    */
+    bool             is_n;          /**< true = readnum, false = readline*/
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -211,15 +211,15 @@ struct ccev_stream_s {
     size_t             wbuf_len;    /**< Total bytes buffered.           */
     ccev_send_cb       send_cb;     /**< Global flush-complete callback.*/
     void              *send_udata;
-    bool               pending_write;/**< EPOLLOUT currently armed.     */
 
     /* ── Stream reader (optional) ── */
     ccev_stream_reader_t *reader;
 
     /* ── Sendfile state ── */
-    int                sendfile_fd; /**< File fd, -1 when idle.         */
     ccev_send_cb       sf_cb;      /**< Sendfile completion callback.   */
     void              *sf_udata;
+    int                sendfile_fd; /**< File fd, -1 when idle.         */
+    bool               pending_write;/**< EPOLLOUT currently armed.     */
 };
 
 /* ════════════════════════════════════════════════════════════════

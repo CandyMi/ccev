@@ -304,6 +304,45 @@ static void _connect_timeout_cb(void *udata) {
     ccev__sock_schedule_close(sock->loop, sock);
 }
 
+/* ── Create socket, initiate non-blocking connect, register with reactor ── */
+/* Returns:  1 = connected immediately (cb already fired)
+ *           0 = connect pending (EPOLLOUT will fire cb later)
+ *          -1 = fd creation failed
+ *
+ * Connection state is checked via ccsocket_is_connected(), NOT the return
+ * value of ccsocket_connect() — on non-blocking sockets the connect call
+ * may return false for EINPROGRESS, not just errors. */
+static int _connect_try_register(ccev_sock_t *sock,
+                                  ccsocket_family_t family,
+                                  const char *address, uint16_t port) {
+    ccsocket_t fd = ccsocket1(family, CC_TCP, CC_CLOEXEC | CC_NONBLOCK);
+    if (fd == (ccsocket_t)-1) return -1;
+
+    /* Initiate non-blocking connect — discard return value (EINPROGRESS is
+     * not an error for non-blocking sockets).  Use ccsocket_is_connected to
+     * check actual connection state. */
+    ccsocket_connect(fd, address, port);
+
+    if (ccsocket_is_connected(fd) == CC_CONNECTED) {
+        sock->fd   = fd;
+        sock->mode = CCEV_SOCK_INIT;
+        if (sock->connector.timer) {
+            ccev_timer_del(sock->loop, sock->connector.timer);
+            sock->connector.timer = NULL;
+        }
+        if (sock->connector.cb)
+            sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
+        return 1;
+    }
+
+    /* Still connecting or error — register EPOLLOUT; the dispatch handler
+     * in ccev_loop_run calls ccsocket_is_connected to distinguish success
+     * from error. */
+    sock->fd = fd;
+    ccev__sock_mod_internal(sock->loop, sock, EPOLLOUT);
+    return 0;
+}
+
 /* ── Resume connect after DNS resolution ── */
 static void _connect_dns_cb(void *udata, const char *address, int status) {
     _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)udata;
@@ -327,29 +366,13 @@ static void _connect_dns_cb(void *udata, const char *address, int status) {
         return;
     }
 
-    ccsocket_t fd = ccsocket1(family, CC_TCP, CC_CLOEXEC | CC_NONBLOCK);
-    if (fd == (ccsocket_t)-1) {
+    int rc = _connect_try_register(sock, family, address, sock->connector.port);
+    if (rc < 0) {
         if (sock->connector.cb)
             sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
         ccev__sock_schedule_close(sock->loop, sock);
         return;
     }
-
-    bool connected = ccsocket_connect(fd, address, sock->connector.port);
-    if (connected) {
-        sock->fd = fd;
-        sock->mode = CCEV_SOCK_INIT;
-        if (sock->connector.timer) {
-            ccev_timer_del(sock->loop, sock->connector.timer);
-            sock->connector.timer = NULL;
-        }
-        if (sock->connector.cb)
-            sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
-        return;
-    }
-
-    sock->fd = fd;
-    ccev__sock_mod_internal(sock->loop, sock, EPOLLOUT);
 }
 
 /* ── Public connect API ── */
@@ -389,9 +412,8 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
 
     ccsocket_family_t family = ccsocket_get_version(host);
     if (family == CC_INET4 || family == CC_INET6 || family == CC_UNIX) {
-        int proto = CC_TCP;
-        ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
-        if (fd == (ccsocket_t)-1) {
+        int rc = _connect_try_register(sock, family, host, port);
+        if (rc < 0) {
             if (sock->connector.timer)
                 ccev_timer_del(loop, sock->connector.timer);
             cclist_remove(&loop->all_socks, &sock->lnode);
@@ -399,21 +421,8 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
             ccev__free_fn(sock);
             return NULL;
         }
-
-        bool connected = ccsocket_connect(fd, host, port);
-        if (connected) {
-            sock->fd   = fd;
-            sock->mode = CCEV_SOCK_INIT;
-            if (sock->connector.timer) {
-                ccev_timer_del(loop, sock->connector.timer);
-                sock->connector.timer = NULL;
-            }
-            cb(udata, sock, CCEV_OK);
-            return sock;
-        }
-
-        sock->fd = fd;
-        ccev__sock_mod_internal(loop, sock, EPOLLOUT);
+        if (rc > 0) return sock;  /* connected immediately — cb already fired */
+        /* rc == 0: pending — will fire cb via EPOLLOUT */
     } else {
         /* When timeout_ms is 0 (no timeout), pass 0 through to DNS.
          * Otherwise clamp to [1000, 10000] so a single-digit timeout
@@ -425,22 +434,22 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
         }
 
         _connect_dns_ctx_t *dns_ctx = (_connect_dns_ctx_t *)
-        ccev__realloc_fn(NULL, sizeof(_connect_dns_ctx_t));
-    if (!dns_ctx) {
-        if (sock->connector.timer)
-            ccev_timer_del(loop, sock->connector.timer);
-        cclist_remove(&loop->all_socks, &sock->lnode);
-        loop->sock_count--;
-        ccev__free_fn(sock);
-        return NULL;
-    }
-    dns_ctx->sock     = sock;
-    dns_ctx->alive    = true;
-    sock->connector.dns_cancelled = &dns_ctx->alive;
+            ccev__realloc_fn(NULL, sizeof(_connect_dns_ctx_t));
+        if (!dns_ctx) {
+            if (sock->connector.timer)
+                ccev_timer_del(loop, sock->connector.timer);
+            cclist_remove(&loop->all_socks, &sock->lnode);
+            loop->sock_count--;
+            ccev__free_fn(sock);
+            return NULL;
+        }
+        dns_ctx->sock     = sock;
+        dns_ctx->alive    = true;
+        sock->connector.dns_cancelled = &dns_ctx->alive;
 
-    if (ccev_dns_resolve(loop, host, dns_timeout,
-                          CCEV_DNS_A | CCEV_DNS_AAAA,
-                          _connect_dns_cb, dns_ctx) != CCEV_OK) {
+        if (ccev_dns_resolve(loop, host, dns_timeout,
+                              CCEV_DNS_A | CCEV_DNS_AAAA,
+                              _connect_dns_cb, dns_ctx) != CCEV_OK) {
             sock->connector.dns_cancelled = NULL;
             ccev__free_fn(dns_ctx);
             if (sock->connector.timer)
