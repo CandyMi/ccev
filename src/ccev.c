@@ -211,6 +211,8 @@ void ccev_loop_stop(ccev_loop_t *loop) {
  *  Main event loop
  * ════════════════════════════════════════════════════════════════ */
 
+static void _dispatch_events(ccev_loop_t *loop, int n);
+
 int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     if (!loop) return CCEV_ERR;
     /* Honour any stop request that was set before entering the loop
@@ -255,101 +257,8 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
             n = epoll_wait(loop->epfd, loop->events, loop->max_events, timeout);
         } while (n < 0 && errno == EINTR);
 
-        /* 4. Dispatch events */
-        for (int i = 0; i < n; i++) {
-            struct epoll_event *ev = &loop->events[i];
-            ccev_sock_t *sock = (ccev_sock_t *)ev->data.ptr;
-            if (!sock || sock->closed) continue;
-
-            uint32_t fired = ev->events;
-
-            /* Wakeup pipe — drain */
-            if (sock == loop->wake_sock) {
-                char buf[64];
-                while (ccsocket_recv(sock->fd, buf, sizeof(buf), NULL) == CC_OPCODE_OK) {}
-                continue;
-            }
-
-            /* Convert epoll events to CCEV_EVENT flags */
-            int ccev_events = 0;
-            if (fired & EPOLLIN)  ccev_events |= CCEV_EVENT_READ;
-            if (fired & EPOLLOUT) ccev_events |= CCEV_EVENT_WRITE;
-            if (fired & (EPOLLERR | EPOLLHUP))
-                ccev_events |= CCEV_EVENT_HUP;
-
-            /* HUP/ERR fast-path — schedule deferred close */
-            if (ccev_events & CCEV_EVENT_HUP) {
-                ccev__sock_schedule_close(loop, sock);
-                continue;
-            }
-
-            /* Reset registered events (ONESHOT consumed them) */
-            sock->events = 0;
-
-            /* Dispatch by mode */
-            if (fired & EPOLLIN) {
-                if (sock->mode == CCEV_SOCK_LISTEN) {
-                    /* Listener — batch accept */
-                    int count = 0;
-                    while (count < CCEV_MAX_ACCEPT_BATCH) {
-                        char addr_buf[64];
-                        uint16_t port = 0;
-                        ccsocket_t afd = ccsocket_accept2(sock->fd, addr_buf, &port, 0);
-                        if (afd == (ccsocket_t)0) break;   /* EAGAIN */
-                        if (afd == (ccsocket_t)-1) break;  /* error */
-                        if (sock->listener.cb) {
-                            ccev_sock_t *client = ccev_sock_create(loop, afd, NULL);
-                            if (client) {
-                                sock->listener.cb(sock->listener.udata,
-                                                   client, addr_buf, (int)port);
-                            } else {
-                                ccsocket_close(afd);
-                            }
-                        } else {
-                            ccsocket_close(afd);
-                        }
-                        count++;
-                    }
-                    ccev__sock_mod_internal(loop, sock, EPOLLIN);
-                    continue;
-                }
-
-                /* Normal read — fire rcb */
-                if (sock->rcb) sock->rcb(sock, ccev_events);
-            }
-
-            if (fired & EPOLLOUT) {
-                if (sock->mode == CCEV_SOCK_CONNECT) {
-                    /* Connect completion */
-                    int so_err = 0;
-                    socklen_t errlen = sizeof(so_err);
-                    getsockopt((int)(intptr_t)sock->fd, SOL_SOCKET,
-                                SO_ERROR, (char*)&so_err, &errlen);
-                    if (so_err == 0) {
-                        sock->mode = CCEV_SOCK_INIT;
-                        /* Clear connect timer */
-                        if (sock->connector.timer) {
-                            ccev_timer_del(loop, sock->connector.timer);
-                            sock->connector.timer = NULL;
-                        }
-                        if (sock->connector.cb)
-                            sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
-                    } else {
-                        if (sock->connector.cb)
-                            sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
-                        ccev__sock_schedule_close(loop, sock);
-                    }
-                    continue;
-                }
-
-                /* Normal write — fire wcb */
-                if (sock->wcb) sock->wcb(sock, ccev_events);
-            }
-
-            /* Re-arm after ONESHOT consumption */
-            if (sock->rcb || sock->wcb)
-                ccev__sock_rearm(loop, sock);
-        }
+        /* 4. Dispatch events — extracted to _dispatch_events */
+        _dispatch_events(loop, n);
 
         /* 5. Re-arm wake_sock for next ccev_wakeup / ccev_loop_stop */
         if (loop->wake_sock && !loop->wake_sock->closed)
@@ -376,6 +285,112 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 }
 
 /* ccev_listen and ccev_connect moved to ccev_sock.c */
+
+/* ════════════════════════════════════════════════════════════════
+ *  Event dispatch — process all ready fds from epoll_wait
+ *
+ *  Called once per loop iteration from ccev_loop_run.  Handles
+ *  wake-pipe draining, HUP/ERR close, LISTEN accept batching,
+ *  CONNECT completion, and normal read/write event callbacks
+ *  with ONESHOT re-arm.
+ * ════════════════════════════════════════════════════════════════ */
+
+static void _dispatch_events(ccev_loop_t *loop, int n) {
+    for (int i = 0; i < n; i++) {
+        struct epoll_event *ev = &loop->events[i];
+        ccev_sock_t *sock = (ccev_sock_t *)ev->data.ptr;
+        if (!sock || sock->closed) continue;
+
+        uint32_t fired = ev->events;
+
+        /* Wakeup pipe — drain */
+        if (sock == loop->wake_sock) {
+            char buf[64];
+            while (ccsocket_recv(sock->fd, buf, sizeof(buf), NULL) == CC_OPCODE_OK) {}
+            continue;
+        }
+
+        /* Convert epoll events to CCEV_EVENT flags */
+        int ccev_events = 0;
+        if (fired & EPOLLIN)  ccev_events |= CCEV_EVENT_READ;
+        if (fired & EPOLLOUT) ccev_events |= CCEV_EVENT_WRITE;
+        if (fired & (EPOLLERR | EPOLLHUP))
+            ccev_events |= CCEV_EVENT_HUP;
+
+        /* HUP/ERR fast-path — schedule deferred close */
+        if (ccev_events & CCEV_EVENT_HUP) {
+            ccev__sock_schedule_close(loop, sock);
+            continue;
+        }
+
+        /* Reset registered events (ONESHOT consumed them) */
+        sock->events = 0;
+
+        /* Dispatch by mode */
+        if (fired & EPOLLIN) {
+            if (sock->mode == CCEV_SOCK_LISTEN) {
+                /* Listener — batch accept */
+                int count = 0;
+                while (count < CCEV_MAX_ACCEPT_BATCH) {
+                    char addr_buf[64];
+                    uint16_t port = 0;
+                    ccsocket_t afd = ccsocket_accept2(sock->fd, addr_buf, &port, 0);
+                    if (afd == (ccsocket_t)0) break;   /* EAGAIN */
+                    if (afd == (ccsocket_t)-1) break;  /* error */
+                    if (sock->listener.cb) {
+                        ccev_sock_t *client = ccev_sock_create(loop, afd, NULL);
+                        if (client) {
+                            sock->listener.cb(sock->listener.udata,
+                                               client, addr_buf, (int)port);
+                        } else {
+                            ccsocket_close(afd);
+                        }
+                    } else {
+                        ccsocket_close(afd);
+                    }
+                    count++;
+                }
+                ccev__sock_mod_internal(loop, sock, EPOLLIN);
+                continue;
+            }
+
+            /* Normal read — fire rcb */
+            if (sock->rcb) sock->rcb(sock, ccev_events);
+        }
+
+        if (fired & EPOLLOUT) {
+            if (sock->mode == CCEV_SOCK_CONNECT) {
+                /* Connect completion */
+                int so_err = 0;
+                socklen_t errlen = sizeof(so_err);
+                getsockopt((int)(intptr_t)sock->fd, SOL_SOCKET,
+                            SO_ERROR, (char*)&so_err, &errlen);
+                if (so_err == 0) {
+                    sock->mode = CCEV_SOCK_INIT;
+                    /* Clear connect timer */
+                    if (sock->connector.timer) {
+                        ccev_timer_del(loop, sock->connector.timer);
+                        sock->connector.timer = NULL;
+                    }
+                    if (sock->connector.cb)
+                        sock->connector.cb(sock->connector.udata, sock, CCEV_OK);
+                } else {
+                    if (sock->connector.cb)
+                        sock->connector.cb(sock->connector.udata, sock, CCEV_ERR);
+                    ccev__sock_schedule_close(loop, sock);
+                }
+                continue;
+            }
+
+            /* Normal write — fire wcb */
+            if (sock->wcb) sock->wcb(sock, ccev_events);
+        }
+
+        /* Re-arm after ONESHOT consumption */
+        if (sock->rcb || sock->wcb)
+            ccev__sock_rearm(loop, sock);
+    }
+}
 
 /* ════════════════════════════════════════════════════════════════
  *  Per-iteration callback
