@@ -57,6 +57,15 @@ static void *oom_realloc(void *ptr, size_t sz) {
 
 static void oom_free(void *ptr) { free(ptr); }
 
+static void timer_stop_loop(void *udata) {
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+static void connect_stop_loop(void *udata, ccev_sock_t *sock, int status) {
+    (void)sock; (void)status;
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
 static void oom_set_fail_at(int n) {
     oom_fail_at = n;
     oom_count   = 0;
@@ -162,7 +171,7 @@ TEST(timer_add_oom) {
     ccev_set_allocator(oom_realloc, oom_free);
 
     ccev_timer_t *t = ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
-                                      (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                                      timer_stop_loop, loop);
     ASSERT(t == NULL);
 
     oom_reset();
@@ -331,7 +340,7 @@ TEST(connect_oom_dns_ctx) {
     ccev_set_allocator(oom_realloc, oom_free);
 
     ccev_sock_t *sock = ccev_connect(loop, "oom-connect.example", 80, 5000, 0,
-                                      (ccev_connect_cb)(void(*)(void))ccev_loop_stop, loop);
+                                      connect_stop_loop, loop);
     ASSERT(sock == NULL);
 
     oom_reset();

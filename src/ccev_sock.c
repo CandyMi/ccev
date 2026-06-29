@@ -286,8 +286,10 @@ static void _connect_timeout_cb(void *udata) {
      * DNS recv callback).  Without this guard, _connect_dns_cb would
      * see ctx->alive still true and create a new fd on a dying sock. */
     if (any->connector.dns_ctx) {
-        ((_connect_dns_ctx_t *)any->connector.dns_ctx)->alive = false;
+        _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)any->connector.dns_ctx;
+        ctx->alive = false;
         any->connector.dns_ctx = NULL;
+        ccev__free_fn(ctx);
     }
 
     if (any->connector.cb)

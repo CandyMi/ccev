@@ -27,6 +27,11 @@ static int passed, failed;
 } while(0)
 #define RUN(name) do { printf("  %s\n", #name); fflush(stdout); test_##name(); } while(0)
 
+static void timer_stop_loop(void *udata) {
+    (void)udata;
+    ccev_loop_stop(*(ccev_loop_t **)udata);
+}
+
 static int pair_create(int sv[2]) {
 #ifdef _WIN32
     (void)sv; return -1;
@@ -174,7 +179,7 @@ TEST(read_stop_suppresses_event) {
 
     /* Safety timer to stop the loop if the callback doesn't fire */
     ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, &loop);
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
     ASSERT(read_ev_fired == 0);
@@ -266,7 +271,7 @@ TEST(write_stop_suppresses_event) {
     ASSERT(ccev_sock_write_stop(sock) == CCEV_OK);
 
     ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, &loop);
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
     ASSERT(write_ev_fired == 0);

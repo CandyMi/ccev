@@ -27,6 +27,10 @@ static int passed, failed;
 } while(0)
 #define RUN(name) do { printf("  %s\n", #name); fflush(stdout); test_##name(); } while(0)
 
+static void timer_stop_loop(void *udata) {
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
 static int pair_create(int sv[2]) {
 #ifdef _WIN32
     (void)sv; return -1;
@@ -133,7 +137,7 @@ TEST(stream_readline_smoke) {
 
     /* Safety timer (100ms — only fires if read never lands) */
     ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, loop);
 
     ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_on_data, &ctx) == CCEV_OK);
 
@@ -173,7 +177,7 @@ TEST(stream_readnum_smoke) {
     ctx.loop = loop;
 
     ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, loop);
 
     ASSERT(ccev_stream_readnum(st, 5, 0, stream_on_data, &ctx) == CCEV_OK);
     write(sv[1], "hello", 5);
@@ -342,7 +346,7 @@ TEST(stream_readline_timeout) {
 
     /* Safety timer to prevent hang if readline timeout fails */
     ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, loop);
 
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
@@ -378,7 +382,7 @@ TEST(stream_readnum_timeout) {
     ASSERT(ccev_stream_readnum(st, 5, 10, stream_on_timeout, &ctx) == CCEV_OK);
 
     ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, loop);
 
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
@@ -584,7 +588,7 @@ TEST(stream_read_stop_cancels) {
 
     /* Safety timer to stop the loop */
     ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
-                   (ccev_timer_cb)(void(*)(void))ccev_loop_stop, loop);
+                   timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
     ASSERT(ctx.called == 0);
