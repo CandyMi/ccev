@@ -367,9 +367,10 @@ static int _reader_start(ccev_stream_t *st, size_t want,
 
 static void _stream_on_readable(ccev_sock_t *sock, int events) {
     (void)events;
+    if (!sock || sock->closed) return;
     ccev_stream_t *st = _sock_to_stream(sock);
     ccev_stream_reader_t *rd = st->reader;
-    if (!rd || !sock || sock->closed) return;
+    if (!rd) return;
 
     int nread = 0;
     ccsocket_stcode_t rc = ccsocket_recv(sock->fd, rd->buf + rd->pos + rd->len,

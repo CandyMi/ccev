@@ -29,7 +29,15 @@
 #include <stddef.h>   /* size_t */
 #include <stdint.h>   /* uint64_t */
 #include <stdbool.h>  /* bool */
-#include "ccsocket.h" /* ccsocket_t */
+
+#ifndef CCSOCKET_SOCK_T
+  #define CCSOCKET_SOCK_T
+  #if _WIN32
+    typedef intptr_t ccsocket_t;
+  #else
+    typedef int ccsocket_t;
+  #endif
+#endif
 
 #ifdef __cplusplus
 extern "C" {
