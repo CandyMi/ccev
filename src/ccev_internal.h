@@ -321,12 +321,6 @@ void ccev__sock_free(ccev_sock_t *sock);
 
 /* ── stream I/O (ccev_stream.c) ── */
 
-/** Flush write buffer (called from dispatch on EPOLLOUT). */
-void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st);
-
-/** Continue sendfile transfer (called from dispatch on EPOLLOUT). */
-void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st);
-
 /* ── signal (ccev_signal.c) ── */
 
 /** Signal pipe dispatch callback. */

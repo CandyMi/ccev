@@ -83,8 +83,9 @@ static void _buf_free(ccev_buf_t *buf) {
  * ════════════════════════════════════════════════════════════════ */
 
 static void _stream_on_writable(ccev_sock_t *sock, int events);
+static void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st);
 
-void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st) {
+static void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st) {
     (void)loop;
     if (st->sock.closed || !st->pending_write) return;
 
@@ -169,7 +170,7 @@ static void _stream_on_writable(ccev_sock_t *sock, int events) {
  *  Sendfile support
  * ════════════════════════════════════════════════════════════════ */
 
-void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st) {
+static void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st) {
     if (st->sock.closed || st->sendfile_fd < 0) return;
 
     int fd = st->sendfile_fd;
