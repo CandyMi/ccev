@@ -232,10 +232,14 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
     }
 
     /* Hostname path — resolve via async DNS first */
-    /* Use the ICMP timeout as DNS timeout too; minimum 1s for DNS */
+    /* Use the ICMP timeout as DNS timeout too.
+     * When timeout_ms is 0 (no timeout), pass 0 through to DNS.
+     * Otherwise clamp to [1000, 10000] for a reasonable DNS window. */
     unsigned int dns_timeout = timeout_ms;
-    if (dns_timeout == 0 || dns_timeout > 10000) dns_timeout = 10000;
-    if (dns_timeout < 1000) dns_timeout = 1000;
+    if (dns_timeout > 0) {
+        if (dns_timeout > 10000) dns_timeout = 10000;
+        if (dns_timeout < 1000)  dns_timeout = 1000;
+    }
 
     if (ccev_dns_resolve(loop, host, dns_timeout, CCEV_DNS_A | CCEV_DNS_AAAA,
                           ccev__icmp_dns_cb, p) != CCEV_OK) {

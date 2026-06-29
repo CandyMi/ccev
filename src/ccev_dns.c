@@ -511,8 +511,17 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     ccev_sock_set_close_cb(sock, (ccev_close_cb)ccev__free_fn, q);
     ccev_sock_read_start(sock, dns_recv_cb);
 
-    if (timeout_ms > 0)
+    if (timeout_ms > 0) {
         q->timer = ccev_timer_add(loop, timeout_ms, CCEV_TIMER_ONCE, dns_timeout_cb, q);
+        if (!q->timer) {
+            /* OOM — no timeout guard means the query could hang forever.
+             * Schedule socket close (frees q via close_cb) and remove
+             * the pending entry so no one waits on a lost resolution. */
+            ccev__sock_schedule_close(loop, sock);
+            pending_remove(loop, pending);
+            return CCEV_ERR;
+        }
+    }
 
     if ((type & CCEV_DNS_A))
         ccev__dns_send_one(loop, fd, &q->ctx_a, domain, CCDNS_A);

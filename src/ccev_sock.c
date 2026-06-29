@@ -415,9 +415,14 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
         sock->fd = fd;
         ccev__sock_mod_internal(loop, sock, EPOLLOUT);
     } else {
+        /* When timeout_ms is 0 (no timeout), pass 0 through to DNS.
+         * Otherwise clamp to [1000, 10000] so a single-digit timeout
+         * has a reasonable chance to complete a DNS exchange. */
         unsigned int dns_timeout = timeout_ms;
-        if (dns_timeout == 0 || dns_timeout > 10000) dns_timeout = 10000;
-        if (dns_timeout < 1000) dns_timeout = 1000;
+        if (dns_timeout > 0) {
+            if (dns_timeout > 10000) dns_timeout = 10000;
+            if (dns_timeout < 1000)  dns_timeout = 1000;
+        }
 
         _connect_dns_ctx_t *dns_ctx = (_connect_dns_ctx_t *)
         ccev__realloc_fn(NULL, sizeof(_connect_dns_ctx_t));
