@@ -326,6 +326,11 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     int n = 0;
 
     do {
+        /* 0. Per-iteration callback (runs first each iteration).
+         *     Registered via ccev_each().  When ecb is NULL (the common
+         *     case) the branch is predicted not-taken — zero cost. */
+        if (loop->ecb) loop->ecb(loop);
+
 #if defined(_WIN32)
         /* On Windows the signal handler stores the signum in
          * loop->sig_pending and wakes the loop.  Check it here
@@ -347,22 +352,15 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         if (loop->stop_flag) break;
 
         /* 2. Compute epoll timeout
-         *
-         *  ┌ RUN_ONCE → 0 (poll, don't block)
-         *  ├ next_ms ≥ 0 → exact ms until next timer
-         *  └ next_ms < 0:
-         *       ├ ecb set → 100ms (so the per-iteration callback
-         *       │             fires periodically even when idle)
-         *       └ no ecb  → -1 (block until I/O — lowest latency) */
+         *    RUN_ONCE → 0 (poll);  timer pending → next_ms;
+         *    otherwise → -1 (block until I/O). */
         int timeout;
         if (mode == CCEV_RUN_ONCE) {
             timeout = 0;
-        } else if (next_ms >= 0) {
-            timeout = next_ms;
-        } else if (loop->ecb) {
-            timeout = 100;  /* 100ms ≈ 10 Hz ecb poll */
+        } else if (next_ms < 0) {
+            timeout = -1;
         } else {
-            timeout = -1;   /* no timers, no ecb — block until I/O */
+            timeout = next_ms;
         }
 
         /* 3. epoll_wait (retry on EINTR — don't re-enter loop body) */
@@ -379,9 +377,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 
         /* 6. Process closing queue */
         ccev__process_closing(loop);
-
-        /* 7. Per-iteration callback (registered via ccev_each) */
-        if (loop->ecb) loop->ecb(loop);
 
         CCEV_COMPILER_BARRIER();
         if (loop->stop_flag) break;

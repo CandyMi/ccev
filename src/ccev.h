@@ -639,10 +639,14 @@ int ccev_signal_ignore(int signum);
 
 /** @brief Register a per-iteration callback.
  *
- *  The callback fires at the end of every loop iteration, after
- *  event dispatch and the closing queue have been processed.
- *  Useful for metrics collection, idle background work, or
- *  integrating with external polling mechanisms.
+ *  The callback fires at the start of every loop iteration,
+ *  before timer processing, I/O dispatch, and the closing queue.
+ *  Useful for metrics collection, co-operative background work,
+ *  or integrating with external polling mechanisms.
+ *
+ *  Because the callback runs before epoll_wait(), it will not fire
+ *  again until the current iteration completes.  The loop blocks
+ *  normally when idle — no periodic polling is introduced.
  *
  *  Only one callback may be registered at a time — calling this
  *  again replaces the previous one.  Pass NULL to clear.
