@@ -62,11 +62,11 @@ static void _stream_invoke_send_cb(ccev_stream_t *st) {
 
 static ccev_buf_t *_buf_alloc(const void *data,
                                size_t len, ccev_send_cb cb, void *udata) {
-    /* Single allocation: ccev_buf_t header + data payload contiguous */
+    /* Single allocation: ccev_buf_t header + flexible array payload.
+     * offsetof(data) works with data[], data[0], and data[1] uniformly. */
     ccev_buf_t *buf = (ccev_buf_t *)ccev__realloc_fn(
-        NULL, sizeof(ccev_buf_t) + len);
+        NULL, offsetof(ccev_buf_t, data) + len);
     if (!buf) return NULL;
-    buf->data    = (char*)buf + sizeof(ccev_buf_t);
     memcpy(buf->data, data, len);
     buf->len     = len;
     buf->offset  = 0;
@@ -99,7 +99,7 @@ static void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st) {
         ccev_buf_t *b = (ccev_buf_t *)((char*)n - offsetof(ccev_buf_t, node));
         size_t remaining = b->len - b->offset;
         if (remaining > 0) {
-            ccsocket_set_iov_buf(&iov[niov], 0, (char*)b->data + b->offset);
+            ccsocket_set_iov_buf(&iov[niov], 0, b->data + b->offset);
             ccsocket_set_iov_len(&iov[niov], 0, remaining);
             niov++;
         }

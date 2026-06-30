@@ -182,11 +182,17 @@ struct ccev_timer_s {
 
 typedef struct ccev_buf_s {
     cclink_node_t node;             /**< cclink intrusive node           */
-    void         *data;             /**< Heap-allocated buffer           */
     size_t        len;              /**< Data length                     */
     size_t        offset;           /**< Consumed bytes (for iovec)      */
     ccev_send_cb  cb;               /**< Per-buf write-complete callback*/
     void         *cb_udata;         /**< User pointer for @p cb         */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+    char data[];
+#elif defined(__GNUC__) || defined(__clang__)
+    char data[0];
+#else
+    char data[1];
+#endif
 } ccev_buf_t;
 
 /* ════════════════════════════════════════════════════════════════
