@@ -25,7 +25,11 @@ static int passed, failed;
   if (!(cond)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failed++; } \
   else passed++; \
 } while(0)
-#define RUN(name) do { printf("  [L%d] %s\n", __LINE__, #name); fflush(stdout); test_##name(); } while(0)
+#define RUN(name) do { \
+    printf("  [L%d] %s\n", __LINE__, #name); fflush(stdout); \
+    if (trace_fp) { fprintf(trace_fp, "[L%d] %s\n", __LINE__, #name); fflush(trace_fp); } \
+    test_##name(); \
+} while(0)
 
 static void timer_stop_loop(void *udata) {
     (void)udata;
@@ -466,7 +470,13 @@ TEST(listen_then_connect) {
 
 /* ════════════════════════════════════════════════════ */
 
+static FILE *trace_fp = NULL;
+
 int main(void) {
+    /* Write trace to file — survives ctest's output-on-failure buffering */
+    trace_fp = fopen("test_sock_trace.log", "w");
+    if (trace_fp) fprintf(trace_fp, "=== test_sock trace ===\n");
+
     printf("test_sock\n");
     printf("──────────────────────\n"); fflush(stdout);
 
@@ -519,5 +529,6 @@ int main(void) {
     RUN(listen_then_connect);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
+    if (trace_fp) { fclose(trace_fp); trace_fp = NULL; }
     return failed ? 1 : 0;
 }
