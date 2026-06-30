@@ -325,7 +325,9 @@ struct ccev_loop_s {
 #  define ccev_atomic_load(p)      atomic_load(&(p))
 #else
 #  define ccev_atomic_store(p, v)  do { (p) = (v); CCEV_COMPILER_BARRIER(); } while(0)
-#  define ccev_atomic_load(p)      ({ CCEV_COMPILER_BARRIER(); (p); })
+/* Not a statement-expression (MSVC doesn't support ({}) ).
+ * Callers pair with explicit CCEV_COMPILER_BARRIER() before load. */
+#  define ccev_atomic_load(p)      (p)
 #endif
 
     /* ── Wakeup pipe ── */
