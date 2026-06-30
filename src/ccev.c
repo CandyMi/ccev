@@ -202,8 +202,7 @@ ccev_loop_t *ccev_default_loop(void) {
 
 void ccev_loop_stop(ccev_loop_t *loop) {
     if (!loop) return;
-    loop->stop_flag = true;
-    CCEV_COMPILER_BARRIER();
+    ccev_atomic_store(loop->stop_flag, 1);
     ccev_wakeup(loop);
 }
 
@@ -342,8 +341,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     if (!loop) return CCEV_ERR;
     /* Honour any stop request that was set before entering the loop
      * (e.g. from a synchronous DNS or ICMP callback). */
-    CCEV_COMPILER_BARRIER();
-    if (loop->stop_flag) return 0;
+    if (ccev_atomic_load(loop->stop_flag)) return 0;
     int n = 0;
 
     do {
@@ -369,8 +367,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         } else {
             next_ms = -1;
         }
-        CCEV_COMPILER_BARRIER();
-        if (loop->stop_flag) break;
+        if (ccev_atomic_load(loop->stop_flag)) break;
 
         /* 2. Compute epoll timeout
          *    RUN_ONCE → 0 (poll);  timer pending → next_ms;
@@ -399,17 +396,14 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 6. Process closing queue */
         ccev__process_closing(loop);
 
-        CCEV_COMPILER_BARRIER();
-        if (loop->stop_flag) break;
+        if (ccev_atomic_load(loop->stop_flag)) break;
 
     } while (mode == CCEV_RUN_FOREVER);
 
     /* Clear the stop flag that was set during dispatch (e.g. by
      * ccev_loop_stop in a signal callback) so the next call to
      * ccev_loop_run doesn't see a stale flag and skip. */
-    CCEV_COMPILER_BARRIER();
-    loop->stop_flag = false;
-    CCEV_COMPILER_BARRIER();
+    ccev_atomic_store(loop->stop_flag, 0);
     return mode == CCEV_RUN_ONCE ? n : 0;
 }
 

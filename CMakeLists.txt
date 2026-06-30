@@ -4,6 +4,12 @@ project(ccev LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# ── C11 stdatomic.h detection — upgrade to C11 when available ──
+find_file(_have_atomic NAMES stdatomic.h)
+if(_have_atomic)
+    set(CMAKE_C_STANDARD 11)
+endif()
+
 # ── Options ──
 option(BUILD_TESTING  "Build tests"    ON)
 option(BUILD_EXAMPLES "Build examples" ON)
@@ -40,12 +46,10 @@ target_include_directories(ccev_epoll PRIVATE
     deps/epoll/include
 )
 # The kepoll and uepoll backends use atomic spinlocks.
-# EPOLL_USE_ATOMIC selects C11 <stdatomic.h> when available.
-find_file(_have_atomic NAMES stdatomic.h)
+# EPOLL_USE_ATOMIC / CCEV_USE_ATOMIC selects C11 <stdatomic.h> when available.
 if(_have_atomic)
     target_compile_definitions(ccev_epoll PUBLIC EPOLL_USE_ATOMIC=1)
 endif()
-unset(_have_atomic)
 
 # ── Object library: ccsocket (cross-platform socket API) ────
 add_library(ccev_ccsocket OBJECT
@@ -85,6 +89,10 @@ target_include_directories(ccev PRIVATE
     deps/epoll/include/epoll
     deps/epoll/include
 )
+if(_have_atomic)
+    target_compile_definitions(ccev PRIVATE CCEV_USE_ATOMIC=1)
+endif()
+unset(_have_atomic)
 
 # ── Platform-specific ────────────────────────────────────────
 if(WIN32)
@@ -107,6 +115,9 @@ elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(ccev PRIVATE -Wno-typedef-redefinition)
 endif()
 
+# ── ThreadSanitizer (debug builds only, GCC/Clang, incompatible with CCEV_SANITIZE) ──
+option(CCEV_TSAN "Enable ThreadSanitizer (replaces ASAN+UBSAN)" OFF)
+
 # ── Sanitizer (debug builds only, GCC/Clang on POSIX) ──────
 if(CCEV_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
@@ -126,6 +137,25 @@ if(CCEV_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(ccev PRIVATE /fsanitize=address)
     else()
         message(WARNING "CCEV_SANITIZE is set but compiler '${CMAKE_C_COMPILER_ID}' is not supported. Ignoring.")
+    endif()
+endif()
+
+# ── ThreadSanitizer (mutually exclusive with CCEV_SANITIZE) ──
+if(CCEV_TSAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        if(NOT WIN32)
+            target_compile_options(ccev PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+            set(CMAKE_EXE_LINKER_FLAGS_DEBUG
+                "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=thread")
+            # TSAN requires position-independent code for shared libraries;
+            # static libs are fine with PIC (already set above).
+        else()
+            target_compile_options(ccev PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+            set(CMAKE_EXE_LINKER_FLAGS_DEBUG
+                "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=thread")
+        endif()
+    else()
+        message(WARNING "CCEV_TSAN is set but compiler '${CMAKE_C_COMPILER_ID}' is not supported. Ignoring.")
     endif()
 endif()
 

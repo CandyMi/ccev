@@ -441,6 +441,11 @@ static void dns_timeout_cb(void *udata) {
 int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
                       unsigned int timeout_ms, ccev_dns_type_t type,
                       ccev_dns_cb cb, void *udata) {
+    ccev_dns_pending_t *pending = NULL;
+    ccev_dns_query_t   *q       = NULL;
+    ccsocket_t          fd      = (ccsocket_t)-1;
+    ccev_sock_t        *sock    = NULL;
+
     if (!loop || !domain || !cb) return CCEV_ERR;
 
     /* DNS wire format limit: 255 octets per label sequence.
@@ -467,7 +472,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     }
 
     /* 3. Check pending — if an in-flight resolution exists, append waiter */
-    ccev_dns_pending_t *pending = pending_lookup(loop, domain);
+    pending = pending_lookup(loop, domain);
     if (pending) {
         ccev_dns_waiter_t *w = (ccev_dns_waiter_t *)
             ccev__realloc_fn(NULL, sizeof(ccev_dns_waiter_t));
@@ -480,32 +485,33 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     /* 4. Cache miss + no pending — start a new resolution */
     /* Register pending FIRST so racing callers find it */
     pending = pending_add(loop, domain);
-    if (!pending) return CCEV_ERR;
+    if (!pending) goto fail;
 
-    ccev_dns_query_t *q = (ccev_dns_query_t *)
-        ccev__realloc_fn(NULL, sizeof(ccev_dns_query_t));
-    if (!q) { pending_remove(loop, pending); return CCEV_ERR; }
+    q = (ccev_dns_query_t *)ccev__realloc_fn(NULL, sizeof(ccev_dns_query_t));
+    if (!q) goto fail_pending;
     memset(q, 0, sizeof(*q));
     q->loop = loop; q->cb = cb; q->udata = udata;
     q->pending = pending;
-    size_t dlen = strlen(domain);
-    if (dlen >= sizeof(q->domain)) dlen = sizeof(q->domain) - 1;
-    memcpy(q->domain, domain, dlen);
-    q->domain[dlen] = '\0';
+    {
+        size_t dlen = strlen(domain);
+        if (dlen >= sizeof(q->domain)) dlen = sizeof(q->domain) - 1;
+        memcpy(q->domain, domain, dlen);
+        q->domain[dlen] = '\0';
+    }
 
     ccdns_init(&q->ctx_a);
     ccdns_init(&q->ctx_aaaa);
 
     ccsocket_family_t fam = ccsocket_get_version(loop->dns.server);
     if (fam != CC_INET4 && fam != CC_INET6) fam = CC_INET4;
-    ccsocket_t fd = ccsocket(fam, CC_UDP);
+    fd = ccsocket(fam, CC_UDP);
     if (fd == (ccsocket_t)-1 && fam == CC_INET6)
         fd = ccsocket(CC_INET4, CC_UDP);  /* fallback */
-    if (fd == (ccsocket_t)-1) { pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
+    if (fd == (ccsocket_t)-1) goto fail_q;
     ccsocket_set_nonblock(fd, true);
 
-    ccev_sock_t *sock = ccev_sock_create(loop, fd, q);
-    if (!sock) { ccsocket_close(fd); pending_remove(loop, pending); ccev__free_fn(q); return CCEV_ERR; }
+    sock = ccev_sock_create(loop, fd, q);
+    if (!sock) goto fail_fd;
     q->sock = sock;
     /* close_cb frees q — fires on both normal close and loop_destroy */
     ccev_sock_set_close_cb(sock, (ccev_close_cb)ccev__free_fn, q);
@@ -518,8 +524,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
              * Schedule socket close (frees q via close_cb) and remove
              * the pending entry so no one waits on a lost resolution. */
             ccev__sock_schedule_close(loop, sock);
-            pending_remove(loop, pending);
-            return CCEV_ERR;
+            goto fail_pending;
         }
     }
 
@@ -529,6 +534,22 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
         ccev__dns_send_one(loop, fd, &q->ctx_aaaa, domain, CCDNS_AAAA);
 
     return CCEV_OK;
+
+    /* ── Error unwind (reverse order — latest allocation first) ── */
+fail_fd:
+    /* q + fd created, sock failed — close fd, free q */
+    if (fd != (ccsocket_t)-1) ccsocket_close(fd);
+    /* fall through */
+fail_q:
+    /* pending + q created, fd failed — free q */
+    ccev__free_fn(q);
+    /* fall through */
+fail_pending:
+    /* pending created (q may or may not exist) — remove pending */
+    if (pending) pending_remove(loop, pending);
+    /* fall through */
+fail:
+    return CCEV_ERR;
 }
 
 

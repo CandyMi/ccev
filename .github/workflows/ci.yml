@@ -42,6 +42,17 @@ jobs:
       - run: cmake --build build -j$(nproc)
       - run: ctest --test-dir build --output-on-failure
 
+  # ── Linux: Clang + ThreadSanitizer (detects data races) ────
+  linux-tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: CC=clang CXX=clang++ cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_TSAN=ON
+      - run: cmake --build build -j$(nproc)
+      - run: ctest --test-dir build --output-on-failure
+
   # ── Linux: Intel ICC (oneAPI) ─────────────────────────────
   linux-icc:
     runs-on: ubuntu-latest

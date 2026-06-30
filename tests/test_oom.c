@@ -13,19 +13,10 @@
  */
 
 #include "ccev.h"
+#include "ccsocket.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <windows.h>
-#else
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#endif
 
 static int passed, failed;
 #define TEST(name) static void test_##name(void)
@@ -79,11 +70,9 @@ static void oom_reset(void) {
  *  Helper: create a socketpair for tests that need fds
  * ════════════════════════════════════════════════════════════════ */
 
-#ifndef _WIN32
-static int pair_create(int sv[2]) {
-    return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+static int pair_create(ccsocket_t sv[2]) {
+    return ccsocketpair(sv, CC_NOFLAG) ? 0 : -1;
 }
-#endif
 
 /* ════════════════════════════════════════════════════════════════
  *  Loop lifecycle OOM
@@ -135,28 +124,24 @@ TEST(loop_create_oom_wake_sock) {
  * ════════════════════════════════════════════════════════════════ */
 
 TEST(sock_create_oom) {
-#ifndef _WIN32
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
 
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { ccev_loop_destroy(loop); passed++; return; }
 
     oom_set_fail_at(0);
     ccev_set_allocator(oom_realloc, oom_free);
 
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock == NULL);
     /* sv[0] was NOT closed by ccev_sock_create — we must close it */
-    close(sv[0]);
+    ccsocket_close(sv[0]);
 
     oom_reset();
     ccev_set_allocator(NULL, NULL);
-    close(sv[1]);
+    ccsocket_close(sv[1]);
     ccev_loop_destroy(loop);
-#else
-    passed++;
-#endif
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -188,14 +173,13 @@ static void dummy_stream_cb(void *udata, const char *data, size_t len, int statu
 }
 
 TEST(stream_readline_oom) {
-#ifndef _WIN32
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
 
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { ccev_loop_destroy(loop); passed++; return; }
 
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
@@ -212,21 +196,17 @@ TEST(stream_readline_oom) {
     ccev_set_allocator(NULL, NULL);
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_readline_oom_buffer) {
-#ifndef _WIN32
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
 
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { ccev_loop_destroy(loop); passed++; return; }
 
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
@@ -243,10 +223,7 @@ TEST(stream_readline_oom_buffer) {
     ccev_set_allocator(NULL, NULL);
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ════════════════════════════════════════════════════════════════

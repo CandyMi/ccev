@@ -4,6 +4,7 @@
  */
 
 #include "ccev.h"
+#include "ccsocket.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -14,7 +15,6 @@
 #else
 #include <unistd.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #endif
@@ -32,12 +32,8 @@ static void timer_stop_loop(void *udata) {
     ccev_loop_stop(*(ccev_loop_t **)udata);
 }
 
-static int pair_create(int sv[2]) {
-#ifdef _WIN32
-    (void)sv; return -1;
-#else
-    return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
-#endif
+static int pair_create(ccsocket_t sv[2]) {
+    return ccsocketpair(sv, CC_NOFLAG) ? 0 : -1;
 }
 
 /* ═══ ccev_sock_create ─────────────────────────────── */
@@ -62,21 +58,16 @@ TEST(close_null_returns_err) {
 }
 
 TEST(close_twice_returns_err) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
 
     ASSERT(ccev_sock_close(sock) == CCEV_OK);
     ASSERT(ccev_sock_close(sock) == CCEV_ERR);
 
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_sock_get_fd / get_udata / set_udata ────── */
@@ -95,11 +86,10 @@ TEST(set_udata_null_is_safe) {
 }
 
 TEST(udata_set_and_get) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     int value = 42;
@@ -109,11 +99,7 @@ TEST(udata_set_and_get) {
 
     ccev_sock_close(sock);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_sock_read_start / read_stop ──────────────── */
@@ -130,20 +116,18 @@ static void on_read_event(ccev_sock_t *sock, int events) {
 }
 
 TEST(read_start_fires_on_data) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     read_ev_loop = ccev_loop_create(64);
     ASSERT(read_ev_loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(read_ev_loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(read_ev_loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     read_ev_fired  = 0;
     read_ev_events = 0;
 
     ASSERT(ccev_sock_read_start(sock, on_read_event) == CCEV_OK);
-    write(sv[1], "x", 1);
+    ccsocket_send(sv[1], "x", 1, NULL);
     ccev_loop_run(read_ev_loop, CCEV_RUN_FOREVER);
 
     ASSERT(read_ev_fired == 1);
@@ -151,21 +135,15 @@ TEST(read_start_fires_on_data) {
 
     ccev_sock_close(sock);
     ccev_loop_destroy(read_ev_loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(read_stop_suppresses_event) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     read_ev_fired  = 0;
@@ -175,7 +153,7 @@ TEST(read_stop_suppresses_event) {
     ASSERT(ccev_sock_read_stop(sock) == CCEV_OK);
 
     /* Write data — callback should NOT fire because read is stopped */
-    write(sv[1], "x", 1);
+    ccsocket_send(sv[1], "x", 1, NULL);
 
     /* Safety timer to stop the loop if the callback doesn't fire */
     ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
@@ -186,11 +164,7 @@ TEST(read_stop_suppresses_event) {
 
     ccev_sock_close(sock);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(read_start_null_sock_returns_err) {
@@ -202,20 +176,14 @@ TEST(read_stop_null_sock_returns_err) {
 }
 
 TEST(read_start_on_closed_returns_err) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ccev_sock_close(sock);
     ASSERT(ccev_sock_read_start(sock, on_read_event) == CCEV_ERR);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_sock_write_start / write_stop ─────────────── */
@@ -230,13 +198,11 @@ static void on_write_event(ccev_sock_t *sock, int events) {
 }
 
 TEST(write_start_fires_on_writable) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     write_ev_loop = ccev_loop_create(64);
     ASSERT(write_ev_loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(write_ev_loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(write_ev_loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     write_ev_fired = 0;
@@ -247,21 +213,15 @@ TEST(write_start_fires_on_writable) {
 
     ccev_sock_close(sock);
     ccev_loop_destroy(write_ev_loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(write_stop_suppresses_event) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     write_ev_fired = 0;
@@ -278,11 +238,7 @@ TEST(write_stop_suppresses_event) {
 
     ccev_sock_close(sock);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(write_start_null_sock_returns_err) {
@@ -294,20 +250,14 @@ TEST(write_stop_null_sock_returns_err) {
 }
 
 TEST(write_start_on_closed_returns_err) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ccev_sock_close(sock);
     ASSERT(ccev_sock_write_start(sock, on_write_event) == CCEV_ERR);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_sock_set_close_cb ───────────────────────── */
@@ -324,11 +274,10 @@ static void on_close(void *udata) {
 }
 
 TEST(close_cb_fires_on_close) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     close_cb_fired = 0;
@@ -338,11 +287,7 @@ TEST(close_cb_fires_on_close) {
     ASSERT(close_cb_fired == 1);
 
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_sock_count ──────────────────────────────── */
@@ -352,24 +297,19 @@ TEST(count_null_returns_zero) {
 }
 
 TEST(count_after_create) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     /* Loop creates internal wake_sock, so count starts at 1 */
     ASSERT(ccev_sock_count(loop) == 1);
 
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
     ASSERT(ccev_sock_count(loop) == 2);
 
     ccev_sock_close(sock);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ── Dummy accept callback for listen failure tests ── */
@@ -426,7 +366,6 @@ static void ctdr_on_connect(void *udata, ccev_sock_t *sock, int status) {
 }
 
 TEST(connect_timeout_before_dns_resolves) {
-#ifndef _WIN32
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
     ctdr_loop   = loop;
@@ -456,10 +395,6 @@ TEST(connect_timeout_before_dns_resolves) {
     ccev_loop_run(loop, CCEV_RUN_ONCE);
 
     ccev_loop_destroy(loop);
-    passed++;
-#else
-    passed++;
-#endif
 }
 
 /* ═══ ccev_listen + ccev_connect (end-to-end) ─────── */

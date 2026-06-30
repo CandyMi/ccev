@@ -26,6 +26,10 @@
 #include <errno.h>
 #include <signal.h> /* sig_atomic_t */
 
+#ifdef CCEV_USE_ATOMIC
+#  include <stdatomic.h>
+#endif
+
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <windows.h>
@@ -309,7 +313,20 @@ struct ccev_loop_s {
     HANDLE              epfd;        /**< epoll fd (per epoll.h types)  */
     int                 max_events;  /**< epoll_wait() event cap         */
     struct epoll_event *events;      /**< epoll_wait() result array      */
-    volatile sig_atomic_t stop_flag; /**< Atomic stop flag               */
+#ifdef CCEV_USE_ATOMIC
+    atomic_int           stop_flag; /**< Atomic stop flag (C11)         */
+#else
+    volatile sig_atomic_t stop_flag;/**< Atomic stop flag (fallback)    */
+#endif
+
+/* ── Atomic store/load helpers (C11 atomics when available) ── */
+#ifdef CCEV_USE_ATOMIC
+#  define ccev_atomic_store(p, v)  atomic_store(&(p), (v))
+#  define ccev_atomic_load(p)      atomic_load(&(p))
+#else
+#  define ccev_atomic_store(p, v)  do { (p) = (v); CCEV_COMPILER_BARRIER(); } while(0)
+#  define ccev_atomic_load(p)      ({ CCEV_COMPILER_BARRIER(); (p); })
+#endif
 
     /* ── Wakeup pipe ── */
     ccsocket_t          wakefds[2];  /**< Self-pipe for async wakeup    */

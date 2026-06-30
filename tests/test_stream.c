@@ -14,8 +14,6 @@
 #include <windows.h>
 #else
 #include <unistd.h>
-#include <sys/socket.h>
-#include <sys/types.h>
 #include <fcntl.h>
 #endif
 
@@ -31,12 +29,8 @@ static void timer_stop_loop(void *udata) {
     ccev_loop_stop((ccev_loop_t *)udata);
 }
 
-static int pair_create(int sv[2]) {
-#ifdef _WIN32
-    (void)sv; return -1;
-#else
-    return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
-#endif
+static int pair_create(ccsocket_t sv[2]) {
+    return ccsocketpair(sv, CC_NOFLAG) ? 0 : -1;
 }
 
 /* ═══ ccev_stream_open / close ────────────────────── */
@@ -46,11 +40,10 @@ TEST(stream_open_null_sock_returns_null) {
 }
 
 TEST(stream_open_closed_sock_returns_null) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     ccev_sock_close(sock);
@@ -58,19 +51,14 @@ TEST(stream_open_closed_sock_returns_null) {
     ASSERT(st == NULL);
 
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_open_then_close) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
 
     ccev_stream_t *st = ccev_stream_open(sock);
@@ -80,11 +68,7 @@ TEST(stream_open_then_close) {
     ASSERT(ccev_stream_close(st) == CCEV_ERR); /* double close */
 
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_stream_wbuf_len ────────────────────────── */
@@ -119,13 +103,12 @@ static void stream_on_data(void *udata, const char *data, size_t len, int status
 }
 
 TEST(stream_readline_smoke) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
 
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
@@ -141,7 +124,7 @@ TEST(stream_readline_smoke) {
 
     ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_on_data, &ctx) == CCEV_OK);
 
-    write(sv[1], "hello\n", 6);
+    ccsocket_send(sv[1], "hello\n", 6, NULL);
 
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
@@ -152,21 +135,16 @@ TEST(stream_readline_smoke) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_readnum_smoke) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
 
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
@@ -180,7 +158,7 @@ TEST(stream_readnum_smoke) {
                    timer_stop_loop, loop);
 
     ASSERT(ccev_stream_readnum(st, 5, 0, stream_on_data, &ctx) == CCEV_OK);
-    write(sv[1], "hello", 5);
+    ccsocket_send(sv[1], "hello", 5, NULL);
 
     ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
@@ -191,11 +169,7 @@ TEST(stream_readnum_smoke) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ Stream write batch tests ───────────────────── */
@@ -211,13 +185,12 @@ static void on_sent(void *udata) {
 }
 
 TEST(stream_write_batch_without_cb) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -235,21 +208,16 @@ TEST(stream_write_batch_without_cb) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_write_batch_with_cb) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -264,7 +232,7 @@ TEST(stream_write_batch_with_cb) {
      * per-buffer callback can fire (it fires when data leaves the wlist). */
     char drain[64];
     int n;
-    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &n);
+    ccsocket_recv(sv[1], drain, sizeof(drain), &n);
 
     /* Run the loop once — this processes the closing queue and fires callbacks */
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -276,21 +244,16 @@ TEST(stream_write_batch_with_cb) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_write_batch_flush_only) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -304,11 +267,7 @@ TEST(stream_write_batch_flush_only) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ Stream reader timeout tests ──────────────────── */
@@ -327,13 +286,12 @@ static void stream_on_timeout(void *udata, const char *data, size_t len, int sta
 }
 
 TEST(stream_readline_timeout) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -356,21 +314,16 @@ TEST(stream_readline_timeout) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_readnum_timeout) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccsocket_set_nonblock(sv[0], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -392,11 +345,7 @@ TEST(stream_readnum_timeout) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ Stream write with per-buffer callback ─────────── */
@@ -410,14 +359,12 @@ static void on_write_complete(void *udata) {
 }
 
 TEST(stream_write_callback_fires) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[1], true);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccsocket_set_nonblock(sv[1], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -431,7 +378,7 @@ TEST(stream_write_callback_fires) {
     /* Drain the receiving end so the kernel buffer can flush */
     char drain[64];
     int nd;
-    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &nd);
+    ccsocket_recv(sv[1], drain, sizeof(drain), &nd);
 
     /* Run the loop to trigger the write-complete callback */
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -441,20 +388,14 @@ TEST(stream_write_callback_fires) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 TEST(stream_write_null_data_returns_err) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -463,11 +404,7 @@ TEST(stream_write_null_data_returns_err) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ Stream sendfile ─────────────────────────────── */
@@ -483,13 +420,12 @@ TEST(stream_sendfile_smoke) {
     ASSERT(write(tfd, payload, plen) == (ssize_t)plen);
     close(tfd);
 
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { close(tfd); unlink(tmpname); passed++; return; }
 
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -499,7 +435,7 @@ TEST(stream_sendfile_smoke) {
     /* Drain the receiving end */
     char buf[128];
     int n;
-    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], buf, sizeof(buf) - 1, &n);
+    ccsocket_recv(sv[1], buf, sizeof(buf) - 1, &n);
 
     if (n > 0) {
         buf[n] = '\0';
@@ -508,7 +444,7 @@ TEST(stream_sendfile_smoke) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
+    ccsocket_close(sv[1]);
     unlink(tmpname);
     passed++;
 #else
@@ -525,14 +461,12 @@ static void on_global_send(void *udata) {
 }
 
 TEST(stream_set_send_cb_fires_on_drain) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[1], true);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccsocket_set_nonblock(sv[1], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -546,31 +480,25 @@ TEST(stream_set_send_cb_fires_on_drain) {
     /* Drain the peer so kernel buffer empties and callback fires */
     char drain[64];
     int nd;
-    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &nd);
+    ccsocket_recv(sv[1], drain, sizeof(drain), &nd);
 
     ccev_loop_run(loop, CCEV_RUN_ONCE);
     ASSERT(global_send_cb_fired == 1);
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_stream_read_stop ─────────────────────────── */
 
 TEST(stream_read_stop_cancels) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccsocket_set_nonblock(sv[0], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -584,7 +512,7 @@ TEST(stream_read_stop_cancels) {
     ccev_stream_read_stop(st);
 
     /* Write data — should NOT trigger the read callback */
-    write(sv[1], "hello\n", 6);
+    ccsocket_send(sv[1], "hello\n", 6, NULL);
 
     /* Safety timer to stop the loop */
     ccev_timer_add(loop, 50, CCEV_TIMER_ONCE,
@@ -595,11 +523,7 @@ TEST(stream_read_stop_cancels) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ ccev_stream_set_close_cb ──────────────────────── */
@@ -611,13 +535,11 @@ static void on_stream_close(void *udata) {
 }
 
 TEST(stream_set_close_cb_fires) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -630,25 +552,19 @@ TEST(stream_set_close_cb_fires) {
     ASSERT(stream_close_cb_fired == 1);
 
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ═══ Write batch — verified per-buffer callback ───── */
 
 TEST(stream_write_batch_perbuf_callback_verified) {
-#ifndef _WIN32
-    int sv[2];
+    ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
-    ccev_sock_t *sock = ccev_sock_create(loop,
-                                          (ccsocket_t)(intptr_t)sv[0], NULL);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[0], true);
-    ccsocket_set_nonblock((ccsocket_t)(intptr_t)sv[1], true);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccsocket_set_nonblock(sv[0], true);
+    ccsocket_set_nonblock(sv[1], true);
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
@@ -665,7 +581,7 @@ TEST(stream_write_batch_perbuf_callback_verified) {
     /* Drain whatever the kernel already accepted */
     char drain[64];
     int nd;
-    ccsocket_recv((ccsocket_t)(intptr_t)sv[1], drain, sizeof(drain), &nd);
+    ccsocket_recv(sv[1], drain, sizeof(drain), &nd);
 
     /* Run the loop — this processes the closing queue and fires
      * the per-buffer callback when data leaves the wlist */
@@ -674,11 +590,7 @@ TEST(stream_write_batch_perbuf_callback_verified) {
 
     ccev_stream_close(st);
     ccev_loop_destroy(loop);
-    close(sv[1]);
-    passed++;
-#else
-    passed++;
-#endif
+    ccsocket_close(sv[1]);
 }
 
 /* ════════════════════════════════════════════════════ */
