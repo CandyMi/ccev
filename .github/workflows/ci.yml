@@ -94,11 +94,6 @@ jobs:
           arch: x64
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - name: Fix wepoll sock validation
-        shell: bash
-        run: |
-          sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
-          cmake --build build
       - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: MSVC x86 ─────────────────────────────────────
@@ -113,11 +108,6 @@ jobs:
           arch: x86
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - name: Fix wepoll sock validation
-        shell: bash
-        run: |
-          sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
-          cmake --build build
       - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: ClangCL (clang-cl frontend) ──────────────────
@@ -132,11 +122,6 @@ jobs:
           arch: x64
       - run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - name: Fix wepoll sock validation
-        shell: bash
-        run: |
-          sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
-          cmake --build build
       - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: MinGW-w64 x64 ────────────────────────────────
