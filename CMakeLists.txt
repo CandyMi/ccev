@@ -56,6 +56,13 @@ if(_have_atomic)
     target_compile_definitions(ccev_epoll PUBLIC EPOLL_USE_ATOMIC=1)
 endif()
 
+# EPOLL_USE_SHARED_WORKBUF — shared buffer on struct epoll_t (kepoll/pepoll).
+# 0 (default): per-call stack + heap fallback, thread-safe.
+# 1:           2^n lazy-realloc shared buffer, zero alloc after growth.
+#               NOT safe for concurrent epoll_wait on same handle — ccev
+#               is single-threaded per loop, so this is always safe.
+target_compile_definitions(ccev_epoll PRIVATE EPOLL_USE_SHARED_WORKBUF=1)
+
 # ── Object library: ccsocket (cross-platform socket API) ────
 add_library(ccev_ccsocket OBJECT
     deps/ccsocket/ccsocket.c
