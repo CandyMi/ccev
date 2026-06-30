@@ -17,7 +17,7 @@ jobs:
           submodules: recursive
       - run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
       - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── Linux: Clang + ASAN/UBSAN ──────────────────────────────
   linux-clang:
@@ -28,7 +28,7 @@ jobs:
           submodules: recursive
       - run: CC=clang CXX=clang++ cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
       - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── Linux: 32-bit (via multilib) ───────────────────────────
   linux-32bit:
@@ -40,7 +40,7 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y gcc-multilib g++-multilib
       - run: cmake -B build -DCMAKE_C_FLAGS=-m32 -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── Linux: Clang + ThreadSanitizer (detects data races) ────
   linux-tsan:
@@ -51,7 +51,7 @@ jobs:
           submodules: recursive
       - run: CC=clang CXX=clang++ cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_TSAN=ON
       - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── Linux: Intel ICC (oneAPI) ─────────────────────────────
   linux-icc:
@@ -69,7 +69,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp-and-cpp-classic
       - run: . /opt/intel/oneapi/setvars.sh && cmake -B build -DCMAKE_BUILD_TYPE=Debug
       - run: . /opt/intel/oneapi/setvars.sh && cmake --build build -j$(nproc)
-      - run: . /opt/intel/oneapi/setvars.sh && ctest --test-dir build --output-on-failure
+      - run: . /opt/intel/oneapi/setvars.sh && ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── macOS: AppleClang + ASAN/UBSAN ────────────────────────
   macos-arm64:
@@ -80,7 +80,7 @@ jobs:
           submodules: recursive
       - run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCCEV_SANITIZE=ON
       - run: cmake --build build -j$(sysctl -n hw.logicalcpu)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
@@ -94,7 +94,7 @@ jobs:
           arch: x64
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - run: ctest --test-dir build -C Debug --output-on-failure
+      - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: MSVC x86 ─────────────────────────────────────
   windows-msvc-x86:
@@ -108,7 +108,7 @@ jobs:
           arch: x86
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - run: ctest --test-dir build -C Debug --output-on-failure
+      - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: ClangCL (clang-cl frontend) ──────────────────
   windows-clangcl:
@@ -122,7 +122,7 @@ jobs:
           arch: x64
       - run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - run: ctest --test-dir build -C Debug --output-on-failure
+      - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: MinGW-w64 x64 ────────────────────────────────
   windows-mingw64:
@@ -143,7 +143,7 @@ jobs:
             make
       - run: cmake -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
 
   # ── Windows: MinGW-w64 x86 ────────────────────────────────
   windows-mingw32:
@@ -164,4 +164,4 @@ jobs:
             make
       - run: cmake -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --timeout 15 --output-on-failure
