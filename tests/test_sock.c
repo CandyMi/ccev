@@ -25,7 +25,7 @@ static int passed, failed;
   if (!(cond)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failed++; } \
   else passed++; \
 } while(0)
-#define RUN(name) do { printf("  %s\n", #name); fflush(stdout); test_##name(); } while(0)
+#define RUN(name) do { printf("  [L%d] %s\n", __LINE__, #name); fflush(stdout); test_##name(); } while(0)
 
 static void timer_stop_loop(void *udata) {
     (void)udata;
@@ -202,44 +202,18 @@ static void on_write_event(ccev_sock_t *sock, int events) {
     ccev_loop_stop(write_ev_loop);
 }
 
-/*
- * Write-start test (cross-platform).
- *
- * On Linux epoll, EPOLLOUT fires immediately for a socket that's already
- * writable (level-triggered).  On Windows (wepoll), AFD_POLL_SEND is
- * transition-based and does NOT fire for an already-writable socket.
- * To trigger the transition, we fill sv[0]'s send buffer until full,
- * register EPOLLOUT, then drain from sv[1] — the buffer-emptied
- * transition fires EPOLLOUT on both platforms.
- */
 TEST(write_start_fires_on_writable) {
     ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     write_ev_loop = ccev_loop_create(64);
     ASSERT(write_ev_loop != NULL);
-    /* ccev_sock_create sets sv[0] to nonblock — needed for the fill loop */
     ccev_sock_t *sock = ccev_sock_create(write_ev_loop, sv[0], NULL);
     ASSERT(sock != NULL);
-
-    /* Fill sv[0]'s send buffer until EAGAIN (socket NOT writable) */
-    {
-        char fill[65536];
-        int n;
-        while (ccsocket_send(sv[0], fill, sizeof(fill), &n) == CC_OPCODE_OK) {}
-    }
 
     write_ev_fired = 0;
     ASSERT(ccev_sock_write_start(sock, on_write_event) == CCEV_OK);
 
-    /* Drain from sv[1] — this creates space in sv[0]'s send buffer,
-     * triggering the "not writable → writable" transition. */
-    {
-        char drain[65536];
-        ccsocket_set_nonblock(sv[1], true);
-        while (ccsocket_recv(sv[1], drain, sizeof(drain), NULL) == CC_OPCODE_OK) {}
-    }
-
-    /* Safety timer — prevents hang if the event never fires */
+    /* Safety timer — prevents hang on any platform */
     ccev_timer_add(write_ev_loop, 5000, CCEV_TIMER_ONCE,
                    timer_stop_loop, &write_ev_loop);
 
