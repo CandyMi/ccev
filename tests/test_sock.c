@@ -33,11 +33,7 @@ static void timer_stop_loop(void *udata) {
 }
 
 static int pair_create(ccsocket_t sv[2]) {
-#ifdef _WIN32
-    (void)sv; return -1;
-#else
     return ccsocketpair(sv, CC_NOFLAG) ? 0 : -1;
-#endif
 }
 
 /* ═══ ccev_sock_create ─────────────────────────────── */
@@ -424,7 +420,6 @@ static void listen_on_connect(void *udata, ccev_sock_t *sock, int status) {
 }
 
 TEST(listen_then_connect) {
-#ifndef _WIN32
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
     listen_test_loop     = loop;
@@ -437,15 +432,13 @@ TEST(listen_then_connect) {
                                          listen_on_accept, loop);
     ASSERT(listener != NULL);
 
-    struct sockaddr_in sin;
-    socklen_t slen = sizeof(sin);
+    uint16_t port;
+    char addr[MAX_ADDRLEN];
     ccsocket_t lfd = ccev_sock_get_fd(listener);
-    ASSERT(getsockname((int)(intptr_t)lfd,
-                       (struct sockaddr *)&sin, &slen) == 0);
-    int port = ntohs(sin.sin_port);
+    ASSERT(ccsocket_get_sockname(lfd, addr, &port));
     ASSERT(port > 0);
 
-    ccev_sock_t *conn = ccev_connect(loop, "127.0.0.1", (uint16_t)port,
+    ccev_sock_t *conn = ccev_connect(loop, "127.0.0.1", port,
                                       5000, CCEV_TCP_NODELAY,
                                       listen_on_connect, loop);
     ASSERT(conn != NULL);
@@ -459,9 +452,6 @@ TEST(listen_then_connect) {
     ccev_sock_close(listener);
     ccev_loop_destroy(loop);
     passed++;
-#else
-    passed++;
-#endif
 }
 
 /* ════════════════════════════════════════════════════ */
