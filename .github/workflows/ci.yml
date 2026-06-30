@@ -94,15 +94,11 @@ jobs:
           arch: x64
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - name: Patch wepoll with select probe diagnostics
+      - name: Fix wepoll sock validation
         shell: bash
         run: |
-          sed -i '1i #include <stdio.h>' deps/epoll/src/wepoll.c
           sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
-          sed -i 's/select_result = select(0,/fprintf(stderr,"WEPOLL_DBG: select_result=%d\\n",select_result);select_result = select(0,/' deps/epoll/src/wepoll.c
-          sed -i 's/if (select_result > 0) {/fprintf(stderr,"WEPOLL_DBG: select>0\\n");if (select_result > 0) {/' deps/epoll/src/wepoll.c
-          sed -i 's/if (!PostQueuedCompletionStatus(/fprintf(stderr,"WEPOLL_DBG: PQCS\\n");if (!PostQueuedCompletionStatus(/' deps/epoll/src/wepoll.c
-      - run: cmake --build build
+          cmake --build build
       - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: MSVC x86 ─────────────────────────────────────
@@ -117,15 +113,11 @@ jobs:
           arch: x86
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - name: Patch wepoll with select probe diagnostics
+      - name: Fix wepoll sock validation
         shell: bash
         run: |
-          sed -i '1i #include <stdio.h>' deps/epoll/src/wepoll.c
           sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
-          sed -i 's/select_result = select(0,/fprintf(stderr,"WEPOLL_DBG: select_result=%d\\n",select_result);select_result = select(0,/' deps/epoll/src/wepoll.c
-          sed -i 's/if (select_result > 0) {/fprintf(stderr,"WEPOLL_DBG: select>0\\n");if (select_result > 0) {/' deps/epoll/src/wepoll.c
-          sed -i 's/if (!PostQueuedCompletionStatus(/fprintf(stderr,"WEPOLL_DBG: PQCS\\n");if (!PostQueuedCompletionStatus(/' deps/epoll/src/wepoll.c
-      - run: cmake --build build
+          cmake --build build
       - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: ClangCL (clang-cl frontend) ──────────────────
@@ -140,15 +132,11 @@ jobs:
           arch: x64
       - run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
-      - name: Patch wepoll with select probe diagnostics
+      - name: Fix wepoll sock validation
         shell: bash
         run: |
-          sed -i '1i #include <stdio.h>' deps/epoll/src/wepoll.c
           sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
-          sed -i 's/select_result = select(0,/fprintf(stderr,"WEPOLL_DBG: select_result=%d\\n",select_result);select_result = select(0,/' deps/epoll/src/wepoll.c
-          sed -i 's/if (select_result > 0) {/fprintf(stderr,"WEPOLL_DBG: select>0\\n");if (select_result > 0) {/' deps/epoll/src/wepoll.c
-          sed -i 's/if (!PostQueuedCompletionStatus(/fprintf(stderr,"WEPOLL_DBG: PQCS\\n");if (!PostQueuedCompletionStatus(/' deps/epoll/src/wepoll.c
-      - run: cmake --build build
+          cmake --build build
       - run: ctest --test-dir build --timeout 15 -C Debug --output-on-failure
 
   # ── Windows: MinGW-w64 x64 ────────────────────────────────
