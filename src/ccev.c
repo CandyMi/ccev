@@ -193,7 +193,6 @@ ccev_loop_t *ccev_default_loop(void) {
     sc->rcb = ccev__signal_dispatch;
     ccev__sock_mod_internal(loop, sc, EPOLLIN);
 
-    ccev_dns_flush(loop);
     return loop;
 }
 
