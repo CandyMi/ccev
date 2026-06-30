@@ -5,7 +5,12 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # ── C11 stdatomic.h detection — upgrade to C11 when available ──
-find_file(_have_atomic NAMES stdatomic.h)
+# Use check_include_file (compiles a test source) rather than find_file
+# (just checks disk) because MSVC ships a stub that #errors out.
+include(CheckIncludeFile)
+set(CMAKE_REQUIRED_FLAGS ${CMAKE_C11_STANDARD_COMPILE_OPTION})
+check_include_file(stdatomic.h _have_atomic)
+set(CMAKE_REQUIRED_FLAGS)
 if(_have_atomic)
     set(CMAKE_C_STANDARD 11)
 endif()
