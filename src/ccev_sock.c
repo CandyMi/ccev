@@ -21,16 +21,6 @@
  *  Internal helpers
  * ════════════════════════════════════════════════════════════════ */
 
-/* Convert CCEV_EVENT flags to epoll event mask.
- * CCEV_EVENT_READ/WRITE happen to match EPOLLIN/EPOLLOUT on all backends
- * (see uepoll.h / sys/epoll.h), so we can mask directly. */
-static inline int _events_to_epoll(uint32_t events) {
-    int e = 0;
-    if (events & CCEV_EVENT_READ)  e |= EPOLLIN;
-    if (events & CCEV_EVENT_WRITE) e |= EPOLLOUT;
-    return e;
-}
-
 int ccev__sock_mod_internal(ccev_loop_t *loop, ccev_sock_t *sock,
                              int epoll_events) {
     if (sock->closed) return CCEV_ERR;
@@ -215,6 +205,7 @@ int ccev_sock_count(const ccev_loop_t *loop) {
 ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                            int backlog, ccev_flag_t flags,
                            ccev_listen_cb cb, void *udata) {
+    (void)backlog;
     if (!loop || !addr || !cb) return NULL;
 
     ccsocket_family_t family = ccsocket_get_version(addr);
@@ -240,7 +231,6 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     if (!sock) { ccsocket_close(fd); return NULL; }
 
     ccev_sock_any_t *any  = (ccev_sock_any_t *)sock;
-    any->sock.stype       = CCEV_STYPE_LISTENER;
     any->sock.mode        = CCEV_SOCK_LISTEN;
     any->listener.cb      = cb;
     any->listener.udata   = udata;
@@ -375,6 +365,7 @@ static void _connect_dns_cb(void *udata, const char *address, int status) {
 ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
                             unsigned int timeout_ms, ccev_flag_t flags,
                             ccev_connect_cb cb, void *udata) {
+    (void)flags;
     if (!loop || !host || !cb) return NULL;
 
     ccev_sock_any_t *any = (ccev_sock_any_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_any_t));
@@ -386,7 +377,6 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
     sock->fd     = (ccsocket_t)-1;
     sock->mode   = CCEV_SOCK_CONNECT;
     sock->udata  = udata;
-    sock->stype  = CCEV_STYPE_CONNECTOR;
 
     any->connector.port      = port;
     any->connector.cb        = cb;

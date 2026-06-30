@@ -20,9 +20,6 @@
 
 #include "ccev_internal.h"
 
-/* Fallback compiler barrier — extern so compiler cannot see the body */
-void ccev__compiler_barrier(void) {}
-
 /* Default allocator (libc) */
 static void *ccev_default_realloc(void *ptr, size_t sz) {
     if (sz == 0) { free(ptr); return NULL; }

@@ -60,7 +60,7 @@ static void _stream_invoke_send_cb(ccev_stream_t *st) {
  *  Write buffer management
  * ════════════════════════════════════════════════════════════════ */
 
-static ccev_buf_t *_buf_alloc(ccev_stream_t *st, const void *data,
+static ccev_buf_t *_buf_alloc(const void *data,
                                size_t len, ccev_send_cb cb, void *udata) {
     /* Single allocation: ccev_buf_t header + data payload contiguous */
     ccev_buf_t *buf = (ccev_buf_t *)ccev__realloc_fn(
@@ -325,7 +325,6 @@ static int _reader_start(ccev_stream_t *st, size_t want,
     rd->is_n      = is_n;
     rd->cb        = cb;
     rd->udata     = udata;
-    rd->timeout_ms = timeout_ms;
 
     /* Try to satisfy from existing buffered data */
     size_t consumed = 0;
@@ -457,9 +456,6 @@ ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     st->sendfile_fd = -1;
     st->reader      = NULL;
 
-    /* Mark variant type for cleanup dispatch */
-    sock->stype = CCEV_STYPE_STREAM;
-
     /* Take over sock's event callbacks */
     st->sock.rcb = _stream_on_readable;
     st->sock.wcb = _stream_on_writable;
@@ -517,7 +513,7 @@ int ccev_stream_write(ccev_stream_t *st, const void *data, size_t len,
     if (!data || !len) return 0;
 
     /* Buffer the data */
-    ccev_buf_t *buf = _buf_alloc(st, data, len, cb, udata);
+    ccev_buf_t *buf = _buf_alloc(data, len, cb, udata);
     if (!buf) return CCEV_ERR;
 
     cclink_push_back(&st->wlist, &buf->node);
@@ -538,7 +534,7 @@ int ccev_stream_write_batch(ccev_stream_t *st, const void *data, size_t len,
     if (!st || st->sock.closed) return CCEV_ERR;
 
     if (data && len > 0) {
-        ccev_buf_t *buf = _buf_alloc(st, data, len, cb, udata);
+        ccev_buf_t *buf = _buf_alloc(data, len, cb, udata);
         if (!buf) return CCEV_ERR;
         cclink_push_back(&st->wlist, &buf->node);
         st->wbuf_len += len;

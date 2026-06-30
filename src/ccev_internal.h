@@ -103,20 +103,6 @@ typedef enum {
     CCEV_SOCK_CONNECT,        /**< TCP connect in progress.              */
 } ccev_sock_mode_t;
 
-/**
- * @brief Socket variant type tag — identifies union member.
- *
- * Set once at allocation, never changes (except sock → stream upgrade).
- * Used by ccev__sock_free() to dispatch per-variant cleanup.
- * Fills the 2-byte padding gap after mode/closed/in_closing.
- */
-typedef enum {
-    CCEV_STYPE_SOCK      = 0,  /**< Plain socket (ccev_sock_create).       */
-    CCEV_STYPE_STREAM    = 1,  /**< Stream (via ccev_stream_open upgrade). */
-    CCEV_STYPE_LISTENER  = 2,  /**< Listener (via ccev_listen).           */
-    CCEV_STYPE_CONNECTOR = 3,  /**< Connector (via ccev_connect).         */
-} ccev_stype_t;
-
 /* ════════════════════════════════════════════════════════════════
  *  Stream reader (forward declaration for sock/stream structs)
  * ════════════════════════════════════════════════════════════════ */
@@ -143,8 +129,7 @@ struct ccev_sock_s {
     uint32_t           events;     /**< epoll currently registered events*/
     uint32_t           mode;       /**< ccev_sock_mode_t                 */
 
-    /* ── Flags (pack as 2+1+1 to fill 8-byte boundary) ── */
-    uint16_t           stype;      /**< ccev_stype_t variant tag         */
+    /* ── Flags (pack as 1+1 with 2-byte padding) ── */
     bool               closed;     /**< true once close initiated        */
     bool               in_closing; /**< true if in the closing list      */
 };
@@ -221,7 +206,6 @@ struct ccev_stream_reader_s {
     ccev_timer_t    *timer;         /**< Read timeout timer, or NULL.    */
 
     /* ── Timeout / delim state ── */
-    int              timeout_ms;    /**< Saved timeout value.            */
     char             delim;         /**< 0 = readnum, else delimiter.    */
     bool             is_n;          /**< true = readnum, false = readline*/
 };
@@ -261,8 +245,8 @@ struct ccev_stream_s {
  * because every variant has ccev_sock_t as its first field —
  * guaranteed safe by the common-initial-sequence rule (C11 §6.5.2.3p6).
  *
- * stype distinguishes which member is active.  Add future variants
- * (e.g. ccev_dgram_t) here; the union size grows automatically.
+ * All variants share ccev_sock_t as their first field (C11 §6.5.2.3p6).
+ * Add future variants (e.g. ccev_dgram_t) here; the union size grows automatically.
  */
 typedef union {
     ccev_sock_t        sock;

@@ -102,7 +102,7 @@ int ccev_dns_set_server(ccev_loop_t *loop, const char *address, uint16_t port) {
         ccsocket_close(probe);
     }
 
-    size_t len = strlen(address);
+    size_t len = strnlen(address, sizeof(loop->dns.server));
     if (len >= sizeof(loop->dns.server)) return CCEV_ERR;
     memcpy(loop->dns.server, address, len + 1);
     loop->dns.port = port > 0 ? port : 53;
@@ -148,7 +148,7 @@ static ccev_dns_cache_t *cache_lookup(ccev_loop_t *loop, const char *domain) {
     if (!loop->dns_cache.buckets) return NULL;
     ccev_dns_cache_t probe;
     memset(&probe, 0, sizeof(probe));
-    size_t len = strlen(domain);
+    size_t len = strnlen(domain, sizeof(probe.domain));
     if (len >= sizeof(probe.domain)) len = sizeof(probe.domain) - 1;
     memcpy(probe.domain, domain, len);
     probe.domain[len] = '\0';
@@ -174,11 +174,11 @@ static void cache_insert(ccev_loop_t *loop, const char *domain,
         ccev__realloc_fn(NULL, sizeof(ccev_dns_cache_t));
     if (!e) return;
     memset(e, 0, sizeof(*e));
-    size_t dlen = strlen(domain);
+    size_t dlen = strnlen(domain, sizeof(e->domain));
     if (dlen >= sizeof(e->domain)) dlen = sizeof(e->domain) - 1;
     memcpy(e->domain, domain, dlen);
     e->domain[dlen] = '\0';
-    size_t ilen = strlen(ip);
+    size_t ilen = strnlen(ip, sizeof(e->ip));
     if (ilen >= sizeof(e->ip)) ilen = sizeof(e->ip) - 1;
     memcpy(e->ip, ip, ilen);
     e->expires = expires;
@@ -252,7 +252,7 @@ static ccev_dns_pending_t *pending_lookup(ccev_loop_t *loop, const char *domain)
     if (!loop->dns_pending.buckets) return NULL;
     ccev_dns_pending_t probe;
     memset(&probe, 0, sizeof(probe));
-    size_t len = strlen(domain);
+    size_t len = strnlen(domain, sizeof(probe.domain));
     if (len >= sizeof(probe.domain)) len = sizeof(probe.domain) - 1;
     memcpy(probe.domain, domain, len);
     probe.domain[len] = '\0';
@@ -268,7 +268,7 @@ static ccev_dns_pending_t *pending_add(ccev_loop_t *loop, const char *domain) {
         ccev__realloc_fn(NULL, sizeof(ccev_dns_pending_t));
     if (!p) return NULL;
     memset(p, 0, sizeof(*p));
-    size_t dlen = strlen(domain);
+    size_t dlen = strnlen(domain, sizeof(p->domain));
     if (dlen >= sizeof(p->domain)) dlen = sizeof(p->domain) - 1;
     memcpy(p->domain, domain, dlen);
     p->domain[dlen] = '\0';
@@ -287,7 +287,7 @@ static void pending_remove(ccev_loop_t *loop, ccev_dns_pending_t *p) {
 
 /* Pop-front distribution — safe for re-entrant push_back from callbacks.
  * Does NOT call pending_remove — caller handles lifecycle. */
-static void pending_distribute(ccev_loop_t *loop, ccev_dns_pending_t *p,
+static void pending_distribute(ccev_dns_pending_t *p,
                                 const char *address, int status) {
     while (!cclink_empty(&p->waiters)) {
         cclink_node_t *wn = cclink_pop_front(&p->waiters);
@@ -386,14 +386,14 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
     ccev_dns_pending_t *p = q->pending;
 
     /* 1. Distribute waiters (pop_front — safe for re-enter push_back) */
-    if (p) pending_distribute(q->loop, p, addr, status);
+    if (p) pending_distribute(p, addr, status);
 
     /* 2. Fire original callback — re-entered resolve appends to p->waiters */
     if (q->cb) q->cb(q->udata, addr, status);
 
     /* 3. Harvest waiters added during q->cb re-entry */
     if (p) {
-        pending_distribute(q->loop, p, addr, status);
+        pending_distribute(p, addr, status);
         pending_remove(q->loop, p);
         q->pending = NULL;
     }
@@ -416,14 +416,14 @@ static void dns_timeout_cb(void *udata) {
     ccev_dns_pending_t *p = q->pending;
 
     /* 1. Distribute waiters with timeout */
-    if (p) pending_distribute(q->loop, p, "", CCEV_ERR);
+    if (p) pending_distribute(p, "", CCEV_ERR);
 
     /* 2. Fire original callback */
     if (q->cb) q->cb(q->udata, "", CCEV_ERR);
 
     /* 3. Harvest re-entered waiters */
     if (p) {
-        pending_distribute(q->loop, p, "", CCEV_ERR);
+        pending_distribute(p, "", CCEV_ERR);
         pending_remove(q->loop, p);
         q->pending = NULL;
     }
@@ -450,7 +450,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
 
     /* DNS wire format limit: 255 octets per label sequence.
      * Reject longer domains upfront to avoid silent truncation. */
-    if (strlen(domain) >= 255) return CCEV_ERR;
+    if (strnlen(domain, 255) >= 255) return CCEV_ERR;
 
     /* 1. IP or UDS short circuit — domain is already a direct address */
     {
@@ -493,7 +493,7 @@ int ccev_dns_resolve(ccev_loop_t *loop, const char *domain,
     q->loop = loop; q->cb = cb; q->udata = udata;
     q->pending = pending;
     {
-        size_t dlen = strlen(domain);
+        size_t dlen = strnlen(domain, sizeof(q->domain));
         if (dlen >= sizeof(q->domain)) dlen = sizeof(q->domain) - 1;
         memcpy(q->domain, domain, dlen);
         q->domain[dlen] = '\0';

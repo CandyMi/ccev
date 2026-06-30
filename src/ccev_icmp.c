@@ -207,7 +207,7 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
     p->cb         = cb;
     p->udata      = udata;
     p->timeout_ms = timeout_ms;
-    size_t hlen = strlen(host);
+    size_t hlen = strnlen(host, sizeof(p->host));
     if (hlen >= sizeof(p->host)) hlen = sizeof(p->host) - 1;
     memcpy(p->host, host, hlen);
     p->host[hlen] = '\0';
