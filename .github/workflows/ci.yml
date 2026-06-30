@@ -98,6 +98,7 @@ jobs:
         shell: bash
         run: |
           sed -i '1i #include <stdio.h>' deps/epoll/src/wepoll.c
+          sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
           sed -i 's/select_result = select(0,/fprintf(stderr,"WEPOLL_DBG: select_result=%d\\n",select_result);select_result = select(0,/' deps/epoll/src/wepoll.c
           sed -i 's/if (select_result > 0) {/fprintf(stderr,"WEPOLL_DBG: select>0\\n");if (select_result > 0) {/' deps/epoll/src/wepoll.c
           sed -i 's/if (!PostQueuedCompletionStatus(/fprintf(stderr,"WEPOLL_DBG: PQCS\\n");if (!PostQueuedCompletionStatus(/' deps/epoll/src/wepoll.c
@@ -120,6 +121,7 @@ jobs:
         shell: bash
         run: |
           sed -i '1i #include <stdio.h>' deps/epoll/src/wepoll.c
+          sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
           sed -i 's/select_result = select(0,/fprintf(stderr,"WEPOLL_DBG: select_result=%d\\n",select_result);select_result = select(0,/' deps/epoll/src/wepoll.c
           sed -i 's/if (select_result > 0) {/fprintf(stderr,"WEPOLL_DBG: select>0\\n");if (select_result > 0) {/' deps/epoll/src/wepoll.c
           sed -i 's/if (!PostQueuedCompletionStatus(/fprintf(stderr,"WEPOLL_DBG: PQCS\\n");if (!PostQueuedCompletionStatus(/' deps/epoll/src/wepoll.c
@@ -142,6 +144,7 @@ jobs:
         shell: bash
         run: |
           sed -i '1i #include <stdio.h>' deps/epoll/src/wepoll.c
+          sed -i 's/sock <= (SOCKET)~0/sock == (SOCKET)~0/' deps/epoll/src/wepoll.c
           sed -i 's/select_result = select(0,/fprintf(stderr,"WEPOLL_DBG: select_result=%d\\n",select_result);select_result = select(0,/' deps/epoll/src/wepoll.c
           sed -i 's/if (select_result > 0) {/fprintf(stderr,"WEPOLL_DBG: select>0\\n");if (select_result > 0) {/' deps/epoll/src/wepoll.c
           sed -i 's/if (!PostQueuedCompletionStatus(/fprintf(stderr,"WEPOLL_DBG: PQCS\\n");if (!PostQueuedCompletionStatus(/' deps/epoll/src/wepoll.c
