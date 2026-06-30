@@ -205,7 +205,6 @@ int ccev_sock_count(const ccev_loop_t *loop) {
 ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                            int backlog, ccev_flag_t flags,
                            ccev_listen_cb cb, void *udata) {
-    (void)backlog;
     if (!loop || !addr || !cb) return NULL;
 
     ccsocket_family_t family = ccsocket_get_version(addr);
@@ -219,9 +218,9 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     if (fd == (ccsocket_t)-1) return NULL;
 
     if (family == CC_UNIX || !(flags & (CCEV_REUSEADDR | CCEV_REUSEPORT))) {
-        if (!ccsocket_listen(fd, addr, port)) { ccsocket_close(fd); return NULL; }
+        if (!ccsocket_listen(fd, addr, port, backlog)) { ccsocket_close(fd); return NULL; }
     } else {
-        if (!ccsocket_listen1(fd, addr, port)) { ccsocket_close(fd); return NULL; }
+        if (!ccsocket_listen1(fd, addr, port, backlog)) { ccsocket_close(fd); return NULL; }
     }
 
     if ((flags & CCEV_ACCEPT_DEFER) && family != CC_UNIX)
