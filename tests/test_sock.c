@@ -37,11 +37,7 @@ static void timer_stop_loop(void *udata) {
 }
 
 static int pair_create(ccsocket_t sv[2]) {
-#ifdef _WIN32
-    (void)sv; return -1;
-#else
     return ccsocketpair(sv, CC_NOFLAG) ? 0 : -1;
-#endif
 }
 
 /* ═══ ccev_sock_create ─────────────────────────────── */
@@ -438,7 +434,6 @@ static void listen_on_connect(void *udata, ccev_sock_t *sock, int status) {
 }
 
 TEST(listen_then_connect) {
-#ifndef _WIN32
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
     listen_test_loop     = loop;
@@ -471,9 +466,6 @@ TEST(listen_then_connect) {
     ccev_sock_close(listener);
     ccev_loop_destroy(loop);
     passed++;
-#else
-    passed++;
-#endif
 }
 
 /* ════════════════════════════════════════════════════ */
