@@ -110,7 +110,8 @@ jobs:
         run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
                     -DCMAKE_OSX_SYSROOT=iphonesimulator \
                     -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-                    -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF
+                    -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
+                    -DCMAKE_XCODE_ATTRIBUTE_SDKROOT=iphonesimulator
       - name: Build test binaries (timer + sock + stream)
         run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target test_timer --target test_sock --target test_stream
       - name: Boot iOS Simulator
@@ -236,7 +237,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            adb shell file /data/local/tmp/test_timer; adb shell ls -la /system/bin/linker*; for test in test_timer test_sock test_stream; do echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/$test; done
+            readelf -l ${{ github.workspace }}/build/tests/test_timer | grep -A1 INTERP; adb shell ls -la /system/bin/linker*; for test in test_timer test_sock test_stream; do echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /system/bin/linker64 /data/local/tmp/$test; done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
