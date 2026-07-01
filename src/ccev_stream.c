@@ -326,33 +326,43 @@ static int _reader_start(ccev_stream_t *st, size_t want,
     rd->cb        = cb;
     rd->udata     = udata;
 
-    /* Try to satisfy from existing buffered data */
-    size_t consumed = 0;
-    if (is_n) {
-        if (rd->len >= want) consumed = want;
-    } else {
+    /* Try to satisfy from existing buffered data.
+     *
+     * Do NOT call _reader_dispatch here — that creates deep recursion:
+     *   _reader_dispatch → on_header_line → ccev_stream_readline
+     *     → _reader_start → _reader_dispatch → ... (N headers deep)
+     *
+     * Instead, arm EPOLLIN and fall through to the compact+rearm path.
+     * _stream_on_readable will pick up the buffered data in its retry
+     * loop, keeping the call stack at a constant depth. */
+    if (rd->len >= want) {
+        /* Buffer already has enough data — arm and go; _stream_on_readable
+         * will dispatch from its retry loop. */
+        goto arm_reader;
+    }
+    if (!is_n) {
         for (size_t i = 0; i < rd->len; i++) {
-            if (rd->buf[rd->pos + i] == delim) { consumed = i + 1; break; }
-        }
-        if (consumed == 0 && rd->len >= want) {
-            consumed = want;
-            _reader_dispatch(rd, consumed, CCEV_ERR);
-            return CCEV_OK;
+            if (rd->buf[rd->pos + i] == delim) {
+                goto arm_reader;  /* delim in buffer — arm and go */
+            }
         }
     }
 
-    if (consumed > 0) {
-        _reader_dispatch(rd, consumed, CCEV_OK);
-        return CCEV_OK;
-    }
-
-    /* Not satisfied — compact buffer to maximise recv space, then arm */
+arm_reader:
+    /* Compact buffer to maximise recv space */
     if (rd->pos > 0 && rd->len > 0) {
         memmove(rd->buf, rd->buf + rd->pos, rd->len);
     }
     rd->pos = 0;
     st->sock.rcb = _stream_on_readable;
-    ccev__sock_rearm(st->sock.loop, &st->sock);
+
+    /* Only re-arm EPOLLIN when there is no buffered data to consume.
+     * When rd->len > 0, the _stream_on_readable retry loop will dispatch
+     * the buffered data immediately, making the kevent syscall redundant.
+     * The re-arm (via ONESHOT re-registration) happens later when the
+     * retry loop falls through to recv and gets EAGAIN. */
+    if (rd->len == 0)
+        ccev__sock_rearm(st->sock.loop, &st->sock);
 
     /* Set read timeout */
     if (timeout_ms > 0) {
@@ -371,68 +381,81 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
     (void)events;
     if (!sock || sock->closed) return;
     ccev_stream_t *st = _sock_to_stream(sock);
-    ccev_stream_reader_t *rd = st->reader;
-    if (!rd) return;
 
-    int nread = 0;
-    ccsocket_stcode_t rc = ccsocket_recv(sock->fd, rd->buf + rd->pos + rd->len,
-                                          rd->cap - rd->pos - rd->len, &nread);
+    /* ── Retry loop: process buffered data without recursion ──
+     *
+     * The re-entrant pattern (callback → ccev_stream_readline → _reader_start
+     * → _reader_dispatch → callback → ...) creates deep recursion proportional
+     * to the number of header lines in one TCP segment.  By looping here
+     * instead of inlining _reader_dispatch in _reader_start, the call stack
+     * stays at a constant depth regardless of how many lines arrive. */
+retry:
+    {
+        ccev_stream_reader_t *rd = st->reader;
+        if (!rd) return;
 
-    /* EAGAIN — re-arm and return */
-    if (rc == CC_OPCODE_WAIT) {
-        ccev__sock_rearm(sock->loop, sock);
-        return;
-    }
+        /* ── Phase 1: check buffered data first ── */
+        size_t consumed = 0;
+        int    status   = CCEV_OK;
 
-    /* Error or EOF */
-    if (rc != CC_OPCODE_OK || nread <= 0) {
-        ccev_stream_cb cb = rd->cb;
-        void *cb_udata    = rd->udata;
-        /* Cancel timeout timer */
-        if (rd->timer) {
-            ccev_timer_del(sock->loop, rd->timer);
-            rd->timer = NULL;
-        }
-        sock->rcb = rd->old_rcb;
-        ccev__free_fn(rd->buf);
-        ccev__free_fn(rd);
-        st->reader = NULL;
-        if (cb) cb(cb_udata, NULL, 0, CCEV_ERR);
-        return;
-    }
-
-    rd->len += (size_t)nread;
-
-    /* Check condition */
-    size_t consumed = 0;
-    int    status   = CCEV_OK;
-
-    if (rd->is_n) {
-        if (rd->len >= rd->want) {
-            consumed = rd->want;
+        if (rd->is_n) {
+            if (rd->len >= rd->want) {
+                consumed = rd->want;
+            }
         } else {
+            for (size_t i = 0; i < rd->len; i++) {
+                if (rd->buf[rd->pos + i] == rd->delim) {
+                    consumed = i + 1;
+                    break;
+                }
+            }
+            if (consumed == 0 && rd->len >= rd->want) {
+                consumed = rd->want;
+                status   = CCEV_ERR;
+            }
+        }
+
+        if (consumed > 0) {
+            _reader_dispatch(rd, consumed, status);
+            /* After dispatch, the user callback may have called ccev_stream_readline
+             * re-entrantly, setting up a new reader with more buffered data.
+             * Loop back to process it immediately instead of unwinding the stack
+             * and recursing through _reader_start → _reader_dispatch again. */
+            goto retry;
+        }
+
+        /* ── Phase 2: no match in buffer — recv more data ── */
+        int nread = 0;
+        ccsocket_stcode_t rc = ccsocket_recv(sock->fd,
+                                              rd->buf + rd->pos + rd->len,
+                                              rd->cap - rd->pos - rd->len,
+                                              &nread);
+
+        /* EAGAIN — re-arm and return */
+        if (rc == CC_OPCODE_WAIT) {
             ccev__sock_rearm(sock->loop, sock);
             return;
         }
-    } else {
-        for (size_t i = 0; i < rd->len; i++) {
-            if (rd->buf[rd->pos + i] == rd->delim) {
-                consumed = i + 1;
-                break;
-            }
-        }
-        if (consumed == 0) {
-            if (rd->len >= rd->want) {
-                consumed = rd->want;
-                status   = CCEV_ERR;
-            } else {
-                ccev__sock_rearm(sock->loop, sock);
-                return;
-            }
-        }
-    }
 
-    _reader_dispatch(rd, consumed, status);
+        /* Error or EOF */
+        if (rc != CC_OPCODE_OK || nread <= 0) {
+            ccev_stream_cb cb = rd->cb;
+            void *cb_udata    = rd->udata;
+            if (rd->timer) {
+                ccev_timer_del(sock->loop, rd->timer);
+                rd->timer = NULL;
+            }
+            sock->rcb = rd->old_rcb;
+            ccev__free_fn(rd->buf);
+            ccev__free_fn(rd);
+            st->reader = NULL;
+            if (cb) cb(cb_udata, NULL, 0, CCEV_ERR);
+            return;
+        }
+
+        rd->len += (size_t)nread;
+        goto retry;  /* recheck condition with new data */
+    }
 }
 
 /* ════════════════════════════════════════════════════════════════
