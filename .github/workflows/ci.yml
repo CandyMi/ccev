@@ -90,7 +90,8 @@ jobs:
         with:
           submodules: recursive
       - name: Configure for iOS arm64
-        run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
+        run: |
+          cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
                     -DCMAKE_OSX_SYSROOT=iphoneos \
                     -DCMAKE_OSX_ARCHITECTURES=arm64 \
                     -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
@@ -107,7 +108,8 @@ jobs:
         with:
           submodules: recursive
       - name: Configure for iOS Simulator x86_64
-        run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
+        run: |
+          cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
                     -DCMAKE_OSX_SYSROOT=iphonesimulator \
                     -DCMAKE_OSX_ARCHITECTURES=x86_64 \
                     -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
@@ -142,7 +144,8 @@ jobs:
         with:
           submodules: recursive
       - name: Configure for tvOS arm64
-        run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=tvOS \
+        run: |
+          cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=tvOS \
                     -DCMAKE_OSX_SYSROOT=appletvos \
                     -DCMAKE_OSX_ARCHITECTURES=arm64 \
                     -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
@@ -156,7 +159,8 @@ jobs:
         with:
           submodules: recursive
       - name: Configure for visionOS arm64
-        run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=visionOS \
+        run: |
+          cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=visionOS \
                     -DCMAKE_OSX_ARCHITECTURES=arm64 \
                     -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
       - run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target ccev
@@ -173,7 +177,8 @@ jobs:
         with:
           ndk-version: r27
       - name: Configure for Android arm64-v8a
-        run: cmake -B build \
+        run: |
+          cmake -B build \
                     -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
                     -DANDROID_ABI=arm64-v8a \
                     -DANDROID_PLATFORM=android-21 \
@@ -193,7 +198,8 @@ jobs:
         with:
           ndk-version: r27
       - name: Configure for Android armeabi-v7a
-        run: cmake -B build \
+        run: |
+          cmake -B build \
                     -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
                     -DANDROID_ABI=armeabi-v7a \
                     -DANDROID_PLATFORM=android-21 \
@@ -218,7 +224,8 @@ jobs:
           distribution: 'zulu'
           java-version: 17
       - name: Configure for Android x86_64 (with tests)
-        run: cmake -B build \
+        run: |
+          cmake -B build \
                     -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
                     -DANDROID_ABI=x86_64 \
                     -DANDROID_PLATFORM=android-21 \
