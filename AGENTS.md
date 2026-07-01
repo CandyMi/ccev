@@ -43,7 +43,14 @@ CMake will print a clear error if they are missing.
 | linux-gcc | Ubuntu | x86_64 | GCC | ASAN+UBSAN |
 | linux-clang | Ubuntu | x86_64 | Clang | ASAN+UBSAN |
 | linux-32bit | Ubuntu | i686 | GCC (-m32) | — |
+| linux-tsan | Ubuntu | x86_64 | Clang | TSAN |
+| linux-icc | Ubuntu | x86_64 | Intel ICC | — |
 | macos-arm64 | macOS | arm64 | AppleClang | ASAN+UBSAN |
+| ios-arm64 | macOS | arm64 (device) | AppleClang (Xcode) | — |
+| ios-simulator | macOS | x86_64 (sim) | AppleClang (Xcode) | — |
+| android-arm64 | Ubuntu | arm64-v8a | Android NDK (Clang) | — |
+| android-armv7 | Ubuntu | armeabi-v7a | Android NDK (Clang) | — |
+| android-x86_64 | Ubuntu | x86_64 | Android NDK (Clang) | — |
 | windows-msvc-x64 | Windows | x64 | MSVC | — |
 | windows-msvc-x86 | Windows | x86 | MSVC | — |
 | windows-mingw64 | Windows | x64 | MinGW-w64 (GCC) | — |

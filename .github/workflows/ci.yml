@@ -82,6 +82,111 @@ jobs:
       - run: cmake --build build -j$(sysctl -n hw.logicalcpu)
       - run: ctest --test-dir build --timeout 15 --output-on-failure
 
+  # ── iOS: arm64 (physical device) via Xcode ────────────────
+  ios-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure for iOS arm64
+        run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
+                    -DCMAKE_OSX_SYSROOT=iphoneos \
+                    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
+      # Build only the ccev library target — Xcode's ALL_BUILD tries
+      # to build test executables as iOS app bundles which fails
+      # (missing PRODUCT_BUNDLE_IDENTIFIER).
+      # Patch submodules for iOS compatibility before building:
+      #   1. ccicmp: icmp_var.h doesn't exist on iOS SDK
+      #   2. kepoll: uintptr_t→SOCKET implicit truncation on arm64
+      - name: Patch deps for iOS
+        run: |
+          # Fix ccicmp.c — guard icmp_var.h (BSD-only, absent on iOS)
+          perl -i -pe 's|#include <netinet/icmp_var.h>|#include <TargetConditionals.h>\n#if !TARGET_OS_IPHONE \&\& !TARGET_OS_SIMULATOR\n#include <netinet/icmp_var.h>\n#endif|' deps/ccsocket/ccicmp.c
+          # Fix kepoll.c — explicit cast for kqueue ident (uintptr_t → SOCKET)
+          perl -i -pe 's/kepoll_del_locked\(ep, kqevents\[i\]\.ident, false\)/kepoll_del_locked(ep, (SOCKET)kqevents[i].ident, false)/' deps/epoll/src/kepoll.c
+      - run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target ccev
+
+  # ── iOS: x86_64 (simulator) via Xcode ─────────────────────
+  ios-simulator:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure for iOS Simulator x86_64
+        run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
+                    -DCMAKE_OSX_SYSROOT=iphonesimulator \
+                    -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
+      # Same submodule patches as ios-arm64 (icmp_var.h + kepoll cast)
+      - name: Patch deps for iOS Simulator
+        run: |
+          perl -i -pe 's|#include <netinet/icmp_var.h>|#include <TargetConditionals.h>\n#if !TARGET_OS_IPHONE \&\& !TARGET_OS_SIMULATOR\n#include <netinet/icmp_var.h>\n#endif|' deps/ccsocket/ccicmp.c
+          perl -i -pe 's/kepoll_del_locked\(ep, kqevents\[i\]\.ident, false\)/kepoll_del_locked(ep, (SOCKET)kqevents[i].ident, false)/' deps/epoll/src/kepoll.c
+      - run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target ccev
+
+  # ── Android: arm64-v8a via NDK ────────────────────────────
+  android-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27
+      - name: Configure for Android arm64-v8a
+        run: cmake -B build \
+                    -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+                    -DANDROID_ABI=arm64-v8a \
+                    -DANDROID_PLATFORM=android-21 \
+                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
+                    -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build -j$(nproc)
+
+  # ── Android: armeabi-v7a (32-bit ARM) via NDK ─────────────
+  android-armv7:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27
+      - name: Configure for Android armeabi-v7a
+        run: cmake -B build \
+                    -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+                    -DANDROID_ABI=armeabi-v7a \
+                    -DANDROID_PLATFORM=android-21 \
+                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
+                    -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build -j$(nproc)
+
+  # ── Android: x86_64 (emulator) via NDK ────────────────────
+  android-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27
+      - name: Configure for Android x86_64
+        run: cmake -B build \
+                    -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+                    -DANDROID_ABI=x86_64 \
+                    -DANDROID_PLATFORM=android-21 \
+                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
+                    -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build -j$(nproc)
+
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
     runs-on: windows-latest
