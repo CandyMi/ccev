@@ -231,12 +231,8 @@ jobs:
                     -DANDROID_PLATFORM=android-21 \
                     -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
                     -DCMAKE_BUILD_TYPE=Debug
-      - name: Verify NDK compiler
-        run: cmake -LA -N build/ 2>/dev/null | grep -E "CMAKE_C_COMPILER|ANDROID_TOOLCHAIN|ANDROID_ABI|CMAKE_SYSROOT"
       - name: Build library + tests
         run: cmake --build build -j$(nproc)
-      - name: Verify test binary arch
-        run: readelf -h build/tests/test_timer 2>/dev/null | grep -E "Machine|Class" || echo "test_timer not built"
       - name: Boot Android emulator and run tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -248,7 +244,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            readelf -l ${{ github.workspace }}/build/tests/test_timer | grep -A1 INTERP; adb shell ls -la /system/bin/linker*; for test in test_timer test_sock test_stream; do echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /system/bin/linker64 /data/local/tmp/$test; done
+            for test in test_timer test_sock test_stream; do echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /system/bin/linker64 /data/local/tmp/$test; done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
