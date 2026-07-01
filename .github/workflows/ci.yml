@@ -224,8 +224,12 @@ jobs:
                     -DANDROID_PLATFORM=android-21 \
                     -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
                     -DCMAKE_BUILD_TYPE=Debug
+      - name: Verify NDK compiler
+        run: cmake -LA -N build/ 2>/dev/null | grep -E "CMAKE_C_COMPILER|ANDROID_TOOLCHAIN|ANDROID_ABI|CMAKE_SYSROOT"
       - name: Build library + tests
         run: cmake --build build -j$(nproc)
+      - name: Verify test binary arch
+        run: readelf -h build/tests/test_timer 2>/dev/null | grep -E "Machine|Class" || echo "test_timer not built"
       - name: Boot Android emulator and run tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
