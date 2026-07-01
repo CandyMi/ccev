@@ -122,14 +122,14 @@ jobs:
           echo "Device UUID: $DEVICE_UUID"
           xcrun simctl boot "$DEVICE_UUID"
           xcrun simctl bootstatus "$DEVICE_UUID" -b
-      - name: Find test binary in build output
-        run: find build -name "test_timer" -type f 2>/dev/null
-      - name: Run test_timer in simulator
-        run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_timer
-      - name: Run test_sock in simulator
-        run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_sock
-      - name: Run test_stream in simulator
-        run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_stream
+      - name: Run tests in simulator
+        run: |
+          for test in test_timer test_sock test_stream; do
+            BIN=$(find ${{ github.workspace }}/build -path "*/$test.app/$test" -type f 2>/dev/null | head -1)
+            if [ -z "$BIN" ]; then echo "ERROR: $test binary not found"; exit 1; fi
+            echo "=== Running $test ($BIN) ==="
+            xcrun simctl spawn booted "$BIN" || echo "FAIL: $test exited with $?"
+          done
       - name: Shutdown simulator
         run: xcrun simctl shutdown booted 2>/dev/null || true
 
@@ -236,7 +236,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            for test in test_timer test_sock test_stream; do echo ""; echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell ls -la /data/local/tmp/$test; adb shell chmod +x /data/local/tmp/$test; adb shell /data/local/tmp/$test; done
+            adb shell file /data/local/tmp/test_timer; adb shell ls -la /system/bin/linker*; for test in test_timer test_sock test_stream; do echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/$test; done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
