@@ -16,6 +16,22 @@
 #include "ccev_internal.h"
 #include <signal.h>
 
+/* ── Self-pipe write end — isolated from loop lifetime ────────
+ *
+ * Signal / console handlers MUST NOT depend on the loop struct
+ * because the default loop may be destroyed while the handler is
+ * still registered with the OS.  Instead, capture the write end
+ * of the pipe once into this static global.                     ── */
+
+static ccsocket_t ccev__signal_pipe_wr = (ccsocket_t)-1;
+
+static void ccev__signal_pipe_init(void) {
+    if (ccev__signal_pipe_wr == (ccsocket_t)-1) {
+        ccev_loop_t *loop = ccev_default_loop();
+        if (loop) ccev__signal_pipe_wr = loop->signal_pipe[1];
+    }
+}
+
 /* ── Signal / console handler ─────────────────────────────────
  *
  * POSIX:  async-signal-safe signal handler — write() to the
@@ -33,12 +49,9 @@
 #if !defined(_WIN32)
 
 static void cev__sig_handler(int signum) {
-    ccev_loop_t *loop = ccev_default_loop();
-    if (!loop) return;
-
     char byte = (char)signum;
-    if (loop->signal_pipe[1] > 0)
-        (void)write(loop->signal_pipe[1], &byte, 1);
+    if (ccev__signal_pipe_wr > 0)
+        (void)write(ccev__signal_pipe_wr, &byte, 1);
 }
 
 #else /* _WIN32 */
@@ -46,18 +59,12 @@ static void cev__sig_handler(int signum) {
 #include <windows.h>
 
 static void cev__sig_handler(int signum) {
-    ccev_loop_t *loop = ccev_default_loop();
-    if (!loop) return;
-
     char byte = (char)signum;
-    if (loop->signal_pipe[1] > 0)
-        (void)send(loop->signal_pipe[1], &byte, 1, 0);
+    if (ccev__signal_pipe_wr > 0)
+        (void)send(ccev__signal_pipe_wr, &byte, 1, 0);
 }
 
 static BOOL WINAPI ccev__console_handler(DWORD dwCtrlType) {
-    ccev_loop_t *loop = ccev_default_loop();
-    if (!loop) return FALSE;
-
     int signum;
     switch (dwCtrlType) {
         case CTRL_C_EVENT:        signum = SIGINT;   break;
@@ -67,10 +74,9 @@ static BOOL WINAPI ccev__console_handler(DWORD dwCtrlType) {
         case CTRL_SHUTDOWN_EVENT: signum = SIGTERM;   break;
         default: return FALSE;
     }
-
     char byte = (char)signum;
-    if (loop->signal_pipe[1] > 0)
-        (void)send(loop->signal_pipe[1], &byte, 1, 0);
+    if (ccev__signal_pipe_wr > 0)
+        (void)send(ccev__signal_pipe_wr, &byte, 1, 0);
     return TRUE;
 }
 
@@ -159,6 +165,11 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
 
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return CCEV_ERR;
+
+    /* Ensure the self-pipe write-end is captured before any handler
+     * can fire.  The loop pointer is valid because we just called
+     * ccev_default_loop() above. */
+    ccev__signal_pipe_init();
 
     /* Wire up the signal dispatch callback on first use */
     if (loop->signal_sock && !loop->signal_sock->closed)
