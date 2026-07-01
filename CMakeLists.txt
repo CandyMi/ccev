@@ -52,9 +52,10 @@ target_include_directories(ccev_epoll PRIVATE
 )
 # The kepoll and uepoll backends use atomic spinlocks.
 # EPOLL_USE_ATOMIC / CCEV_USE_ATOMIC selects C11 <stdatomic.h> when available.
-if(_have_atomic)
-    target_compile_definitions(ccev_epoll PUBLIC EPOLL_USE_ATOMIC=1)
-endif()
+# if(_have_atomic)
+#     target_compile_definitions(ccev_epoll PUBLIC EPOLL_USE_ATOMIC=1)
+# endif()
+target_compile_definitions(ccev_epoll PUBLIC EPOLL_NO_THREAD=1)
 
 # EPOLL_USE_SHARED_WORKBUF — shared buffer on struct epoll_t (kepoll/pepoll).
 # 0 (default): per-call stack + heap fallback, thread-safe.
@@ -80,6 +81,7 @@ target_compile_definitions(ccev_ccsocket PRIVATE
 # ── Static library: ccev ────────────────────────────────────
 add_library(ccev STATIC
     src/ccev.c
+    src/ccev_mem.c
     src/ccev_timer.c
     src/ccev_sock.c
     src/ccev_stream.c

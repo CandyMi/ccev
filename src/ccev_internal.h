@@ -154,7 +154,7 @@ struct ccev_connector_s {
     ccev_timer_t      *timer;
     ccev_connect_cb    cb;
     void              *udata;
-    void              *dns_ctx;   /**< _connect_dns_ctx_t*, owned by close_cb when set */
+    bool               dns_alive;  /**< DNS resolution in-flight flag */
 };
 
 typedef struct ccev_listener_s  ccev_listener_t;
@@ -294,6 +294,12 @@ typedef struct ccev_dns_pending_s {
     cclink_t          waiters;
 } ccev_dns_pending_t;
 
+/* ── Signal queue event ── */
+typedef struct ccev_signal_event_s {
+    cclink_node_t node;
+    int           signum;
+} ccev_signal_event_t;
+
 /* ════════════════════════════════════════════════════════════════
  *  Loop structure
  * ════════════════════════════════════════════════════════════════ */
@@ -344,13 +350,13 @@ struct ccev_loop_s {
     ccev_loop_each_cb   ecb;
 
     /* ── Signal handling (default loop only) ── */
-    volatile sig_atomic_t sig_pending; /**< Non-zero = signal pending (Win)*/
     ccsocket_t          signal_pipe[2];
     ccev_sock_t        *signal_sock;
     struct {
         ccev_signal_cb cb;
         void          *udata;
     } signals[64];
+    cclink_t           signal_queue; /**< Pending signal events (ccev_signal_event_t) */
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -385,6 +391,9 @@ void ccev__stream_cleanup(ccev_stream_t *st);
 
 /** Signal pipe dispatch callback. */
 void ccev__signal_dispatch(ccev_sock_t *sock, int events);
+
+/** Process signal events — poll Windows sig_pending + drain signal_queue. */
+void ccev__signal_process_queue(ccev_loop_t *loop);
 
 /* ── timer (ccev_timer.c) ── */
 

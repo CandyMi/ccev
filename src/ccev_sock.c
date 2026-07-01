@@ -242,25 +242,10 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
  *  Async connect (with internal DNS)
  * ════════════════════════════════════════════════════════════════ */
 
-/*
- * DNS callback wrapper — prevents use-after-free when the user closes
- * a connecting sock while DNS is in flight.  The wrapper outlives the
- * sock; ccev__sock_free marks it dead via dns_cancelled.
- */
-typedef struct {
-    ccev_sock_t *sock;
-    bool         alive;
-} _connect_dns_ctx_t;
-
-/* ── Connector close callback — frees DNS context if resolution is in-flight ── */
+/* ── Connector close callback — cancels in-flight DNS resolution ── */
 static void _connector_close_cb(void *udata) {
     ccev_sock_any_t *any = (ccev_sock_any_t *)udata;
-    if (any->connector.dns_ctx) {
-        _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)any->connector.dns_ctx;
-        ctx->alive = false;
-        any->connector.dns_ctx = NULL;
-        ccev__free_fn(ctx);
-    }
+    any->connector.dns_alive = false;
 }
 
 /* ── Connect timeout callback ── */
@@ -269,17 +254,12 @@ static void _connect_timeout_cb(void *udata) {
     if (any->sock.mode != CCEV_SOCK_CONNECT) return;
     any->connector.timer = NULL;
 
-    /* Prevent DNS callback from using this sock after it's scheduled
-     * for close — the timeout and DNS response can arrive in the same
-     * loop iteration (timer fires first, then epoll dispatches the
-     * DNS recv callback).  Without this guard, _connect_dns_cb would
-     * see ctx->alive still true and create a new fd on a dying sock. */
-    if (any->connector.dns_ctx) {
-        _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)any->connector.dns_ctx;
-        ctx->alive = false;
-        any->connector.dns_ctx = NULL;
-        ccev__free_fn(ctx);
-    }
+    /* Cancel in-flight DNS — _connect_dns_cb will see dns_alive == false
+     * and return immediately without touching the dying sock.  The DNS
+     * response can arrive in the same loop iteration (timer fires first,
+     * then epoll dispatches the DNS recv callback), so we must set the
+     * flag here rather than relying on deferred close. */
+    any->connector.dns_alive = false;
 
     if (any->connector.cb)
         any->connector.cb(any->connector.udata, &any->sock, CCEV_ERR);
@@ -328,13 +308,11 @@ static int _connect_try_register(ccev_sock_t *sock,
 
 /* ── Resume connect after DNS resolution ── */
 static void _connect_dns_cb(void *udata, const char *address, int status) {
-    _connect_dns_ctx_t *ctx = (_connect_dns_ctx_t *)udata;
-    if (!ctx->alive) { ccev__free_fn(ctx); return; }
+    ccev_sock_any_t *any = (ccev_sock_any_t *)udata;
+    if (!any->connector.dns_alive) return;
 
-    ccev_sock_any_t *any = (ccev_sock_any_t *)ctx->sock;
     ccev_sock_t *sock = &any->sock;
-    any->connector.dns_ctx = NULL;
-    ccev__free_fn(ctx);
+    any->connector.dns_alive = false;
     if (status != CCEV_OK || !address || address[0] == '\0') {
         if (any->connector.cb)
             any->connector.cb(any->connector.udata, sock, CCEV_ERR);
@@ -413,33 +391,17 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
             if (dns_timeout < 1000)  dns_timeout = 1000;
         }
 
-        _connect_dns_ctx_t *dns_ctx = (_connect_dns_ctx_t *)
-            ccev__realloc_fn(NULL, sizeof(_connect_dns_ctx_t));
-        if (!dns_ctx) {
-            if (any->connector.timer)
-                ccev_timer_del(loop, any->connector.timer);
-            cclist_remove(&loop->all_socks, &sock->lnode);
-            loop->sock_count--;
-            ccev__free_fn(any);
-            return NULL;
-        }
-        dns_ctx->sock     = sock;
-        dns_ctx->alive    = true;
-        any->connector.dns_ctx = dns_ctx;
+        any->connector.dns_alive = true;
 
         /* Register close callback so ccev_sock_close() before DNS
-         * resolves frees the dns_ctx and prevents use-after-free. */
+         * resolves marks dns_alive = false, preventing _connect_dns_cb
+         * from acting on a dying sock. */
         ccev_sock_set_close_cb(sock, _connector_close_cb, any);
 
         if (ccev_dns_resolve(loop, host, dns_timeout,
                               CCEV_DNS_A | CCEV_DNS_AAAA,
-                              _connect_dns_cb, dns_ctx) != CCEV_OK) {
-            any->connector.dns_ctx = NULL;
-            /* close_cb was set; DNS never started, so manually free dns_ctx.
-             * Clear close_cb first to prevent _connector_close_cb from
-             * double-freeing dns_ctx when the sock is eventually freed. */
-            ccev_sock_set_close_cb(sock, NULL, NULL);
-            ccev__free_fn(dns_ctx);
+                              _connect_dns_cb, any) != CCEV_OK) {
+            any->connector.dns_alive = false;
             if (any->connector.timer)
                 ccev_timer_del(loop, any->connector.timer);
             cclist_remove(&loop->all_socks, &sock->lnode);

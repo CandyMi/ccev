@@ -342,7 +342,7 @@ static int ccev__dns_send_one(ccev_loop_t *loop, ccsocket_t fd,
                                ccdns_t *ctx, const char *domain,
                                ccdns_type_t qtype) {
     unsigned char buf[512];
-    uint16_t qlen = ccdns_encode(ctx, buf, sizeof(buf), domain, qtype);
+    uint16_t qlen = ccdns_encode(ctx, buf, (uint16_t)sizeof(buf), domain, qtype);
     if (qlen == 0) return CCEV_ERR;
     int sent = 0;
     ccsocket_sendto(fd, (const char*)buf, qlen,
@@ -371,9 +371,9 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
     dns_collect_t col;
     memset(&col, 0, sizeof(col));
 
-    int ret = ccdns_decode(&q->ctx_a, buf, (size_t)n, &col, dns_collect_cb);
+    int ret = ccdns_decode(&q->ctx_a, buf, (uint16_t)n, &col, dns_collect_cb);
     if (ret < 0)
-        ccdns_decode(&q->ctx_aaaa, buf, (size_t)n, &col, dns_collect_cb);
+        ccdns_decode(&q->ctx_aaaa, buf, (uint16_t)n, &col, dns_collect_cb);
 
     char addr[256] = "";
     int status = CCEV_ERR;

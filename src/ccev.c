@@ -20,22 +20,6 @@
 
 #include "ccev_internal.h"
 
-/* Default allocator (libc) */
-static void *ccev_default_realloc(void *ptr, size_t sz) {
-    if (sz == 0) { free(ptr); return NULL; }
-    return realloc(ptr, sz);
-}
-static void ccev_default_free(void *ptr) { free(ptr); }
-
-void *(*ccev__realloc_fn)(void*, size_t) = ccev_default_realloc;
-void  (*ccev__free_fn)(void*)            = ccev_default_free;
-
-void ccev_set_allocator(void *(*realloc_fn)(void*, size_t),
-                        void  (*free_fn)(void*)) {
-    if (realloc_fn) ccev__realloc_fn = realloc_fn;
-    if (free_fn)    ccev__free_fn    = free_fn;
-}
-
 /* ════════════════════════════════════════════════════════════════
  *  Loop lifecycle
  * ════════════════════════════════════════════════════════════════ */
@@ -59,6 +43,7 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     /* Init data structures */
     cclist_init(&loop->all_socks);
     cclist_init(&loop->closing);
+    cclink_init(&loop->signal_queue);
     ccheap_init(&loop->timers, NULL);
 
     /* Init DNS state */
@@ -155,7 +140,11 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     }
     cchashmap_destroy(&loop->dns_pending);
 
-    /* DNS server string is embedded (no heap alloc) — nothing to free */
+    /* Free pending signal events */
+    while (!cclink_empty(&loop->signal_queue)) {
+        cclink_node_t *_n = cclink_pop_front(&loop->signal_queue);
+        ccev__free_fn(_n);
+    }
 
     ccev__free_fn(loop->events);
     epoll_close(loop->epfd);
@@ -347,12 +336,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
          *     case) the branch is predicted not-taken — zero cost. */
         if (loop->ecb) loop->ecb(loop);
 
-#if defined(_WIN32)
-        /* On Windows the signal handler stores the signum in
-         * loop->sig_pending and wakes the loop.  Check it here
-         * on every iteration. */
-        ccev__signal_dispatch(NULL, 0);
-#endif
         /* P1: skip clock_gettime when no timers are registered.
          *     ccev__now_ms() is a vdso call on Linux (~30ns) but a full
          *     syscall on older kernels/containers. */
@@ -393,6 +376,10 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
 
         /* 6. Process closing queue */
         ccev__process_closing(loop);
+
+        /* 7. Drain pending signal queue (filled by pipe rcb in
+         *    _dispatch_events — same path on both platforms). */
+        ccev__signal_process_queue(loop);
 
         CCEV_COMPILER_BARRIER();
         if (ccev_atomic_load(loop->stop_flag)) break;

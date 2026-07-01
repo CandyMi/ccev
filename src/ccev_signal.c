@@ -16,65 +16,116 @@
 #include "ccev_internal.h"
 #include <signal.h>
 
-/* ── Signal handler (async-signal-safe) ─────────────────────── */
+/* ── Signal / console handler ─────────────────────────────────
+ *
+ * POSIX:  async-signal-safe signal handler — write() to the
+ *         self-pipe is listed in POSIX.1-2016 as safe.
+ *
+ * Win32:  console control handler via SetConsoleCtrlHandler.
+ *         Runs in an OS-provided thread — send() on the
+ *         TCP-loopback pipe is safe (not a signal context).
+ *                                                              ── */
 
-static void ccev__sig_handler(int signum) {
+#if !defined(_WIN32)
+typedef void (*ccev_signal_system_cb)(int);
+static void cev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
-#if defined(_WIN32)
-    /* Windows: set a per-loop volatile flag.  ccev_loop_run() polls
-     * sig_pending on every iteration, so no wakeup call is needed.
-     * Avoid ccev_wakeup() / ccsocket_send() here — they are NOT
-     * async-signal-safe in the CRT signal() context. */
-    loop->sig_pending = (sig_atomic_t)signum;
-#else
-    /* Pipe is non-blocking; EAGAIN means the kernel buffer is full
-     * (~64 KiB / 65536 pending signals) — the signal byte is lost
-     * but no recovery is possible from a signal handler. */
-    unsigned char byte = (unsigned char)signum;
+
+    char byte = (char)signum;
     if (loop->signal_pipe[1] > 0)
-        (void)write(loop->signal_pipe[1], (char*)&byte, 1);
-#endif
+        (void)write(loop->signal_pipe[1], &byte, 1);
 }
+#else
+#include <windows.h>
+typedef BOOL (WINAPI *ccev_signal_system_cb)(DWORD);
+static BOOL WINAPI cev__sig_handler(DWORD dwCtrlType) {
+    ccev_loop_t *loop = ccev_default_loop();
+    if (!loop) return FALSE;
 
-/* ── Dispatch callback (fired from loop on pipe readable) ───── */
+    int signum;
+    switch (dwCtrlType) {
+        case CTRL_C_EVENT:        signum = SIGINT;   break;
+        case CTRL_BREAK_EVENT:    signum = SIGBREAK;  break;
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT: signum = SIGTERM;   break;
+        default: return FALSE;
+    }
 
+    char byte = (char)signum;
+    if (loop->signal_pipe[1] > 0)
+        (void)send(loop->signal_pipe[1], &byte, 1, 0);
+    return TRUE;
+}
+#endif
+
+/* ── Dispatch callback (fired from loop on pipe readable) ─────
+ *
+ * Reads signal bytes from the self-pipe and pushes each signum onto
+ * loop->signal_queue.  Actual user callback dispatch is deferred to
+ * ccev__signal_process_queue() at the end of the loop iteration,
+ * providing a clean point for re-entrancy-safe delivery.
+ *
+ * On POSIX the bytes are written by cev__sig_handler (async-signal-
+ * safe write).  On Windows they are written by the console control
+ * handler (SetConsoleCtrlHandler) which runs in a separate thread
+ * and can safely call send() on the TCP-loopback socket pair. ── */
 void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
     (void)sock; (void)events;
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
 
-#if defined(_WIN32)
-    /* On Windows the signal handler sets loop->sig_pending.
-     * This function is also polled from ccev_loop_run
-     * on every iteration for prompt delivery. */
-    int signum = (int)loop->sig_pending;
-    if (signum != 0) {
-        loop->sig_pending = 0;
-        if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
-            loop->signals[signum].cb(loop->signals[signum].udata, signum);
-    }
-#else
     unsigned char byte;
     while (ccsocket_recv(loop->signal_pipe[0], (char*)&byte, 1, NULL)
            == CC_OPCODE_OK) {
         int signum = (int)byte;
-        if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
-            loop->signals[signum].cb(loop->signals[signum].udata, signum);
+        ccev_signal_event_t *ev = (ccev_signal_event_t *)
+            ccev__realloc_fn(NULL, sizeof(ccev_signal_event_t));
+        if (ev) { ev->signum = signum; cclink_push_back(&loop->signal_queue, &ev->node); }
     }
-#endif
     /* Re-arm is handled by the event loop after recv_cb returns */
 }
 
-/* ── Public API ─────────────────────────────────────────────── */
+/* ── Drain pending signal queue (called from ccev_loop_run) ──
+ *
+ * Pops every ccev_signal_event_t from loop->signal_queue and fires
+ * the corresponding registered callback.  The queue is filled by
+ * ccev__signal_dispatch (pipe rcb in _dispatch_events) — the same
+ * path on both platforms.                                ── */
 
-/* ── Platform-safe signal handler install (sigaction preferred) ── */
+void ccev__signal_process_queue(ccev_loop_t *loop) {
+    if (!loop) return;
+    while (!cclink_empty(&loop->signal_queue)) {
+        cclink_node_t *n = cclink_pop_front(&loop->signal_queue);
+        ccev_signal_event_t *ev = CCLINK_CONTAINER(n, ccev_signal_event_t, node);
+        int signum = ev->signum;
+        if (signum >= 1 && signum <= 63 && loop->signals[signum].cb)
+            loop->signals[signum].cb(loop->signals[signum].udata, signum);
+        ccev__free_fn(ev);
+    }
+}
 
-static int ccev__sig_install(int signum, void (*handler)(int)) {
+/* ── Platform-safe signal handler install ──
+ *
+ * POSIX: sigaction with async-signal-safe write(pipe).
+ * Windows: SetConsoleCtrlHandler for console events (SIGINT/SIGBREAK);
+ * other signals are not supported via the pipe mechanism.     ── */
+
+static int ccev__sig_install(int signum, ccev_signal_system_cb handler) {
 #if defined(_WIN32)
-    /* Windows only provides signal() */
-    signal(signum, handler);
-    return CCEV_OK;
+    if (signum == SIGINT || signum == SIGBREAK) {
+        if (handler == SIG_DFL) {
+            /* Don't unregister the handler — other console signals
+             * may still need it.  Harmless: events without a
+             * registered callback are freed by process_queue. */
+            return CCEV_OK;
+        }
+        return SetConsoleCtrlHandler(cev__sig_handler, TRUE)
+               ? CCEV_OK : CCEV_ERR;
+    }
+    (void)handler;
+    return CCEV_ERR;  /* Only SIGINT and SIGBREAK via pipe on Windows */
 #else
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -91,17 +142,17 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return CCEV_ERR;
 
-    /* Store callback */
-    loop->signals[signum].cb    = cb;
-    loop->signals[signum].udata = udata;
-
     /* Wire up the signal dispatch callback on first use */
-    /* Wire up signal dispatch via sock_read_start */
     if (loop->signal_sock && !loop->signal_sock->closed)
         ccev_sock_read_start(loop->signal_sock, ccev__signal_dispatch);
 
-    /* Install OS signal handler */
-    return ccev__sig_install(signum, ccev__sig_handler);
+    /* Install OS signal handler (must succeed before storing callback) */
+    int ret = ccev__sig_install(signum, cev__sig_handler);
+    if (ret != CCEV_OK) return ret;
+
+    loop->signals[signum].cb    = cb;
+    loop->signals[signum].udata = udata;
+    return CCEV_OK;
 }
 
 int ccev_signal_ignore(int signum) {
