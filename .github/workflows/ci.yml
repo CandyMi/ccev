@@ -110,9 +110,29 @@ jobs:
         run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
                     -DCMAKE_OSX_SYSROOT=iphonesimulator \
                     -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
-      # Same target-only build as ios-arm64.
-      - run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target ccev
+                    -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
+                    -DCMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER=com.ccev.test \
+                    -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+      - name: Build test binaries (timer + sock + stream)
+        run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) \
+                    --target test_timer --target test_sock --target test_stream
+      - name: Boot iOS Simulator
+        run: |
+          xcrun simctl shutdown all 2>/dev/null || true
+          DEVICE=$(xcrun simctl list devices available \
+                    | grep "iPhone" | head -1 \
+                    | sed 's/.*(//' | sed 's/).*//')
+          echo "Booting device: $DEVICE"
+          xcrun simctl boot "$DEVICE"
+          xcrun simctl bootstatus booted -v
+      - name: Run test_timer in simulator
+        run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_timer
+      - name: Run test_sock in simulator
+        run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_sock
+      - name: Run test_stream in simulator
+        run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_stream
+      - name: Shutdown simulator
+        run: xcrun simctl shutdown booted 2>/dev/null || true
 
   # ── tvOS: arm64 (Apple TV) via Xcode ─────────────────────
   tvos-arm64:
@@ -192,14 +212,38 @@ jobs:
         id: ndk
         with:
           ndk-version: r27
-      - name: Configure for Android x86_64
+      - name: Set up JDK for Android emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 17
+      - name: Configure for Android x86_64 (with tests)
         run: cmake -B build \
                     -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
                     -DANDROID_ABI=x86_64 \
                     -DANDROID_PLATFORM=android-21 \
-                    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
+                    -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
                     -DCMAKE_BUILD_TYPE=Debug
-      - run: cmake --build build -j$(nproc)
+      - name: Build library + tests
+        run: cmake --build build -j$(nproc)
+      - name: Boot Android emulator and run tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          target: google_apis
+          avd-name: ccev-test
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -cache-size 512
+          disable-animations: true
+          script: |
+            # Push test binaries to emulator
+            for test in test_timer test_sock test_stream; do
+              echo ""
+              echo "=== Running $test ==="
+              adb push build/$test /data/local/tmp/
+              adb shell chmod +x /data/local/tmp/$test
+              adb shell /data/local/tmp/$test
+            done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
