@@ -467,6 +467,121 @@ TEST(listen_then_connect) {
     passed++;
 }
 
+/* ═══ ccev_each ──────────────────────────────────── */
+
+static int  each_cb_fired;
+static int  each_cb_count;
+static ccev_loop_t *each_loop;
+
+static void each_stop_cb(ccev_loop_t *loop) {
+    each_cb_fired = 1;
+    ccev_loop_stop(loop);
+}
+
+/* No-op timer callback — keeps the loop iterating without stopping it.
+ * Used as a repeat timer in multi-iteration tests to prevent epoll_wait
+ * from blocking indefinitely between iterations. */
+static void each_drive_cb(void *udata) {
+    (void)udata;
+}
+
+static void each_count_cb(ccev_loop_t *loop) {
+    each_cb_count++;
+    if (each_cb_count >= 3)
+        ccev_loop_stop(loop);
+}
+
+TEST(each_cb_fires_at_least_once) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    each_loop    = loop;
+    each_cb_fired = 0;
+
+    ASSERT(ccev_each(loop, each_stop_cb) == CCEV_OK);
+
+    /* Safety timer — should not fire since the each_cb stops the loop */
+    ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE,
+                   timer_stop_loop, &each_loop);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ASSERT(each_cb_fired == 1);
+
+    ccev_loop_destroy(loop);
+}
+
+TEST(each_cb_fires_multiple_iterations) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    each_loop     = loop;
+    each_cb_count = 0;
+
+    ASSERT(ccev_each(loop, each_count_cb) == CCEV_OK);
+
+    /* Add a repeat timer (1ms, no-op callback) to drive the loop for
+     * multiple iterations without blocking on epoll_wait.  The timer
+     * fires and reinserts itself — each_count_cb stops the loop after
+     * 3 iterations.  We must NOT use timer_stop_loop here because that
+     * would stop the loop on the first timer expiry, before each_count_cb
+     * has a chance to reach 3. */
+    ccev_timer_add(loop, 1, CCEV_TIMER_REPEAT,
+                   each_drive_cb, NULL);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ASSERT(each_cb_count >= 3);
+
+    ccev_loop_destroy(loop);
+}
+
+TEST(each_clear_with_null) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    each_loop    = loop;
+    each_cb_fired = 0;
+
+    /* Register, then clear */
+    ASSERT(ccev_each(loop, each_stop_cb) == CCEV_OK);
+    ASSERT(ccev_each(loop, NULL) == CCEV_OK);
+
+    /* Add a timer that will stop the loop — without a registered each_cb,
+     * the loop will iterate when the timer fires. */
+    ccev_timer_add(loop, 10, CCEV_TIMER_ONCE,
+                   timer_stop_loop, &each_loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    /* The each_cb should NOT have fired since it was cleared */
+    ASSERT(each_cb_fired == 0);
+
+    ccev_loop_destroy(loop);
+}
+
+TEST(each_null_loop_returns_err) {
+    ASSERT(ccev_each(NULL, each_stop_cb) == CCEV_ERR);
+    passed++;
+}
+
+TEST(each_replace) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    each_loop    = loop;
+    each_cb_fired = 0;
+
+    /* Register a dummy, then replace with the real one */
+    ccev_each(loop, each_count_cb);  /* deliberate, ignore return */
+    ASSERT(ccev_each(loop, each_stop_cb) == CCEV_OK);
+
+    each_loop    = loop;
+    each_cb_fired = 0;
+
+    ccev_timer_add(loop, 10, CCEV_TIMER_ONCE,
+                   timer_stop_loop, &each_loop);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    /* The replaced callback (each_stop_cb) should fire */
+    ASSERT(each_cb_fired == 1);
+
+    ccev_loop_destroy(loop);
+}
+
 /* ════════════════════════════════════════════════════ */
 
 int main(void) {
@@ -521,6 +636,13 @@ int main(void) {
 
     /* listen + connect */
     RUN(listen_then_connect);
+
+    /* each */
+    RUN(each_cb_fires_at_least_once);
+    RUN(each_cb_fires_multiple_iterations);
+    RUN(each_clear_with_null);
+    RUN(each_null_loop_returns_err);
+    RUN(each_replace);
 
     printf("\n  %d passed, %d failed\n", passed, failed); fflush(stdout);
     return failed ? 1 : 0;

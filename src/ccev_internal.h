@@ -59,6 +59,68 @@ typedef int socklen_t;
 #  define CCEV_COMPILER_BARRIER() do {} while(0)
 #endif
 
+/* ── Hardware acquire/release barrier (for weak-ordered CPUs) ──
+ *
+ * On x86/x64 loads have acquire semantics and stores have release
+ * semantics naturally (strong memory model) — a compiler barrier
+ * prevents reordering and suffices.  On ARM / PowerPC we need a
+ * hardware DMB / lwsync instruction.
+ *
+ * Used by ccev_atomic_store / ccev_atomic_load when CCEV_USE_ATOMIC
+ * is not defined.                                                ── */
+#if defined(_WIN32)
+#  if defined(_MSC_VER)
+     /* MSVC native */
+#    if defined(_M_ARM) || defined(_M_ARM64)
+#      include <intrin.h>
+#      define CCEV_ACQUIRE_BARRIER()  __dmb(_ARM_BARRIER_ISH)
+#      define CCEV_RELEASE_BARRIER()  __dmb(_ARM_BARRIER_ISH)
+#    else
+       /* x86/x64: compiler barrier is sufficient */
+#      define CCEV_ACQUIRE_BARRIER()  _ReadWriteBarrier()
+#      define CCEV_RELEASE_BARRIER()  _ReadWriteBarrier()
+#    endif
+#  else
+     /* MinGW (GCC) — __sync_synchronize is a full HW+compiler barrier */
+#    define CCEV_ACQUIRE_BARRIER()    __sync_synchronize()
+#    define CCEV_RELEASE_BARRIER()    __sync_synchronize()
+#  endif
+#elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+#  if defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)
+     /* GCC/Clang on ARM — __atomic_thread_fence with acquire/release
+      * is available since GCC 4.7 / Clang 3.1.  Emits DMB ISH. */
+#    define CCEV_ACQUIRE_BARRIER()    __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#    define CCEV_RELEASE_BARRIER()    __atomic_thread_fence(__ATOMIC_RELEASE)
+#  elif defined(__powerpc__) || defined(__ppc__) || defined(__PPC__)
+     /* PowerPC — full sync barrier (lwsync would suffice but
+      * __sync_synchronize is the portable choice). */
+#    define CCEV_ACQUIRE_BARRIER()    __sync_synchronize()
+#    define CCEV_RELEASE_BARRIER()    __sync_synchronize()
+#  else
+     /* x86, x64, s390x, RISC-V, etc. — strong or unknown ordering.
+      * Compiler barrier prevents reordering; HW ordering suffices.
+      * __sync_synchronize is a function-like builtin (expression, not
+      * a statement), so it works safely inside the comma-operator
+      * expression of ccev_atomic_load.  On x86 it emits an mfence
+      * instruction (~40-80 cycles per call at most once per loop
+      * iteration — negligible). */
+#    define CCEV_ACQUIRE_BARRIER()    __sync_synchronize()
+#    define CCEV_RELEASE_BARRIER()    __sync_synchronize()
+#  endif
+#elif defined(__CC_ARM)
+   /* ARM RealView / Keil — __dmb with 0xB = DMB full system */
+#  define CCEV_ACQUIRE_BARRIER()      __dmb(0xB)
+#  define CCEV_RELEASE_BARRIER()      __dmb(0xB)
+#else
+   /* Unknown platform — ((void)0) is a no-op expression (not a
+    * statement), safe inside comma-operator context.  Without any
+    * barrier, ccev_atomic_load is a plain volatile read on weak
+    * CPUs — architecture-specific ports should add the correct
+    * barrier here. */
+#  define CCEV_ACQUIRE_BARRIER()      ((void)0)
+#  define CCEV_RELEASE_BARRIER()      ((void)0)
+#endif
+
 /* ── Global allocator (set via ccev_set_allocator, visible to all .c files) ── */
 extern void *(*ccev__realloc_fn)(void*, size_t);
 extern void  (*ccev__free_fn)(void*);
@@ -320,10 +382,28 @@ struct ccev_loop_s {
 #  define ccev_atomic_store(p, v)  atomic_store(&(p), (v))
 #  define ccev_atomic_load(p)      atomic_load(&(p))
 #else
-#  define ccev_atomic_store(p, v)  do { (p) = (v); CCEV_COMPILER_BARRIER(); } while(0)
-/* Not a statement-expression (MSVC doesn't support ({}) ).
- * Callers pair with explicit CCEV_COMPILER_BARRIER() before load. */
-#  define ccev_atomic_load(p)      (p)
+/*
+ * Non-C11 path — acquire/release semantics via platform barriers.
+ *
+ * Store: release barrier BEFORE the store ensures all prior memory
+ * operations are globally visible before (p).  Pairs with the acquire
+ * barrier that precedes ccev_atomic_load on the reader side.
+ *
+ * Load: acquire barrier BEFORE the read prevents subsequent memory
+ * operations from being reordered before the load of (p).  On strong-
+ * ordered CPUs (x86, x64) this is a compiler barrier only; on ARM /
+ * PowerPC it emits a DMB / lwsync hardware instruction.
+ *
+ * Both barriers are embedded in the macro so callers don't need to
+ * remember to pair them manually — unlike the earlier design that
+ * required an explicit CCEV_COMPILER_BARRIER() before each load.    */
+#  define ccev_atomic_store(p, v)  do {   \
+    CCEV_RELEASE_BARRIER();               \
+    (p) = (v);                            \
+} while(0)
+
+#  define ccev_atomic_load(p)             \
+    (CCEV_ACQUIRE_BARRIER(), (p))
 #endif
 
     /* ── Wakeup pipe ── */

@@ -325,8 +325,8 @@ static void _dispatch_events(ccev_loop_t *loop, int n) {
 int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     if (!loop) return CCEV_ERR;
     /* Honour any stop request that was set before entering the loop
-     * (e.g. from a synchronous DNS or ICMP callback). */
-    CCEV_COMPILER_BARRIER();
+     * (e.g. from a synchronous DNS or ICMP callback).
+     * ccev_atomic_load embeds the acquire barrier internally. */
     if (ccev_atomic_load(loop->stop_flag)) return 0;
     int n = 0;
 
@@ -347,7 +347,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         } else {
             next_ms = -1;
         }
-        CCEV_COMPILER_BARRIER();
         if (ccev_atomic_load(loop->stop_flag)) break;
 
         /* 2. Compute epoll timeout
@@ -381,7 +380,6 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
          *    _dispatch_events — same path on both platforms). */
         ccev__signal_process_queue(loop);
 
-        CCEV_COMPILER_BARRIER();
         if (ccev_atomic_load(loop->stop_flag)) break;
 
     } while (mode == CCEV_RUN_FOREVER);
