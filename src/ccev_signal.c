@@ -21,13 +21,17 @@
  * POSIX:  async-signal-safe signal handler — write() to the
  *         self-pipe is listed in POSIX.1-2016 as safe.
  *
- * Win32:  console control handler via SetConsoleCtrlHandler.
- *         Runs in an OS-provided thread — send() on the
- *         TCP-loopback pipe is safe (not a signal context).
+ * Win32:  Two-layer delivery:
+ *         1. CRT signal() for signals raised via raise() / OS
+ *            (SIGTERM, SIGINT, SIGBREAK, etc.) — pipe write is
+ *            practical on Windows even if CRT docs are conservative.
+ *         2. SetConsoleCtrlHandler for console events (Ctrl+C,
+ *            Ctrl+Break, close).  Runs in an OS-provided thread,
+ *            safe to call send() on the TCP-loopback pipe.
  *                                                              ── */
 
 #if !defined(_WIN32)
-typedef void (*ccev_signal_system_cb)(int);
+
 static void cev__sig_handler(int signum) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return;
@@ -36,10 +40,21 @@ static void cev__sig_handler(int signum) {
     if (loop->signal_pipe[1] > 0)
         (void)write(loop->signal_pipe[1], &byte, 1);
 }
-#else
+
+#else /* _WIN32 */
+
 #include <windows.h>
-typedef BOOL (WINAPI *ccev_signal_system_cb)(DWORD);
-static BOOL WINAPI cev__sig_handler(DWORD dwCtrlType) {
+
+static void cev__sig_handler(int signum) {
+    ccev_loop_t *loop = ccev_default_loop();
+    if (!loop) return;
+
+    char byte = (char)signum;
+    if (loop->signal_pipe[1] > 0)
+        (void)send(loop->signal_pipe[1], &byte, 1, 0);
+}
+
+static BOOL WINAPI ccev__console_handler(DWORD dwCtrlType) {
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return FALSE;
 
@@ -58,7 +73,8 @@ static BOOL WINAPI cev__sig_handler(DWORD dwCtrlType) {
         (void)send(loop->signal_pipe[1], &byte, 1, 0);
     return TRUE;
 }
-#endif
+
+#endif /* _WIN32 */
 
 /* ── Dispatch callback (fired from loop on pipe readable) ─────
  *
@@ -67,10 +83,11 @@ static BOOL WINAPI cev__sig_handler(DWORD dwCtrlType) {
  * ccev__signal_process_queue() at the end of the loop iteration,
  * providing a clean point for re-entrancy-safe delivery.
  *
- * On POSIX the bytes are written by cev__sig_handler (async-signal-
- * safe write).  On Windows they are written by the console control
- * handler (SetConsoleCtrlHandler) which runs in a separate thread
- * and can safely call send() on the TCP-loopback socket pair. ── */
+ * On POSIX the bytes are written by cev__sig_handler.  On Windows
+ * they are written by either cev__sig_handler (CRT signal handler)
+ * or ccev__console_handler (SetConsoleCtrlHandler callback).  Both
+ * wind up in the same pipe → same queue → same process path.   ── */
+
 void ccev__signal_dispatch(ccev_sock_t *sock, int events) {
     (void)sock; (void)events;
     ccev_loop_t *loop = ccev_default_loop();
@@ -106,26 +123,27 @@ void ccev__signal_process_queue(ccev_loop_t *loop) {
     }
 }
 
-/* ── Platform-safe signal handler install ──
+/* ── Install OS-level handler ────────────────────────────────
  *
  * POSIX: sigaction with async-signal-safe write(pipe).
- * Windows: SetConsoleCtrlHandler for console events (SIGINT/SIGBREAK);
- * other signals are not supported via the pipe mechanism.     ── */
+ * Windows: CRT signal() for all supported signals; SIGINT and
+ * SIGBREAK additionally register a SetConsoleCtrlHandler callback
+ * for reliable delivery of console events.               ── */
 
-static int ccev__sig_install(int signum, ccev_signal_system_cb handler) {
+static int ccev__sig_install(int signum, void (*handler)(int)) {
 #if defined(_WIN32)
     if (signum == SIGINT || signum == SIGBREAK) {
         if (handler == SIG_DFL) {
-            /* Don't unregister the handler — other console signals
-             * may still need it.  Harmless: events without a
-             * registered callback are freed by process_queue. */
-            return CCEV_OK;
+            /* Keep the console handler registered — it's shared
+             * between signals.  Without a registered callback,
+             * events are freed by process_queue — harmless. */
+            goto install_crt;
         }
-        return SetConsoleCtrlHandler(cev__sig_handler, TRUE)
-               ? CCEV_OK : CCEV_ERR;
+        if (!SetConsoleCtrlHandler(ccev__console_handler, TRUE))
+            return CCEV_ERR;
     }
-    (void)handler;
-    return CCEV_ERR;  /* Only SIGINT and SIGBREAK via pipe on Windows */
+install_crt:
+    return (signal(signum, handler) == SIG_ERR) ? CCEV_ERR : CCEV_OK;
 #else
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
