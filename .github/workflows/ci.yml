@@ -114,8 +114,9 @@ jobs:
                     -DCMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER=com.ccev.test \
                     -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
       - name: Build test binaries (timer + sock + stream)
-        run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) \
-                    --target test_timer --target test_sock --target test_stream
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu) \
+                    -t test_timer -t test_sock -t test_stream \
+                    --config Debug
       - name: Boot iOS Simulator
         run: |
           xcrun simctl shutdown all 2>/dev/null || true
@@ -231,12 +232,12 @@ jobs:
         with:
           api-level: 29
           arch: x86_64
-          target: google_apis
+          target: default
           avd-name: ccev-test
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -cache-size 512
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -cache-size 512 -memory 2048 -no-snapshot
           disable-animations: true
+          emulator-boot-timeout: 600
           script: |
-            # Push test binaries to emulator
             for test in test_timer test_sock test_stream; do
               echo ""
               echo "=== Running $test ==="
