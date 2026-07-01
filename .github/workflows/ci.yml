@@ -116,11 +116,11 @@ jobs:
       - name: Boot iOS Simulator
         run: |
           xcrun simctl shutdown all 2>/dev/null || true
-          DEVICE=$(xcrun simctl list devices available \
-                    | grep "iPhone" | head -1 \
-                    | sed 's/.*(//' | sed 's/).*//')
-          echo "Booting device: $DEVICE"
-          xcrun simctl boot "$DEVICE"
+          RUNTIME=$(xcrun simctl list runtimes available | grep "iOS" | tail -1 | sed 's/.* - //')
+          DEVICE_TYPE="com.apple.CoreSimulator.SimDeviceType.iPhone-15-Pro"
+          DEVICE_UUID=$(xcrun simctl create ccev-test "$DEVICE_TYPE" "$RUNTIME")
+          echo "Device UUID: $DEVICE_UUID"
+          xcrun simctl boot "$DEVICE_UUID"
           xcrun simctl bootstatus booted -v
       - name: Run test_timer in simulator
         run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_timer
@@ -223,6 +223,8 @@ jobs:
                     -DCMAKE_BUILD_TYPE=Debug
       - name: Build library + tests
         run: cmake --build build -j$(nproc)
+      - name: List build artifacts (diagnostic)
+        run: ls -la build/ | head -30
       - name: Boot Android emulator and run tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
