@@ -114,9 +114,7 @@ jobs:
                     -DCMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER=com.ccev.test \
                     -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
       - name: Build test binaries (timer + sock + stream)
-        run: cmake --build build -j$(sysctl -n hw.logicalcpu) \
-                    -t test_timer -t test_sock -t test_stream \
-                    --config Debug
+        run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target test_timer --target test_sock --target test_stream
       - name: Boot iOS Simulator
         run: |
           xcrun simctl shutdown all 2>/dev/null || true
@@ -238,13 +236,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            for test in test_timer test_sock test_stream; do
-              echo ""
-              echo "=== Running $test ==="
-              adb push build/$test /data/local/tmp/
-              adb shell chmod +x /data/local/tmp/$test
-              adb shell /data/local/tmp/$test
-            done
+            for test in test_timer test_sock test_stream; do echo ""; echo "=== Running $test ==="; adb push build/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /data/local/tmp/$test; done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
