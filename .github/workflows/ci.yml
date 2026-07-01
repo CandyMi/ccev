@@ -122,6 +122,8 @@ jobs:
           echo "Device UUID: $DEVICE_UUID"
           xcrun simctl boot "$DEVICE_UUID"
           xcrun simctl bootstatus "$DEVICE_UUID" -b
+      - name: Find test binary in build output
+        run: find build -name "test_timer" -type f 2>/dev/null
       - name: Run test_timer in simulator
         run: xcrun simctl spawn booted build/Debug-iphonesimulator/test_timer
       - name: Run test_sock in simulator
@@ -234,7 +236,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            for test in test_timer test_sock test_stream; do echo ""; echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /data/local/tmp/$test; done
+            for test in test_timer test_sock test_stream; do echo ""; echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/tests/$test /data/local/tmp/; adb shell ls -la /data/local/tmp/$test; adb shell chmod +x /data/local/tmp/$test; adb shell /data/local/tmp/$test; done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:
