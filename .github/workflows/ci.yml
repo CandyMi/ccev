@@ -110,9 +110,7 @@ jobs:
         run: cmake -B build -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
                     -DCMAKE_OSX_SYSROOT=iphonesimulator \
                     -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-                    -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF \
-                    -DCMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER=com.ccev.test \
-                    -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+                    -DBUILD_TESTING=ON -DBUILD_EXAMPLES=OFF
       - name: Build test binaries (timer + sock + stream)
         run: cmake --build build --config Debug -j$(sysctl -n hw.logicalcpu) --target test_timer --target test_sock --target test_stream
       - name: Boot iOS Simulator
@@ -236,7 +234,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            for test in test_timer test_sock test_stream; do echo ""; echo "=== Running $test ==="; adb push build/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /data/local/tmp/$test; done
+            for test in test_timer test_sock test_stream; do echo ""; echo "=== Running $test ==="; adb push ${{ github.workspace }}/build/$test /data/local/tmp/; adb shell chmod +x /data/local/tmp/$test; adb shell /data/local/tmp/$test; done
 
   # ── Windows: MSVC x64 ─────────────────────────────────────
   windows-msvc-x64:

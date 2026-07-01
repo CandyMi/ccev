@@ -4,6 +4,12 @@ if(BUILD_TESTING)
     function(add_ccev_test name source)
         add_executable(${name} ${source})
         target_link_libraries(${name} PRIVATE ccev)
+        # Required for Xcode iOS/tvOS/visionOS builds — every executable
+        # bundle needs PRODUCT_BUNDLE_IDENTIFIER.  Harmless on other
+        # generators (MSBuild, Ninja, Makefiles — ignored).
+        set_target_properties(${name} PROPERTIES
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.ccev.${name}"
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
         add_test(NAME ${name} COMMAND ${name})
     endfunction()
 
