@@ -48,6 +48,8 @@ CMake will print a clear error if they are missing.
 | macos-arm64 | macOS | arm64 | AppleClang | ASAN+UBSAN |
 | ios-arm64 | macOS | arm64 (device) | AppleClang (Xcode) | — |
 | ios-simulator | macOS | x86_64 (sim) | AppleClang (Xcode) | — |
+| tvos-arm64 | macOS | arm64 (Apple TV) | AppleClang (Xcode) | — |
+| visionos-arm64 | macOS | arm64 (Vision Pro) | AppleClang (Xcode) | — |
 | android-arm64 | Ubuntu | arm64-v8a | Android NDK (Clang) | — |
 | android-armv7 | Ubuntu | armeabi-v7a | Android NDK (Clang) | — |
 | android-x86_64 | Ubuntu | x86_64 | Android NDK (Clang) | — |
