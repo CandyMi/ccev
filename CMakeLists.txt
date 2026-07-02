@@ -23,7 +23,7 @@ option(CCEV_SANITIZE  "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF
 # ── Submodule check ──
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/include/epoll/epoll.h" OR
    NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/ccalg/include/ccheap.h" OR
-   NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/ccsocket/ccsocket.h")
+   NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/ccsocket/include/ccsocket.h")
     message(FATAL_ERROR
         "Git submodules not initialized.\n"
         "  Run:  git submodule update --init --recursive\n"
@@ -46,6 +46,7 @@ else()
 endif()
 
 add_library(ccev_epoll OBJECT ${EPOLL_BACKEND})
+set_target_properties(ccev_epoll PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(ccev_epoll PRIVATE
     deps/epoll/include/epoll
     deps/epoll/include
@@ -66,12 +67,13 @@ target_compile_definitions(ccev_epoll PRIVATE EPOLL_USE_SHARED_WORKBUF=1)
 
 # ── Object library: ccsocket (cross-platform socket API) ────
 add_library(ccev_ccsocket OBJECT
-    deps/ccsocket/ccsocket.c
-    deps/ccsocket/ccdns.c
-    deps/ccsocket/ccicmp.c
+    deps/ccsocket/src/ccsocket.c
+    deps/ccsocket/src/ccdns.c
+    deps/ccsocket/src/ccicmp.c
 )
+set_target_properties(ccev_ccsocket PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(ccev_ccsocket PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccsocket>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccsocket/include>
 )
 target_compile_definitions(ccev_ccsocket PRIVATE
     CCICMP_MAX_PAYLOAD=65500
@@ -97,7 +99,7 @@ set_target_properties(ccev PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(ccev PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccsocket>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/ccsocket/include>
 )
 target_include_directories(ccev PRIVATE
     deps/ccalg/include
@@ -184,7 +186,7 @@ install(TARGETS ccev
 )
 install(FILES
     src/ccev.h
-    deps/ccsocket/ccsocket.h
+    deps/ccsocket/include/ccsocket.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 install(EXPORT ccev-targets
