@@ -8,31 +8,6 @@
 
 #include "ccev_internal.h"
 
-#if defined(__APPLE__)
-#  include <mach/mach_time.h>
-#endif
-
-uint64_t ccev__now_ms(void) {
-#if defined(_WIN32)
-    /* QueryPerformanceCounter — microsecond resolution vs GetTickCount64 (16ms) */
-    static LARGE_INTEGER freq = {0};
-    LARGE_INTEGER count;
-    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&count);
-    return (uint64_t)((count.QuadPart * 1000LL) / freq.QuadPart);
-#elif defined(__APPLE__)
-    /* macOS: mach_absolute_time() is monotonic */
-    uint64_t ns = mach_absolute_time();
-    static mach_timebase_info_data_t info = {0};
-    if (info.denom == 0) mach_timebase_info(&info);
-    return (ns * info.numer) / (info.denom * 1000000ULL);
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000L);
-#endif
-}
-
 int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
     /* Phase 1: extract all expired timers from heap into local list.
      *          Pure heap ops — no callbacks, no heap mutation after this. */

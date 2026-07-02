@@ -88,6 +88,7 @@ add_library(ccev STATIC
     src/ccev_dns.c
     src/ccev_icmp.c
     src/ccev_signal.c
+    src/ccev_poll.c
     $<TARGET_OBJECTS:ccev_epoll>
     $<TARGET_OBJECTS:ccev_ccsocket>
 )

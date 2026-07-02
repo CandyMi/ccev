@@ -1,13 +1,14 @@
 /**
  * @file ccev_sock.c
- * @brief Socket lifecycle — epoll registration, close queue, alloc/free.
+ * @brief Socket lifecycle — poll registration, close queue, alloc/free.
  *
  * @author CandyMi
  * @license MIT
  *
- * ONESHOT compensation:
- *   When EPOLLONESHOT fires, the event is consumed.  After dispatch,
- *   ccev__sock_rearm() re-registers wanted events based on sock->events.
+ * ONESHOT semantics:
+ *   The poll layer uses ONESHOT internally — every event fires once and
+ *   must be re-armed.  ccev__sock_rearm() re-registers wanted events
+ *   based on sock->events after dispatch.
  *
  * Deferred close:
  *   ccev__sock_schedule_close() moves a sock to the closing list.
@@ -22,38 +23,29 @@
  * ════════════════════════════════════════════════════════════════ */
 
 int ccev__sock_mod_internal(ccev_loop_t *loop, ccev_sock_t *sock,
-                             int epoll_events) {
+                             int poll_events) {
     if (sock->closed) return CCEV_ERR;
 
-    struct epoll_event ee;
-    memset(&ee, 0, sizeof(ee));
-    ee.events   = epoll_events | EPOLLONESHOT;
-    ee.data.ptr = sock;
+    int rc;
+    if (sock->events == 0)
+        rc = ccev__poll_add(loop->poll, sock->fd, sock, poll_events);
+    else
+        rc = ccev__poll_mod(loop->poll, sock->fd, sock, poll_events);
+    if (rc < 0) return CCEV_ERR;
 
-    int op = (sock->events == 0) ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
-
-    if (epoll_ctl(loop->epfd, op, (int)(intptr_t)sock->fd, &ee) < 0) {
-        if (op == EPOLL_CTL_ADD) {
-            op = EPOLL_CTL_MOD;
-            if (epoll_ctl(loop->epfd, op, (int)(intptr_t)sock->fd, &ee) < 0)
-                return CCEV_ERR;
-        } else {
-            return CCEV_ERR;
-        }
-    }
-    sock->events = (uint32_t)epoll_events;
+    sock->events = (uint32_t)poll_events;
     return CCEV_OK;
 }
 
 void ccev__sock_rearm(ccev_loop_t *loop, ccev_sock_t *sock) {
     if (sock->closed) return;
 
-    /* Compute desired epoll events from active callbacks.
+    /* Compute desired poll events from active callbacks.
      * This is simpler than tracking want_events separately — the
      * presence of rcb/wcb indicates interest in read/write. */
     int want = 0;
-    if (sock->rcb) want |= EPOLLIN;
-    if (sock->wcb) want |= EPOLLOUT;
+    if (sock->rcb) want |= CCEV_POLL_READ;
+    if (sock->wcb) want |= CCEV_POLL_WRITE;
 
     if (want && want != (int)sock->events) {
         ccev__sock_mod_internal(loop, sock, want);
@@ -77,9 +69,9 @@ void ccev__sock_schedule_close(ccev_loop_t *loop, ccev_sock_t *sock) {
     sock->closed     = true;
     sock->in_closing = true;
 
-    /* Remove from epoll */
+    /* Remove from poll */
     if (sock->fd != (ccsocket_t)-1) {
-        epoll_ctl(loop->epfd, EPOLL_CTL_DEL, (int)(intptr_t)sock->fd, NULL);
+        ccev__poll_del(loop->poll, sock->fd);
     }
     sock->events = 0;
 
@@ -234,7 +226,7 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
     any->listener.cb      = cb;
     any->listener.udata   = udata;
 
-    ccev__sock_mod_internal(loop, sock, EPOLLIN);
+    ccev__sock_mod_internal(loop, sock, CCEV_POLL_READ);
     return sock;
 }
 
@@ -302,7 +294,7 @@ static int _connect_try_register(ccev_sock_t *sock,
      * in ccev_loop_run calls ccsocket_is_connected to distinguish success
      * from error. */
     sock->fd = fd;
-    ccev__sock_mod_internal(sock->loop, sock, EPOLLOUT);
+    ccev__sock_mod_internal(sock->loop, sock, CCEV_POLL_WRITE);
     return 0;
 }
 

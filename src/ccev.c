@@ -5,9 +5,10 @@
  * @author CandyMi
  * @license MIT
  *
- * ONESHOT compensation:
- *   When EPOLLONESHOT fires, the event is consumed.  After dispatch,
- *   ccev__sock_rearm() re-registers wanted events based on sock->events.
+ * ONESHOT semantics:
+ *   The poll layer uses ONESHOT internally — every event fires once and
+ *   must be re-armed.  ccev__sock_rearm() re-registers wanted events
+ *   based on sock->events after dispatch.
  *
  * Deferred close:
  *   ccev__sock_schedule_close() moves a sock to the closing list.
@@ -29,16 +30,10 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     if (!loop) return NULL;
 
     memset(loop, 0, sizeof(ccev_loop_t));
-    loop->wakefds[0] = loop->wakefds[1]     = (ccsocket_t)-1;
     loop->signal_pipe[0] = loop->signal_pipe[1] = (ccsocket_t)-1;
-    loop->max_events = max_events > 0 ? max_events : 64;
 
-    loop->epfd = epoll_create(1);
-    if ((intptr_t)loop->epfd < 0) { ccev__free_fn(loop); return NULL; }
-
-    loop->events = (struct epoll_event *)ccev__realloc_fn(
-        NULL, (size_t)loop->max_events * sizeof(struct epoll_event));
-    if (!loop->events) { epoll_close(loop->epfd); ccev__free_fn(loop); return NULL; }
+    loop->poll = ccev__poll_create(max_events);
+    if (!loop->poll) { ccev__free_fn(loop); return NULL; }
 
     /* Init data structures */
     cclist_init(&loop->all_socks);
@@ -52,22 +47,6 @@ ccev_loop_t *ccev_loop_create(int max_events) {
     cchashmap_init(&loop->dns_pending, NULL, NULL);
     ccev_dns_flush(loop);
 
-    /* Wakeup pipe */
-    if (ccsocket_pipe(loop->wakefds) < 0) {
-        ccev__free_fn(loop->events);
-        epoll_close(loop->epfd);
-        ccev__free_fn(loop);
-        return NULL;
-    }
-    ccsocket_set_nonblock(loop->wakefds[1], true);
-
-    loop->wake_sock = NULL;
-    ccev_sock_t *wake = ccev_sock_create(loop, loop->wakefds[0], NULL);
-    if (wake) {
-        loop->wake_sock = wake;
-        ccev__sock_mod_internal(loop, wake, EPOLLIN);
-    }
-
     return loop;
 }
 
@@ -78,10 +57,10 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
      * the wake/signal pipes, so keep them open until callbacks finish. */
     ccev__process_closing(loop);
 
-    /* Now close the write-ends of wake/signal pipes.  The read-ends
-     * are closed below inside ccev__sock_free (wake_sock / signal_sock
-     * are freed via the all_socks loop). */
-    if (loop->wakefds[1] != (ccsocket_t)-1) ccsocket_close(loop->wakefds[1]);
+    /* Now close the write-end of the signal pipe.  The read-end is
+     * closed below inside ccev__sock_free (signal_sock is freed via
+     * the all_socks loop).  The wake pipe is owned by the poll layer
+     * and is released inside ccev__poll_destroy. */
     if (loop->signal_pipe[1] != (ccsocket_t)-1) ccsocket_close(loop->signal_pipe[1]);
 
     /* Free remaining socks (not in closing list).
@@ -146,8 +125,7 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
         ccev__free_fn(_n);
     }
 
-    ccev__free_fn(loop->events);
-    epoll_close(loop->epfd);
+    ccev__poll_destroy(loop->poll);
     ccev__free_fn(loop);
 }
 
@@ -180,7 +158,7 @@ ccev_loop_t *ccev_default_loop(void) {
      * re-arm for.  On Windows epoll emulation this can manifest as
      * lost signals. */
     sc->rcb = ccev__signal_dispatch;
-    ccev__sock_mod_internal(loop, sc, EPOLLIN);
+    ccev__sock_mod_internal(loop, sc, CCEV_POLL_READ);
 
     return loop;
 }
@@ -196,130 +174,122 @@ void ccev_loop_stop(ccev_loop_t *loop) {
  * ════════════════════════════════════════════════════════════════ */
 
 /* ════════════════════════════════════════════════════════════════
- *  Event dispatch — process all ready fds from epoll_wait
+ *  Event dispatch — per-event callback from poll layer
  *
- *  Called once per loop iteration from ccev_loop_run.  Handles
- *  wake-pipe draining, HUP/ERR close, LISTEN accept batching,
- *  CONNECT completion, and normal read/write event callbacks
- *  with ONESHOT re-arm.
+ *  Called by ccev__poll_wait for each ready fd.  Handles HUP/ERR
+ *  close, LISTEN accept batching, CONNECT completion, and normal
+ *  read/write event callbacks with ONESHOT re-arm.
+ *
+ *  The poll layer owns the wake pipe and drains it internally —
+ *  this callback never sees wake events.
  * ════════════════════════════════════════════════════════════════ */
 
-static void _dispatch_events(ccev_loop_t *loop, int n) {
-    for (int i = 0; i < n; i++) {
-        struct epoll_event *ev = &loop->events[i];
-        ccev_sock_t *sock = (ccev_sock_t *)ev->data.ptr;
-        if (!sock || sock->closed) continue;
+static void _dispatch_one(struct ccev_poll_event *ev, void *arg) {
+    ccev_loop_t *loop = (ccev_loop_t *)arg;
+    ccev_sock_t *sock = (ccev_sock_t *)ev->udata;
+    if (!sock || sock->closed) return;
 
-        uint32_t fired = ev->events;
+    int fired = ev->events;
 
-        /* Wakeup pipe — drain */
-        if (sock == loop->wake_sock) {
-            char buf[64];
-            while (ccsocket_recv(sock->fd, buf, sizeof(buf), NULL) == CC_OPCODE_OK) {}
-            continue;
-        }
+    /* Convert poll events to CCEV_EVENT flags */
+    int ccev_events = 0;
+    if (fired & CCEV_POLL_READ)  ccev_events |= CCEV_EVENT_READ;
+    if (fired & CCEV_POLL_WRITE) ccev_events |= CCEV_EVENT_WRITE;
+    if (fired & (CCEV_POLL_ERR | CCEV_POLL_HUP))
+        ccev_events |= CCEV_EVENT_HUP;
 
-        /* Convert epoll events to CCEV_EVENT flags */
-        int ccev_events = 0;
-        if (fired & EPOLLIN)  ccev_events |= CCEV_EVENT_READ;
-        if (fired & EPOLLOUT) ccev_events |= CCEV_EVENT_WRITE;
-        if (fired & (EPOLLERR | EPOLLHUP))
-            ccev_events |= CCEV_EVENT_HUP;
-
-        /* HUP/ERR — handle by socket mode.
-         *   CONNECT: probe connection state, fire connect_cb, then close.
-         *   INIT:    deliver HUP via rcb so user can read final data, then close.
-         *   LISTEN:  just close. */
-        if (ccev_events & CCEV_EVENT_HUP) {
-            if (sock->mode == CCEV_SOCK_CONNECT) {
-                ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
-                ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
-                if (any->connector.cb)
-                    any->connector.cb(any->connector.udata, sock,
-                                       st == CC_CONNECTED ? CCEV_OK : CCEV_ERR);
-                ccev__sock_schedule_close(loop, sock);
-                continue;
-            }
-            if (sock->mode == CCEV_SOCK_INIT) {
-                sock->events = 0;
-                if (sock->rcb) sock->rcb(sock, ccev_events);
-                ccev__sock_schedule_close(loop, sock);
-                continue;
-            }
-            /* LISTEN (or unknown) — just close */
+    /* HUP/ERR — handle by socket mode.
+     *   CONNECT: probe connection state, fire connect_cb, then close.
+     *   INIT:    deliver HUP via rcb so user can read final data, then close.
+     *   LISTEN:  just close. */
+    if (ccev_events & CCEV_EVENT_HUP) {
+        if (sock->mode == CCEV_SOCK_CONNECT) {
+            ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
+            ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
+            if (any->connector.cb)
+                any->connector.cb(any->connector.udata, sock,
+                                   st == CC_CONNECTED ? CCEV_OK : CCEV_ERR);
             ccev__sock_schedule_close(loop, sock);
-            continue;
+            return;
         }
+        if (sock->mode == CCEV_SOCK_INIT) {
+            sock->events = 0;
+            if (sock->rcb) sock->rcb(sock, ccev_events);
+            ccev__sock_schedule_close(loop, sock);
+            return;
+        }
+        /* LISTEN (or unknown) — just close */
+        ccev__sock_schedule_close(loop, sock);
+        return;
+    }
 
-        /* Reset registered events (ONESHOT consumed them) */
-        sock->events = 0;
+    /* Reset registered events (ONESHOT consumed them) */
+    sock->events = 0;
 
-        /* Dispatch by mode */
-        if (fired & EPOLLIN) {
-            if (sock->mode == CCEV_SOCK_LISTEN) {
-                /* Listener — batch accept */
-                int count = 0;
-                while (count < CCEV_MAX_ACCEPT_BATCH) {
-                    char addr_buf[64];
-                    uint16_t port = 0;
-                    ccsocket_t afd = ccsocket_accept2(sock->fd, addr_buf, &port, 0);
-                    if (afd == (ccsocket_t)0) break;   /* EAGAIN */
-                    if (afd == (ccsocket_t)-1) break;  /* error */
-                    ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
-                    if (any->listener.cb) {
-                        ccev_sock_t *client = ccev_sock_create(loop, afd, NULL);
-                        if (client) {
-                            any->listener.cb(any->listener.udata,
-                                              client, addr_buf, (int)port);
-                        } else {
-                            ccsocket_close(afd);
-                        }
+    /* Dispatch by mode */
+    if (fired & CCEV_POLL_READ) {
+        if (sock->mode == CCEV_SOCK_LISTEN) {
+            /* Listener — batch accept */
+            int count = 0;
+            while (count < CCEV_MAX_ACCEPT_BATCH) {
+                char addr_buf[64];
+                uint16_t port = 0;
+                ccsocket_t afd = ccsocket_accept2(sock->fd, addr_buf, &port, 0);
+                if (afd == (ccsocket_t)0) break;   /* EAGAIN */
+                if (afd == (ccsocket_t)-1) break;  /* error */
+                ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
+                if (any->listener.cb) {
+                    ccev_sock_t *client = ccev_sock_create(loop, afd, NULL);
+                    if (client) {
+                        any->listener.cb(any->listener.udata,
+                                          client, addr_buf, (int)port);
                     } else {
                         ccsocket_close(afd);
                     }
-                    count++;
-                }
-                ccev__sock_mod_internal(loop, sock, EPOLLIN);
-                continue;
-            }
-
-            /* Normal read — fire rcb */
-            if (sock->rcb) sock->rcb(sock, ccev_events);
-        }
-
-        if (fired & EPOLLOUT) {
-            if (sock->mode == CCEV_SOCK_CONNECT) {
-                /* Connect completion — pure EPOLLOUT (no HUP) means the
-                 * connect operation has finished.  Use ccsocket_is_connected
-                 * for a cross-platform read-only probe (SO_ERROR + getpeername
-                 * on POSIX, connect(s,NULL,0) on Windows). */
-                ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
-                ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
-                if (st == CC_CONNECTED) {
-                    sock->mode = CCEV_SOCK_INIT;
-                    /* Clear connect timer */
-                    if (any->connector.timer) {
-                        ccev_timer_del(loop, any->connector.timer);
-                        any->connector.timer = NULL;
-                    }
-                    if (any->connector.cb)
-                        any->connector.cb(any->connector.udata, sock, CCEV_OK);
                 } else {
-                    if (any->connector.cb)
-                        any->connector.cb(any->connector.udata, sock, CCEV_ERR);
-                    ccev__sock_schedule_close(loop, sock);
+                    ccsocket_close(afd);
                 }
-                continue;
+                count++;
             }
-
-            /* Normal write — fire wcb */
-            if (sock->wcb) sock->wcb(sock, ccev_events);
+            ccev__sock_mod_internal(loop, sock, CCEV_POLL_READ);
+            return;
         }
 
-        /* Re-arm after ONESHOT consumption */
-        if (sock->rcb || sock->wcb)
-            ccev__sock_rearm(loop, sock);
+        /* Normal read — fire rcb */
+        if (sock->rcb) sock->rcb(sock, ccev_events);
     }
+
+    if (fired & CCEV_POLL_WRITE) {
+        if (sock->mode == CCEV_SOCK_CONNECT) {
+            /* Connect completion — pure POLL_WRITE (no HUP) means the
+             * connect operation has finished.  Use ccsocket_is_connected
+             * for a cross-platform read-only probe. */
+            ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
+            ccsocket_conn_state_t st = ccsocket_is_connected(sock->fd);
+            if (st == CC_CONNECTED) {
+                sock->mode = CCEV_SOCK_INIT;
+                /* Clear connect timer */
+                if (any->connector.timer) {
+                    ccev_timer_del(loop, any->connector.timer);
+                    any->connector.timer = NULL;
+                }
+                if (any->connector.cb)
+                    any->connector.cb(any->connector.udata, sock, CCEV_OK);
+            } else {
+                if (any->connector.cb)
+                    any->connector.cb(any->connector.udata, sock, CCEV_ERR);
+                ccev__sock_schedule_close(loop, sock);
+            }
+            return;
+        }
+
+        /* Normal write — fire wcb */
+        if (sock->wcb) sock->wcb(sock, ccev_events);
+    }
+
+    /* Re-arm after ONESHOT consumption */
+    if (sock->rcb || sock->wcb)
+        ccev__sock_rearm(loop, sock);
 }
 
 int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
@@ -361,23 +331,17 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
             timeout = next_ms;
         }
 
-        /* 3. epoll_wait (retry on EINTR — don't re-enter loop body) */
-        do {
-            n = epoll_wait(loop->epfd, loop->events, loop->max_events, timeout);
-        } while (n < 0 && errno == EINTR);
+        /* 3. Poll wait + per-event dispatch (retry on EINTR handled
+         *    internally by ccev__poll_wait).  Wake pipe is drained
+         *    internally by the poll layer — the callback never sees it. */
+        n = ccev__poll_wait(loop->poll, timeout, _dispatch_one, loop);
+        if (n < 0) n = 0;  /* epoll_wait error — treat as no events */
 
-        /* 4. Dispatch events — extracted to _dispatch_events */
-        _dispatch_events(loop, n);
-
-        /* 5. Re-arm wake_sock for next ccev_wakeup / ccev_loop_stop */
-        if (loop->wake_sock && !loop->wake_sock->closed)
-            ccev__sock_mod_internal(loop, loop->wake_sock, EPOLLIN);
-
-        /* 6. Process closing queue */
+        /* 4. Process closing queue */
         ccev__process_closing(loop);
 
-        /* 7. Drain pending signal queue (filled by pipe rcb in
-         *    _dispatch_events — same path on both platforms). */
+        /* 5. Drain pending signal queue (filled by pipe rcb in
+         *    _dispatch_one — same path on both platforms). */
         ccev__signal_process_queue(loop);
 
         if (ccev_atomic_load(loop->stop_flag)) break;
@@ -409,8 +373,7 @@ int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb) {
 
 int ccev_wakeup(ccev_loop_t *loop) {
     if (!loop) return CCEV_ERR;
-    if (loop->wakefds[1] == (ccsocket_t)-1) return CCEV_ERR;
-    char c = 1;
-    return (ccsocket_send(loop->wakefds[1], &c, 1, NULL) == CC_OPCODE_OK)
-           ? CCEV_OK : CCEV_ERR;
+    if (!loop->poll) return CCEV_ERR;
+    ccev__poll_wake(loop->poll);
+    return CCEV_OK;
 }
