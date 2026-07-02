@@ -313,12 +313,12 @@ TEST(count_after_create) {
     ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
     ccev_loop_t *loop = ccev_loop_create(64);
-    /* Loop creates internal wake_sock, so count starts at 1 */
-    ASSERT(ccev_sock_count(loop) == 1);
+    /* Poll layer owns wake pipe internally — no wake_sock */
+    ASSERT(ccev_sock_count(loop) == 0);
 
     ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
     ASSERT(sock != NULL);
-    ASSERT(ccev_sock_count(loop) == 2);
+    ASSERT(ccev_sock_count(loop) == 1);
 
     ccev_sock_close(sock);
     ccev_loop_destroy(loop);

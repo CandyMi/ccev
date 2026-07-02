@@ -14,7 +14,7 @@
 
 #include "ccev.h"
 #include "ccsocket.h"
-#include "epoll/epoll.h"
+#include "ccev_poll.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -41,7 +41,7 @@ typedef int socklen_t;
 #  include <unistd.h>
 #endif
 
-/* struct timespec (used by ccev__now_ms on Linux/POSIX) */
+/* struct timespec (used by time-related internals) */
 #include <time.h>
 
 /* ── Compiler barrier (prevents reordering around volatile/atomic ops) ── */
@@ -188,7 +188,7 @@ struct ccev_sock_s {
 
     /* ── 4-byte fields ── */
     ccsocket_t         fd;         /**< Underlying file descriptor       */
-    uint32_t           events;     /**< epoll currently registered events*/
+    uint32_t           events;     /**< CCEV_POLL flags currently armed*/
     uint32_t           mode;       /**< ccev_sock_mode_t                 */
 
     /* ── Flags (pack as 1+1 with 2-byte padding) ── */
@@ -367,10 +367,8 @@ typedef struct ccev_signal_event_s {
  * ════════════════════════════════════════════════════════════════ */
 
 struct ccev_loop_s {
-    /* ── epoll instance ── */
-    HANDLE              epfd;        /**< epoll fd (per epoll.h types)  */
-    int                 max_events;  /**< epoll_wait() event cap         */
-    struct epoll_event *events;      /**< epoll_wait() result array      */
+    /* ── Poll instance (platform-independent event notification) ── */
+    ccev_poll_t        *poll;        /**< Platform-independent poll obj  */
 #ifdef CCEV_USE_ATOMIC
     atomic_int           stop_flag; /**< Atomic stop flag (C11)         */
 #else
@@ -405,10 +403,6 @@ struct ccev_loop_s {
 #  define ccev_atomic_load(p)             \
     (CCEV_ACQUIRE_BARRIER(), (p))
 #endif
-
-    /* ── Wakeup pipe ── */
-    ccsocket_t          wakefds[2];  /**< Self-pipe for async wakeup    */
-    ccev_sock_t        *wake_sock;   /**< Wrapper for wakeup fd         */
 
     /* ── Socket table ── */
     cclist_t            all_socks;   /**< All socks (for iteration)     */
@@ -445,9 +439,9 @@ struct ccev_loop_s {
 
 /* ── sock core (ccev_sock.c) ── */
 
-/** Internal epoll_ctl wrapper (always ONESHOT). */
+/** Internal poll registration wrapper (always ONESHOT internally). */
 int ccev__sock_mod_internal(ccev_loop_t *loop, ccev_sock_t *sock,
-                             int epoll_events);
+                             int poll_events);
 
 /** Re-arm logic — re-register events consumed by ONESHOT. */
 void ccev__sock_rearm(ccev_loop_t *loop, ccev_sock_t *sock);
@@ -480,8 +474,7 @@ void ccev__signal_process_queue(ccev_loop_t *loop);
 /** Process expired timers. */
 int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
 
-/** Monotonic clock in milliseconds. */
-uint64_t ccev__now_ms(void);
+/* ccev__now_ms() declared in ccev_poll.h — shared by poll, timer, DNS, ICMP */
 
 /* ── DNS (ccev_dns.c) ── */
 

@@ -94,9 +94,9 @@ TEST(loop_create_oom_first_alloc) {
     ccev_set_allocator(NULL, NULL);
 }
 
-TEST(loop_create_oom_events_array) {
-    /* Fail on second allocation (events array) — loop struct was allocated.
-     * ccev_loop_create must free the partially-constructed loop. */
+TEST(loop_create_oom_poll_struct) {
+    /* Fail on second allocation (poll struct inside ccev__poll_create).
+     * Loop struct was allocated — ccev_loop_create must free it. */
     oom_set_fail_at(1);
     ccev_set_allocator(oom_realloc, oom_free);
 
@@ -107,18 +107,16 @@ TEST(loop_create_oom_events_array) {
     ccev_set_allocator(NULL, NULL);
 }
 
-TEST(loop_create_oom_wake_sock) {
-    /* Fail on third allocation (wake_sock via ccev_sock_create).
-     * Loop struct + events already allocated — ccev_loop_create must
-     * survive with a NULL wake_sock and clean up properly. */
+TEST(loop_create_oom_events_array) {
+    /* Fail on third allocation (events array inside ccev__poll_create).
+     * Loop struct + poll struct already allocated — ccev__poll_create
+     * must clean up the partially-constructed poll instance. */
     oom_set_fail_at(2);
     ccev_set_allocator(oom_realloc, oom_free);
 
     ccev_loop_t *loop = ccev_loop_create(64);
-    /* wake_sock is optional — loop still works, just no wakeup support */
-    ASSERT(loop != NULL);
+    ASSERT(loop == NULL);
 
-    ccev_loop_destroy(loop);
     oom_reset();
     ccev_set_allocator(NULL, NULL);
 }
@@ -363,7 +361,7 @@ int main(void) {
     printf("  loop:\n");
     RUN(loop_create_oom_first_alloc);
     RUN(loop_create_oom_events_array);
-    RUN(loop_create_oom_wake_sock);
+    RUN(loop_create_oom_poll_struct);
 
     printf("  sock:\n");
     RUN(sock_create_oom);
