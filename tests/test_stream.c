@@ -30,11 +30,7 @@ static void timer_stop_loop(void *udata) {
 }
 
 static int pair_create(ccsocket_t sv[2]) {
-#ifdef _WIN32
-    (void)sv; return -1;
-#else
     return ccsocketpair(sv, CC_NOFLAG) ? 0 : -1;
-#endif
 }
 
 /* ═══ ccev_stream_open / close ────────────────────── */
