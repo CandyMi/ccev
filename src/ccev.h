@@ -186,7 +186,11 @@ typedef void (*ccev_signal_cb)(void *udata, int signum);
 /** @brief Per-iteration callback.  Fires once at the end of each
  *  event-loop iteration, after dispatch and closing queue processing.
  *  @param loop  The event-loop instance. */
-typedef void (*ccev_loop_each_cb)(ccev_loop_t *loop);
+/** @brief Per-iteration callback.  Fires once at the end of each
+ *  event-loop iteration, after dispatch and closing queue processing.
+ *  @param loop  The event-loop instance.
+ *  @param args  User-defined pointer passed to ccev_each(). */
+typedef void (*ccev_loop_each_cb)(ccev_loop_t *loop, void *args);
 
 /* ════════════════════════════════════════════════════════════════
  *  Enumerations & flag constants
@@ -653,8 +657,9 @@ int ccev_signal_ignore(int signum);
  *
  *  @param loop  Event-loop handle.
  *  @param cb    Callback, or NULL to clear.
+ *  @param args  User-defined pointer forwarded to cb on each iteration.
  *  @return CCEV_OK or CCEV_ERR (NULL loop). */
-int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb);
+int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb, void *args);
 
 #ifdef __cplusplus
 }

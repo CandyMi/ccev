@@ -473,7 +473,8 @@ static int  each_cb_fired;
 static int  each_cb_count;
 static ccev_loop_t *each_loop;
 
-static void each_stop_cb(ccev_loop_t *loop) {
+static void each_stop_cb(ccev_loop_t *loop, void *args) {
+    (void)args;
     each_cb_fired = 1;
     ccev_loop_stop(loop);
 }
@@ -485,7 +486,8 @@ static void each_drive_cb(void *udata) {
     (void)udata;
 }
 
-static void each_count_cb(ccev_loop_t *loop) {
+static void each_count_cb(ccev_loop_t *loop, void *args) {
+    (void)args;
     each_cb_count++;
     if (each_cb_count >= 3)
         ccev_loop_stop(loop);
@@ -497,7 +499,7 @@ TEST(each_cb_fires_at_least_once) {
     each_loop    = loop;
     each_cb_fired = 0;
 
-    ASSERT(ccev_each(loop, each_stop_cb) == CCEV_OK);
+    ASSERT(ccev_each(loop, each_stop_cb, NULL) == CCEV_OK);
 
     /* Safety timer — should not fire since the each_cb stops the loop */
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE,
@@ -515,7 +517,7 @@ TEST(each_cb_fires_multiple_iterations) {
     each_loop     = loop;
     each_cb_count = 0;
 
-    ASSERT(ccev_each(loop, each_count_cb) == CCEV_OK);
+    ASSERT(ccev_each(loop, each_count_cb, NULL) == CCEV_OK);
 
     /* Add a repeat timer (1ms, no-op callback) to drive the loop for
      * multiple iterations without blocking on epoll_wait.  The timer
@@ -539,8 +541,8 @@ TEST(each_clear_with_null) {
     each_cb_fired = 0;
 
     /* Register, then clear */
-    ASSERT(ccev_each(loop, each_stop_cb) == CCEV_OK);
-    ASSERT(ccev_each(loop, NULL) == CCEV_OK);
+    ASSERT(ccev_each(loop, each_stop_cb, NULL) == CCEV_OK);
+    ASSERT(ccev_each(loop, NULL, NULL) == CCEV_OK);
 
     /* Add a timer that will stop the loop — without a registered each_cb,
      * the loop will iterate when the timer fires. */
@@ -555,7 +557,7 @@ TEST(each_clear_with_null) {
 }
 
 TEST(each_null_loop_returns_err) {
-    ASSERT(ccev_each(NULL, each_stop_cb) == CCEV_ERR);
+    ASSERT(ccev_each(NULL, each_stop_cb, NULL) == CCEV_ERR);
     passed++;
 }
 
@@ -566,8 +568,8 @@ TEST(each_replace) {
     each_cb_fired = 0;
 
     /* Register a dummy, then replace with the real one */
-    ccev_each(loop, each_count_cb);  /* deliberate, ignore return */
-    ASSERT(ccev_each(loop, each_stop_cb) == CCEV_OK);
+    ccev_each(loop, each_count_cb, NULL);  /* deliberate, ignore return */
+    ASSERT(ccev_each(loop, each_stop_cb, NULL) == CCEV_OK);
 
     each_loop    = loop;
     each_cb_fired = 0;

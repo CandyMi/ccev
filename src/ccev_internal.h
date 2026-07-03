@@ -422,6 +422,7 @@ struct ccev_loop_s {
 
     /* ── Per-iteration callback (optional, set via ccev_each) ── */
     ccev_loop_each_cb   ecb;
+    void               *ecb_args;
 
     /* ── Signal handling (default loop only) ── */
     ccsocket_t          signal_pipe[2];

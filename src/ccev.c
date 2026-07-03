@@ -304,7 +304,7 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         /* 0. Per-iteration callback (runs first each iteration).
          *     Registered via ccev_each().  When ecb is NULL (the common
          *     case) the branch is predicted not-taken — zero cost. */
-        if (loop->ecb) loop->ecb(loop);
+        if (loop->ecb) loop->ecb(loop, loop->ecb_args);
 
         /* P1: skip clock_gettime when no timers are registered.
          *     ccev__now_ms() is a vdso call on Linux (~30ns) but a full
@@ -359,9 +359,10 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
  *  Per-iteration callback
  * ════════════════════════════════════════════════════════════════ */
 
-int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb) {
+int ccev_each(ccev_loop_t *loop, ccev_loop_each_cb cb, void *args) {
     if (!loop) return CCEV_ERR;
-    loop->ecb = cb;
+    loop->ecb      = cb;
+    loop->ecb_args = cb ? args : NULL;
     return CCEV_OK;
 }
 
