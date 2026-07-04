@@ -301,14 +301,8 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     int n = 0;
 
     do {
-        /* 0. Per-iteration callback (runs first each iteration).
-         *     Registered via ccev_each().  When ecb is NULL (the common
-         *     case) the branch is predicted not-taken — zero cost. */
-        if (loop->ecb) loop->ecb(loop, loop->ecb_args);
-
-        /* P1: skip clock_gettime when no timers are registered.
-         *     ccev__now_ms() is a vdso call on Linux (~30ns) but a full
-         *     syscall on older kernels/containers. */
+        /* 0. Process expired timers — runs before ecb so ecb sees
+         *    the state after timer callbacks have fired. */
         int next_ms;
         uint64_t now;
         if (loop->timer_count > 0) {
@@ -319,19 +313,40 @@ int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
         }
         if (ccev_atomic_load(loop->stop_flag)) break;
 
-        /* 2. Compute epoll timeout
+        /* 1. Per-iteration callback.
+         *    Runs after timer-processing so ecb sees fired timers.
+         *    ecb may add new timers — next_ms is re-evaluated below. */
+        if (loop->ecb) loop->ecb(loop, loop->ecb_args);
+        if (ccev_atomic_load(loop->stop_flag)) break;
+
+        /* 2. Re-evaluate next_ms after ecb run — ecb may have added
+         *    timers that should affect the epoll timeout. */
+        if (loop->timer_count > 0) {
+            now = ccev__now_ms();
+            next_ms = ccev__timer_process(loop, now);
+        } else {
+            next_ms = -1;
+        }
+        if (ccev_atomic_load(loop->stop_flag)) break;
+
+        /* 3. Compute epoll timeout
          *    RUN_ONCE → 0 (poll);  timer pending → next_ms;
+         *    ecb present but no timers → 0 (never block — ecb needs
+         *    control each iteration; without this, timeout=-1 would
+         *    block forever and ecb would never run again);
          *    otherwise → -1 (block until I/O). */
         int timeout;
         if (mode == CCEV_RUN_ONCE) {
             timeout = 0;
-        } else if (next_ms < 0) {
-            timeout = -1;
-        } else {
+        } else if (next_ms >= 0) {
             timeout = next_ms;
+        } else if (loop->ecb) {
+            timeout = 0;
+        } else {
+            timeout = -1;
         }
 
-        /* 3. Poll wait + per-event dispatch (retry on EINTR handled
+        /* 4. Poll wait + per-event dispatch (retry on EINTR handled
          *    internally by ccev__poll_wait).  Wake pipe is drained
          *    internally by the poll layer — the callback never sees it. */
         n = ccev__poll_wait(loop->poll, timeout, _dispatch_one, loop);
