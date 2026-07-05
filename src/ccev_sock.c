@@ -66,6 +66,18 @@ void ccev__sock_free(ccev_sock_t *sock) {
 
 void ccev__sock_schedule_close(ccev_loop_t *loop, ccev_sock_t *sock) {
     if (sock->closed || sock->in_closing) return;
+
+    /* Delete connect timer for CONNECT-mode sockets — prevents
+     * double-callback when a connect timeout fires after an error or
+     * user-initiated close has already terminated the connection. */
+    if (sock->mode == CCEV_SOCK_CONNECT) {
+        ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
+        if (any->connector.timer) {
+            ccev_timer_del(loop, any->connector.timer);
+            any->connector.timer = NULL;
+        }
+    }
+
     sock->closed     = true;
     sock->in_closing = true;
 
@@ -305,28 +317,26 @@ static void _connect_dns_cb(void *udata, const char *address, int status) {
 
     ccev_sock_t *sock = &any->sock;
     any->connector.dns_alive = false;
-    if (status != CCEV_OK || !address || address[0] == '\0') {
-        if (any->connector.cb)
-            any->connector.cb(any->connector.udata, sock, CCEV_ERR);
-        ccev__sock_schedule_close(sock->loop, sock);
-        return;
-    }
+    if (status != CCEV_OK || !address || address[0] == '\0')
+        goto err;
 
     ccsocket_family_t family = ccsocket_get_version(address);
-    if (family == CC_FAMILY_INVALID) {
-        if (any->connector.cb)
-            any->connector.cb(any->connector.udata, sock, CCEV_ERR);
-        ccev__sock_schedule_close(sock->loop, sock);
-        return;
-    }
+    if (family == CC_FAMILY_INVALID)
+        goto err;
 
     int rc = _connect_try_register(sock, family, address, any->connector.port);
-    if (rc < 0) {
-        if (any->connector.cb)
-            any->connector.cb(any->connector.udata, sock, CCEV_ERR);
-        ccev__sock_schedule_close(sock->loop, sock);
-        return;
+    if (rc < 0)
+        goto err;
+    return;
+
+err:
+    if (any->connector.timer) {
+        ccev_timer_del(sock->loop, any->connector.timer);
+        any->connector.timer = NULL;
     }
+    if (any->connector.cb)
+        any->connector.cb(any->connector.udata, sock, CCEV_ERR);
+    ccev__sock_schedule_close(sock->loop, sock);
 }
 
 /* ── Public connect API ── */

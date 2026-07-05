@@ -410,6 +410,123 @@ TEST(connect_timeout_before_dns_resolves) {
     ccev_loop_destroy(loop);
 }
 
+/* ═══ User close before connect completes (R4.3 UAF guard) ── */
+
+static int   cbc_flag;
+static int   cbc_connect_count;
+static int   cbc_close_count;
+static ccev_loop_t *cbc_loop;
+
+static void cbc_on_close(void *udata) {
+    (void)udata;
+    cbc_close_count++;
+}
+
+static void cbc_on_connect(void *udata, ccev_sock_t *sock, int status) {
+    (void)udata; (void)sock; (void)status;
+    cbc_connect_count++;
+    ccev_loop_stop(cbc_loop);
+}
+
+TEST(connect_close_before_complete) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    cbc_loop          = loop;
+    cbc_flag          = 0;
+    cbc_connect_count = 0;
+    cbc_close_count   = 0;
+
+    /* Point DNS to non-routable address so resolution requires a query */
+    ccev_dns_set_server(loop, "198.51.100.1", 53);
+
+    ccev_sock_t *conn = ccev_connect(loop, "close-before-connect.test", 8080,
+                                      5000, 0,
+                                      cbc_on_connect, loop);
+    ASSERT(conn != NULL);
+
+    /* User closes the socket before any connect event arrives.
+     * The fix must delete the connect timer so it never fires
+     * on freed memory. */
+    ccev_sock_set_close_cb(conn, cbc_on_close, NULL);
+    ccev_sock_close(conn);
+
+    /* Run the loop — before the fix this would trigger
+     * _connect_timeout_cb on freed memory (UAF). */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+
+    /* Connect callback should NOT fire (socket was closed before
+     * any connect outcome).  Close callback should fire once. */
+    ASSERT(cbc_connect_count == 0);
+    ASSERT(cbc_close_count  == 1);
+
+    ccev_loop_destroy(loop);
+}
+
+/* ═══ DNS resolve fails → connect timer must not fire again ── */
+
+TEST(connect_dns_fail_no_double_cb) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ctdr_loop   = loop;
+    ctdr_flag   = 0;
+    ctdr_status = -99;
+
+    /* Point DNS to localhost:53 (likely no server running) so the
+     * DNS query fails quickly (ICMP Port Unreachable or timeout). */
+    ccev_dns_set_server(loop, "127.0.0.1", 53);
+
+    ccev_sock_t *conn = ccev_connect(loop, "dns-fail-double-cb.test", 8080,
+                                      2000, 0,
+                                      ctdr_on_connect, loop);
+    ASSERT(conn != NULL);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    /* DNS callback fires once (via _connect_dns_cb with error).
+     * Connect timer must be deleted by schedule_close so it never
+     * fires a second callback. */
+    ASSERT(ctdr_flag   == 1);
+    ASSERT(ctdr_status == CCEV_ERR);
+
+    /* Drain — no crash = the connect timer was properly deleted */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+
+    ccev_loop_destroy(loop);
+}
+
+/* ═══ Connect refused (EPOLLERR) → timer must not fire again ── */
+
+TEST(connect_refused_no_double_cb) {
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ctdr_loop   = loop;
+    ctdr_flag   = 0;
+    ctdr_status = -99;
+
+    /* Connect to port 1 on localhost — no service listens there,
+     * so the non-blocking connect should fail immediately via
+     * EPOLLERR|EPOLLHUP, firing connect_cb(ERR) from the dispatch
+     * HUP branch.  The fix ensures schedule_close deletes the
+     * connect timer. */
+    ccev_sock_t *conn = ccev_connect(loop, "127.0.0.1", 1,
+                                      5000, 0,
+                                      ctdr_on_connect, loop);
+    ASSERT(conn != NULL);
+
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+
+    ASSERT(ctdr_flag   == 1);
+    ASSERT(ctdr_status == CCEV_ERR);
+
+    /* Drain — no crash = timer deleted */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+
+    ccev_loop_destroy(loop);
+}
+
 /* ═══ ccev_listen + ccev_connect (end-to-end) ─────── */
 
 static int  listen_accept_flag;
@@ -635,6 +752,15 @@ int main(void) {
 
     /* connect timeout + DNS race */
     RUN(connect_timeout_before_dns_resolves);
+
+    /* connect close before DNS completes (UAF guard) */
+    RUN(connect_close_before_complete);
+
+    /* connect: DNS failure must not cause double callback */
+    RUN(connect_dns_fail_no_double_cb);
+
+    /* connect: EPOLLERR must not cause double callback */
+    RUN(connect_refused_no_double_cb);
 
     /* listen + connect */
     RUN(listen_then_connect);
