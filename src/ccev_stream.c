@@ -489,6 +489,12 @@ ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
 void ccev__stream_cleanup(ccev_stream_t *st) {
     if (!st) return;
 
+    /* LISTENER and CONNECT sockets share the same union; their
+     * stream fields are zero-initialized, not valid stream state.
+     * Closing the listener via ccev_stream_close should not enter
+     * stream resource cleanup. */
+    if (st->sock.mode != CCEV_SOCK_INIT) return;
+
     /* Free write buffers */
     while (!cclink_empty(&st->wlist)) {
         cclink_node_t *bn = cclink_begin(&st->wlist);
@@ -498,7 +504,7 @@ void ccev__stream_cleanup(ccev_stream_t *st) {
     }
 
     /* Close sendfile fd if in progress */
-    if (st->sendfile_fd >= 0) {
+    if (st->sendfile_fd > 0) {
         close(st->sendfile_fd);
         st->sendfile_fd = -1;
     }

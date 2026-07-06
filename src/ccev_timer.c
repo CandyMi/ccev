@@ -50,12 +50,16 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
     }
 
     /* Phase 3: return ms until next future timer (-1 if none). */
+    return ccev__timer_next_ms(loop, ccev__now_ms());
+}
+
+int ccev__timer_next_ms(ccev_loop_t *loop, uint64_t now_ms) {
+    if (loop->timer_count == 0) return -1;
     ccheap_node_t *earliest = ccheap_peek(&loop->timers);
     if (!earliest) return -1;
     uint64_t t = ccheap_node_get(earliest, timeout);
-    uint64_t now = ccev__now_ms();
-    if (t <= now) return 0;
-    uint64_t diff = t - now;
+    if (t <= now_ms) return 0;
+    uint64_t diff = t - now_ms;
     return (diff > (uint64_t)INT_MAX) ? -1 : (int)diff;
 }
 

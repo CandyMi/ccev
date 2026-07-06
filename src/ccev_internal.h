@@ -475,6 +475,10 @@ void ccev__signal_process_queue(ccev_loop_t *loop);
 /** Process expired timers. */
 int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms);
 
+/** Peek next timer expiry without firing callbacks.
+ *  Returns ms until next timer, 0 if already expired, -1 if none. */
+int ccev__timer_next_ms(ccev_loop_t *loop, uint64_t now_ms);
+
 /* ccev__now_ms() declared in ccev_poll.h — shared by poll, timer, DNS, ICMP */
 
 /* ── DNS (ccev_dns.c) ── */

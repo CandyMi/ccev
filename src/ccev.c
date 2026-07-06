@@ -294,78 +294,75 @@ static void _dispatch_one(struct ccev_poll_event *ev, void *arg) {
 
 int ccev_loop_run(ccev_loop_t *loop, ccev_run_mode_t mode) {
     if (!loop) return CCEV_ERR;
-    /* Honour any stop request that was set before entering the loop
-     * (e.g. from a synchronous DNS or ICMP callback).
-     * ccev_atomic_load embeds the acquire barrier internally. */
     if (ccev_atomic_load(loop->stop_flag)) return 0;
     int n = 0;
 
     do {
-        /* 0. Process expired timers — runs before ecb so ecb sees
-         *    the state after timer callbacks have fired. */
-        int next_ms;
-        uint64_t now;
-        if (loop->timer_count > 0) {
-            now = ccev__now_ms();
-            next_ms = ccev__timer_process(loop, now);
-        } else {
-            next_ms = -1;
-        }
+        /* Drain all pending callbacks until stable.
+         * ecb, signal, timer, and closing callbacks can all produce
+         * sub-events (close → closing, timer_add, chain close, ...).
+         * Loop repeatedly until nothing remains, then block in poll. */
+        bool pending;
+        do {
+            pending = false;
+
+            /* ecb: dispatcher, runs first each inner iteration.
+             * Does not set pending directly — its sub-events are
+             * detected by signal/timer/closing steps below. */
+            if (loop->ecb) {
+                loop->ecb(loop, loop->ecb_args);
+            }
+            if (ccev_atomic_load(loop->stop_flag)) break;
+
+            /* Drain signal queue — signal_cb may close sockets. */
+            if (!cclink_empty(&loop->signal_queue)) {
+                ccev__signal_process_queue(loop);
+                pending = true;
+            }
+            if (ccev_atomic_load(loop->stop_flag)) break;
+
+            /* Fire expired timers — timer_cb may close or add timers. */
+            {
+                uint64_t now = ccev__now_ms();
+                if (ccev__timer_next_ms(loop, now) == 0) {
+                    ccev__timer_process(loop, now);
+                    pending = true;
+                }
+            }
+            if (ccev_atomic_load(loop->stop_flag)) break;
+
+            /* Drain closing queue — close_cb may chain-close. */
+            if (!cclist_empty(&loop->closing)) {
+                ccev__process_closing(loop);
+                pending = true;
+            }
+            if (ccev_atomic_load(loop->stop_flag)) break;
+
+        } while (pending);
+
         if (ccev_atomic_load(loop->stop_flag)) break;
 
-        /* 1. Per-iteration callback.
-         *    Runs after timer-processing so ecb sees fired timers.
-         *    ecb may add new timers — next_ms is re-evaluated below. */
-        if (loop->ecb) loop->ecb(loop, loop->ecb_args);
-        if (ccev_atomic_load(loop->stop_flag)) break;
-
-        /* 2. Re-evaluate next_ms after ecb run — ecb may have added
-         *    timers that should affect the epoll timeout. */
-        if (loop->timer_count > 0) {
-            now = ccev__now_ms();
-            next_ms = ccev__timer_process(loop, now);
-        } else {
-            next_ms = -1;
-        }
-        if (ccev_atomic_load(loop->stop_flag)) break;
-
-        /* 3. Compute epoll timeout
-         *    RUN_ONCE → 0 (poll);  timer pending → next_ms;
-         *    ecb present but no timers → 0 (never block — ecb needs
-         *    control each iteration; without this, timeout=-1 would
-         *    block forever and ecb would never run again);
-         *    otherwise → -1 (block until I/O). */
+        /* Compute poll timeout — timer-driven only, no special cases. */
         int timeout;
         if (mode == CCEV_RUN_ONCE) {
             timeout = 0;
-        } else if (next_ms >= 0) {
-            timeout = next_ms;
-        } else if (loop->ecb) {
-            timeout = 0;
         } else {
-            timeout = -1;
+            timeout = ccev__timer_next_ms(loop, ccev__now_ms());
         }
 
-        /* 4. Poll wait + per-event dispatch (retry on EINTR handled
-         *    internally by ccev__poll_wait).  Wake pipe is drained
-         *    internally by the poll layer — the callback never sees it. */
+        /* Poll for I/O events.  dispatch_one() may queue closing and
+         * signal items as a side-effect.  Drain them immediately so
+         * RUN_ONCE callers see callbacks fire before return. */
         n = ccev__poll_wait(loop->poll, timeout, _dispatch_one, loop);
-        if (n < 0) n = 0;  /* epoll_wait error — treat as no events */
+        if (n < 0) n = 0;
 
-        /* 4. Process closing queue */
-        ccev__process_closing(loop);
-
-        /* 5. Drain pending signal queue (filled by pipe rcb in
-         *    _dispatch_one — same path on both platforms). */
-        ccev__signal_process_queue(loop);
+        if (!cclist_empty(&loop->closing)) ccev__process_closing(loop);
+        if (!cclink_empty(&loop->signal_queue)) ccev__signal_process_queue(loop);
 
         if (ccev_atomic_load(loop->stop_flag)) break;
 
     } while (mode == CCEV_RUN_FOREVER);
 
-    /* Clear the stop flag that was set during dispatch (e.g. by
-     * ccev_loop_stop in a signal callback) so the next call to
-     * ccev_loop_run doesn't see a stale flag and skip. */
     ccev_atomic_store(loop->stop_flag, 0);
     return mode == CCEV_RUN_ONCE ? n : 0;
 }

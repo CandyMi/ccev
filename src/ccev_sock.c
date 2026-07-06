@@ -120,6 +120,7 @@ ccev_sock_t *ccev_sock_create(ccev_loop_t *loop, ccsocket_t fd, void *udata) {
     ccev_sock_any_t *any = (ccev_sock_any_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_any_t));
     if (!any) return NULL;
     memset(any, 0, sizeof(ccev_sock_any_t));
+    any->stream.sendfile_fd = -1;
 
     ccev_sock_t *sock = &any->sock;
 
@@ -350,6 +351,7 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
     ccev_sock_any_t *any = (ccev_sock_any_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_any_t));
     if (!any) return NULL;
     memset(any, 0, sizeof(ccev_sock_any_t));
+    any->stream.sendfile_fd = -1;
 
     ccev_sock_t *sock = &any->sock;
     sock->loop   = loop;
