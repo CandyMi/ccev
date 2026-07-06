@@ -33,6 +33,11 @@
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <windows.h>
+#  include <sys/stat.h>   /* struct stat, stat()                     */
+/* Windows <sys/stat.h> lacks S_ISSOCK — define as 0 (no socket type) */
+#  ifndef S_ISSOCK
+#    define S_ISSOCK(m) (0)
+#  endif
 /* Windows lacks socklen_t; define as int for getsockopt compat */
 typedef int socklen_t;
 #else
