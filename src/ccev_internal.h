@@ -215,6 +215,7 @@ struct ccev_listener_s {
 struct ccev_connector_s {
     ccev_sock_t        sock;
     uint16_t           port;
+    ccev_flag_t        flags;      /**< User flags (TCP_NODELAY, etc.). */
     ccev_timer_t      *timer;
     ccev_connect_cb    cb;
     void              *udata;

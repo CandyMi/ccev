@@ -329,40 +329,30 @@ static void _connect_timeout_cb(void *udata) {
 }
 
 /* ── Create socket, initiate non-blocking connect, register with reactor ── */
-/* Returns:  1 = connected immediately (cb already fired)
- *           0 = connect pending (EPOLLOUT will fire cb later)
+/* Returns:  0 = connect pending (EPOLLOUT will fire cb later)
  *          -1 = fd creation failed
  *
- * Connection state is checked via ccsocket_is_connected(), NOT the return
- * value of ccsocket_connect() — on non-blocking sockets the connect call
- * may return false for EINPROGRESS, not just errors. */
+ * Connection result is always delivered asynchronously via EPOLLOUT
+ * dispatch — the event loop's connect-completion handler in ccev.c
+ * calls ccsocket_is_connected() to distinguish success from error,
+ * avoiding any synchronous probe that races with async connect(2). */
 static int _connect_try_register(ccev_sock_t *sock,
                                   ccsocket_family_t family,
                                   const char *address, uint16_t port) {
     ccsocket_t fd = ccsocket1(family, CC_TCP, CC_CLOEXEC | CC_NONBLOCK);
     if (fd == (ccsocket_t)-1) return -1;
 
-    /* Initiate non-blocking connect — discard return value (EINPROGRESS is
-     * not an error for non-blocking sockets).  Use ccsocket_is_connected to
-     * check actual connection state. */
+    /* Apply TCP_NODELAY if requested — TCP only, UDS ignores silently */
+    if ((family == CC_INET4 || family == CC_INET6) &&
+        (((ccev_sock_any_t *)sock)->connector.flags & CCEV_TCP_NODELAY))
+        ccsocket_set_nodelay(fd, true);
+
+    /* Initiate non-blocking connect, then defer completion detection
+     * to the event loop via EPOLLOUT.  EINPROGRESS is not an error for
+     * non-blocking sockets — the dispatch handler probes state with
+     * ccsocket_is_connected(). */
     ccsocket_connect(fd, address, port);
 
-    if (ccsocket_is_connected(fd) == CC_CONNECTED) {
-        ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
-        sock->fd   = fd;
-        sock->mode = CCEV_SOCK_INIT;
-        if (any->connector.timer) {
-            ccev_timer_del(sock->loop, any->connector.timer);
-            any->connector.timer = NULL;
-        }
-        if (any->connector.cb)
-            any->connector.cb(any->connector.udata, sock, CCEV_OK);
-        return 1;
-    }
-
-    /* Still connecting or error — register EPOLLOUT; the dispatch handler
-     * in ccev_loop_run calls ccsocket_is_connected to distinguish success
-     * from error. */
     sock->fd = fd;
     ccev__sock_mod_internal(sock->loop, sock, CCEV_POLL_WRITE);
     return 0;
@@ -402,9 +392,27 @@ err:
 ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
                             unsigned int timeout_ms, ccev_flag_t flags,
                             ccev_connect_cb cb, void *udata) {
-    (void)flags;
     if (!loop || !host || !cb) return NULL;
 
+    /* Detect address family before allocating the socket union.
+     * This avoids wasted allocation on invalid input. */
+    bool host_is_at_uds = (host[0] == '@');
+    const char *connect_addr = host;
+    if (host_is_at_uds) connect_addr++;
+
+    ccsocket_family_t family = ccsocket_get_version(connect_addr);
+    if (family == CC_FAMILY_INVALID) {
+        /* Check if the path exists as a socket file.  This catches UDS
+         * paths on platforms where ccsocket_get_version skips stat()
+         * (Windows), and verifies existence before heuristic assignment. */
+        struct stat _st;
+        if (stat(connect_addr, &_st) == 0 && S_ISSOCK(_st.st_mode))
+            family = CC_UNIX;
+        else if (connect_addr[0] == '/' || host_is_at_uds)
+            family = CC_UNIX;
+        /* else: remains CC_FAMILY_INVALID → hostname, falls through to DNS */
+    }
+    /* Now safe to allocate */
     ccev_sock_any_t *any = (ccev_sock_any_t *)ccev__realloc_fn(NULL, sizeof(ccev_sock_any_t));
     if (!any) return NULL;
     memset(any, 0, sizeof(ccev_sock_any_t));
@@ -419,6 +427,7 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
     any->connector.port      = port;
     any->connector.cb        = cb;
     any->connector.udata     = udata;
+    any->connector.flags     = flags;
 
     cclist_push_back(&loop->all_socks, &sock->lnode);
     loop->sock_count++;
@@ -429,17 +438,6 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
                                                 _connect_timeout_cb, sock);
     }
 
-    /* Strip '@' prefix for UDS paths (same convention as ccev_listen) */
-    const char *connect_addr = host;
-    if (connect_addr[0] == '@') connect_addr++;
-
-    ccsocket_family_t family = ccsocket_get_version(connect_addr);
-    /* UDS heuristic: connect to a socket path that may not exist yet.
-     * If it fails, the connect error path handles it via EPOLLOUT. */
-    if (family == CC_FAMILY_INVALID) {
-        if (connect_addr[0] == '/' || connect_addr[0] == '@')
-            family = CC_UNIX;
-    }
     if (family == CC_INET4 || family == CC_INET6 || family == CC_UNIX) {
         int rc = _connect_try_register(sock, family, connect_addr, port);
         if (rc < 0) {
@@ -450,8 +448,7 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
             ccev__free_fn(any);
             return NULL;
         }
-        if (rc > 0) return sock;  /* connected immediately — cb already fired */
-        /* rc == 0: pending — will fire cb via EPOLLOUT */
+        /* rc == 0: connect initiated — result delivered via EPOLLOUT callback */
     } else {
         /* When timeout_ms is 0 (no timeout), pass 0 through to DNS.
          * Otherwise clamp to [1000, 10000] so a single-digit timeout
