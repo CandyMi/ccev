@@ -18,6 +18,11 @@
 
 #include "ccev_internal.h"
 
+#ifdef _WIN32
+#  include <io.h>
+#  define unlink _unlink
+#endif
+
 /* ════════════════════════════════════════════════════════════════
  *  Internal helpers
  * ════════════════════════════════════════════════════════════════ */
@@ -58,6 +63,14 @@ void ccev__sock_rearm(ccev_loop_t *loop, ccev_sock_t *sock) {
 
 void ccev__sock_free(ccev_sock_t *sock) {
     if (!sock) return;
+
+    /* UDS listener: remove socket file from filesystem on close */
+    if (sock->mode == CCEV_SOCK_LISTEN) {
+        ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
+        if (any->listener.uds_path[0] != '\0')
+            unlink(any->listener.uds_path);
+    }
+
     if (sock->loop) sock->loop->sock_count--;
     if (sock->fd != (ccsocket_t)-1) ccsocket_close(sock->fd);
     sock->fd = (ccsocket_t)-1;
@@ -212,18 +225,49 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
                            ccev_listen_cb cb, void *udata) {
     if (!loop || !addr || !cb) return NULL;
 
+    /* Detect address family — for UDS paths that don't exist yet,
+     * ccsocket_get_version cannot stat() them, so we fall back to
+     * heuristic: '/' indicates a file-system UDS path, '@' is a
+     * portable prefix that strips to a relative UDS path. */
     ccsocket_family_t family = ccsocket_get_version(addr);
+    if (family == CC_FAMILY_INVALID) {
+        if (addr[0] == '/' || addr[0] == '@')
+            family = CC_UNIX;
+    }
     if (family == CC_FAMILY_INVALID) return NULL;
+
+    /* '@' prefix: strip to use the rest as a relative UDS path.
+     * Must happen before the addr ref for the wildcard rewrite below. */
+    if (addr[0] == '@') addr++;
+
     if (family == CC_INET4 || family == CC_INET6) {
         if (addr[0] == '\0') { addr = "::"; family = CC_INET6; }
     }
+
+    /* UDS requires port == 0 */
+    if (family == CC_UNIX && port != 0) return NULL;
 
     int proto = CC_TCP;
     ccsocket_t fd = ccsocket1(family, proto, CC_CLOEXEC | CC_NONBLOCK);
     if (fd == (ccsocket_t)-1) return NULL;
 
+    /* UDS: unlink stale socket file before bind to avoid EADDRINUSE.
+     * Only unlink paths that already exist AS a socket file — root
+     * privileges mean unlink("/etc/passwd") would succeed, so a stat()
+     * S_ISSOCK guard prevents deleting non-socket files.  ENOENT is
+     * harmless (unlink just fails).  Directory protection comes from
+     * OS: unlink(2) refuses directories with EPERM/EISDIR. */
+    if (family == CC_UNIX) {
+        struct stat _st;
+        if (stat(addr, &_st) == 0 && S_ISSOCK(_st.st_mode))
+            unlink(addr);
+    }
+
     if (family == CC_UNIX || !(flags & (CCEV_REUSEADDR | CCEV_REUSEPORT))) {
-        if (!ccsocket_listen(fd, addr, port, backlog)) { ccsocket_close(fd); return NULL; }
+        if (!ccsocket_listen(fd, addr, port, backlog)) {
+            if (family == CC_UNIX) unlink(addr);
+            ccsocket_close(fd); return NULL;
+        }
     } else {
         if (!ccsocket_listen1(fd, addr, port, backlog)) { ccsocket_close(fd); return NULL; }
     }
@@ -232,12 +276,25 @@ ccev_sock_t *ccev_listen(ccev_loop_t *loop, const char *addr, uint16_t port,
         ccsocket_enable_accept_defer(fd);
 
     ccev_sock_t *sock = ccev_sock_create(loop, fd, udata);
-    if (!sock) { ccsocket_close(fd); return NULL; }
+    if (!sock) {
+        if (family == CC_UNIX) unlink(addr);
+        ccsocket_close(fd); return NULL;
+    }
 
     ccev_sock_any_t *any  = (ccev_sock_any_t *)sock;
     any->sock.mode        = CCEV_SOCK_LISTEN;
     any->listener.cb      = cb;
     any->listener.udata   = udata;
+
+    /* Save UDS path so ccev__sock_free can unlink on close */
+    if (family == CC_UNIX) {
+        size_t _len = strlen(addr);
+        if (_len >= sizeof(any->listener.uds_path)) {
+            ccev__sock_schedule_close(loop, sock);
+            return NULL;
+        }
+        memcpy(any->listener.uds_path, addr, _len + 1);
+    }
 
     ccev__sock_mod_internal(loop, sock, CCEV_POLL_READ);
     return sock;
@@ -372,9 +429,19 @@ ccev_sock_t *ccev_connect(ccev_loop_t *loop, const char *host, uint16_t port,
                                                 _connect_timeout_cb, sock);
     }
 
-    ccsocket_family_t family = ccsocket_get_version(host);
+    /* Strip '@' prefix for UDS paths (same convention as ccev_listen) */
+    const char *connect_addr = host;
+    if (connect_addr[0] == '@') connect_addr++;
+
+    ccsocket_family_t family = ccsocket_get_version(connect_addr);
+    /* UDS heuristic: connect to a socket path that may not exist yet.
+     * If it fails, the connect error path handles it via EPOLLOUT. */
+    if (family == CC_FAMILY_INVALID) {
+        if (connect_addr[0] == '/' || connect_addr[0] == '@')
+            family = CC_UNIX;
+    }
     if (family == CC_INET4 || family == CC_INET6 || family == CC_UNIX) {
-        int rc = _connect_try_register(sock, family, host, port);
+        int rc = _connect_try_register(sock, family, connect_addr, port);
         if (rc < 0) {
             if (any->connector.timer)
                 ccev_timer_del(loop, any->connector.timer);

@@ -262,6 +262,16 @@ ccev_loop_t *ccev_loop_create(int max_events);
  *  @return Default loop handle. */
 ccev_loop_t *ccev_default_loop(void);
 
+/** @brief Get the default event-loop singleton with custom max_events.
+ *
+ *  If the default loop already exists, returns the existing loop
+ *  regardless of @p events — the parameter only takes effect on
+ *  first call.
+ *
+ *  @param max_events  Max events per poll iteration (0 for default 128).
+ *  @return Default loop handle, or NULL on allocation failure. */
+ccev_loop_t *ccev_default_loop_ex(int max_events);
+
 /** @brief Destroy an event-loop instance.
  *  @param loop  Loop handle (NULL-safe). */
 void ccev_loop_destroy(ccev_loop_t *loop);
@@ -298,8 +308,16 @@ ccev_sock_t *ccev_sock_create(ccev_loop_t *loop, ccsocket_t fd, void *udata);
  *  The returned sock can be closed with ccev_sock_close() to stop
  *  listening.
  *
+ *  Unix domain sockets:
+ *    - Use a filesystem path as @p addr ("/tmp/mysock").
+ *    - An \@ prefix is accepted and stripped to form a relative
+ *      path ("/tmp/mysock" and "@mysock" are equivalent UDS paths;
+ *      \@ does NOT imply Linux abstract namespace).
+ *    - @p port must be 0.
+ *    - The socket file is automatically unlink()'d on close.
+ *
  *  @param loop      Event-loop handle.
- *  @param addr      Address ("0.0.0.0", "::", "/tmp/sock", etc.).
+ *  @param addr      Address ("0.0.0.0", "::", "/tmp/sock", "@mysock", etc.).
  *  @param port      Port (0 for Unix domain sockets).
  *  @param backlog   listen(2) backlog size.
  *  @param flags     OR-ed ccev_flag_t.

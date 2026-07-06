@@ -38,6 +38,7 @@ typedef int socklen_t;
 #else
 #  include <sys/socket.h>
 #  include <sys/types.h>
+#  include <sys/stat.h>
 #  include <unistd.h>
 #endif
 
@@ -204,6 +205,7 @@ struct ccev_listener_s {
     ccev_sock_t        sock;
     ccev_listen_cb     cb;
     void              *udata;
+    char               uds_path[108]; /**< UDS path to unlink on close (empty for TCP). */
 };
 
 /* ════════════════════════════════════════════════════════════════

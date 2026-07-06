@@ -25,6 +25,45 @@
  *  Loop lifecycle
  * ════════════════════════════════════════════════════════════════ */
 
+static ccev_loop_t *defaultloop = NULL;
+
+ccev_loop_t *ccev_default_loop(void) {
+    return ccev_default_loop_ex(128);
+}
+
+ccev_loop_t *ccev_default_loop_ex(int events) {
+    if (defaultloop) return defaultloop;
+
+    defaultloop = ccev_loop_create(events);
+    if (!defaultloop) return NULL;
+
+    /* Create self-pipe for signal delivery */
+    if (ccsocket_pipe(defaultloop->signal_pipe) < 0) {
+        ccev_loop_destroy(defaultloop);
+        return NULL;
+    }
+    ccsocket_set_nonblock(defaultloop->signal_pipe[0], true);
+    ccsocket_set_nonblock(defaultloop->signal_pipe[1], true);
+
+    /* Wrap read end as a sock so the loop dispatches it */
+    ccev_sock_t *sc = ccev_sock_create(defaultloop, defaultloop->signal_pipe[0], NULL);
+    if (!sc) {
+        ccev_loop_destroy(defaultloop);
+        return NULL;
+    }
+    defaultloop->signal_sock = sc;
+    /* Always set rcb so the signal pipe is dispatched even before
+     * ccev_signal_handle() is called.  Without it, a signal can fire
+     * while ONESHOT is armed but rcb is NULL — the event is consumed
+     * but the byte is never read, and the next re-arm has no rcb to
+     * re-arm for.  On Windows epoll emulation this can manifest as
+     * lost signals. */
+    sc->rcb = ccev__signal_dispatch;
+    ccev__sock_mod_internal(defaultloop, sc, CCEV_POLL_READ);
+
+    return defaultloop;
+}
+
 ccev_loop_t *ccev_loop_create(int max_events) {
     ccev_loop_t *loop = (ccev_loop_t *)ccev__realloc_fn(NULL, sizeof(ccev_loop_t));
     if (!loop) return NULL;
@@ -126,41 +165,8 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     }
 
     ccev__poll_destroy(loop->poll);
+    if (loop == defaultloop) defaultloop = NULL;
     ccev__free_fn(loop);
-}
-
-ccev_loop_t *ccev_default_loop(void) {
-    static ccev_loop_t *loop = NULL;
-    if (loop) return loop;
-
-    loop = ccev_loop_create(2048);
-    if (!loop) return NULL;
-
-    /* Create self-pipe for signal delivery */
-    if (ccsocket_pipe(loop->signal_pipe) < 0) {
-        ccev_loop_destroy(loop);
-        return NULL;
-    }
-    ccsocket_set_nonblock(loop->signal_pipe[0], true);
-    ccsocket_set_nonblock(loop->signal_pipe[1], true);
-
-    /* Wrap read end as a sock so the loop dispatches it */
-    ccev_sock_t *sc = ccev_sock_create(loop, loop->signal_pipe[0], NULL);
-    if (!sc) {
-        ccev_loop_destroy(loop);
-        return NULL;
-    }
-    loop->signal_sock = sc;
-    /* Always set rcb so the signal pipe is dispatched even before
-     * ccev_signal_handle() is called.  Without it, a signal can fire
-     * while ONESHOT is armed but rcb is NULL — the event is consumed
-     * but the byte is never read, and the next re-arm has no rcb to
-     * re-arm for.  On Windows epoll emulation this can manifest as
-     * lost signals. */
-    sc->rcb = ccev__signal_dispatch;
-    ccev__sock_mod_internal(loop, sc, CCEV_POLL_READ);
-
-    return loop;
 }
 
 void ccev_loop_stop(ccev_loop_t *loop) {
