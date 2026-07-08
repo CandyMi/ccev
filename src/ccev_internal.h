@@ -155,7 +155,7 @@ extern void  (*ccev__free_fn)(void*);
 #include "cchashmap.h"
 
 /* Maximum connections to accept per EPOLLIN dispatch on a listener. */
-#define CCEV_MAX_ACCEPT_BATCH 128
+#define CCEV_MAX_ACCEPT_BATCH 256
 
 #ifdef __cplusplus
 extern "C" {
@@ -301,6 +301,7 @@ struct ccev_stream_s {
 
     /* ── Stream reader (optional) ── */
     ccev_stream_reader_t *reader;
+    bool               reading;     /**< 1 if inside _stream_on_readable */
 
     /* ── Sendfile state ── */
     ccev_send_cb       sf_cb;      /**< Sendfile completion callback.   */

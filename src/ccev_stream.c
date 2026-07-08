@@ -34,7 +34,7 @@
 #endif
 
 #ifndef IOV_MAX
-#  define IOV_MAX 128
+#  define IOV_MAX 1024
 #endif
 
 /* ════════════════════════════════════════════════════════════════
@@ -340,12 +340,8 @@ static int _reader_start(ccev_stream_t *st, size_t want,
          * will dispatch from its retry loop. */
         goto arm_reader;
     }
-    if (!is_n) {
-        for (size_t i = 0; i < rd->len; i++) {
-            if (rd->buf[rd->pos + i] == delim) {
-                goto arm_reader;  /* delim in buffer — arm and go */
-            }
-        }
+    if (!is_n && memchr(rd->buf + rd->pos, delim, rd->len)) {
+        goto arm_reader;  /* delim in buffer — arm and go */
     }
 
 arm_reader:
@@ -356,16 +352,29 @@ arm_reader:
     rd->pos = 0;
     st->sock.rcb = _stream_on_readable;
 
-    /* Only re-arm EPOLLIN when there is no buffered data to consume.
-     * When rd->len > 0, the _stream_on_readable retry loop will dispatch
-     * the buffered data immediately, making the kevent syscall redundant.
-     * The re-arm (via ONESHOT re-registration) happens later when the
-     * retry loop falls through to recv and gets EAGAIN. */
+    /* Re-arm only when there's no buffered data — the dispatch paths
+     * below re-arm internally through Phase 2's EAGAIN handler:
+     *
+     *   rd->len == 0       → re-arm now, wait for epoll
+     *   rd->len > 0 (re-entrant) → retry loop → recv → EAGAIN → re-arm
+     *   rd->len > 0 (sync) → _stream_on_readable retry loop → recv → EAGAIN → re-arm
+     */
     if (rd->len == 0)
         ccev__sock_rearm(st->sock.loop, &st->sock);
 
-    /* Set read timeout */
-    if (timeout_ms > 0) {
+    /* When called from user code (not re-entrantly) with buffered data
+     * already in rd->buf, dispatch it immediately.  The st->reading flag
+     * prevents recursion if the user callback re-entrantly calls readline:
+     * _stream_on_readable sets st->reading = true, so the nested call
+     * to _reader_start will skip this path and rely on the retry loop. */
+    if (rd->len > 0 && !st->reading)
+        _stream_on_readable(&st->sock, 0);
+
+    /* Re-fetch reader — the direct dispatch above may have freed it
+     * (remain==0 + no re-entrant read) or a re-entrant read already
+     * replaced it with its own timer.  Skip timer setup in both cases. */
+    rd = st->reader;
+    if (rd && timeout_ms > 0 && rd->timer == NULL) {
         rd->timer = ccev_timer_add(st->sock.loop, (uint64_t)timeout_ms,
                                     CCEV_TIMER_ONCE, _stream_timeout_cb, rd);
     }
@@ -381,6 +390,7 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
     (void)events;
     if (!sock || sock->closed) return;
     ccev_stream_t *st = _sock_to_stream(sock);
+    st->reading = true;
 
     /* ── Retry loop: process buffered data without recursion ──
      *
@@ -392,7 +402,7 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
 retry:
     {
         ccev_stream_reader_t *rd = st->reader;
-        if (!rd) return;
+        if (!rd) goto done;
 
         /* ── Phase 1: check buffered data first ── */
         size_t consumed = 0;
@@ -403,11 +413,10 @@ retry:
                 consumed = rd->want;
             }
         } else {
-            for (size_t i = 0; i < rd->len; i++) {
-                if (rd->buf[rd->pos + i] == rd->delim) {
-                    consumed = i + 1;
-                    break;
-                }
+            const char *found = (const char *)memchr(
+                rd->buf + rd->pos, rd->delim, rd->len);
+            if (found) {
+                consumed = (size_t)(found - (rd->buf + rd->pos)) + 1;
             }
             if (consumed == 0 && rd->len >= rd->want) {
                 consumed = rd->want;
@@ -420,8 +429,16 @@ retry:
             /* After dispatch, the user callback may have called ccev_stream_readline
              * re-entrantly, setting up a new reader with more buffered data.
              * Loop back to process it immediately instead of unwinding the stack
-             * and recursing through _reader_start → _reader_dispatch again. */
-            goto retry;
+             * and recursing through _reader_start → _reader_dispatch again.
+             *
+             * If the callback did NOT start a new read, rd->cb was set to NULL
+             * by _reader_dispatch and there is nothing left to deliver.
+             * The reader may also have been freed (remain==0 + no re-entrant
+             * read), making the local `rd` a dangling pointer — re-fetch
+             * st->reader to check. */
+            if (st->reader && st->reader->cb)
+                goto retry;
+            goto done;  /* reader freed or cb cleared — nothing more to deliver */
         }
 
         /* ── Phase 2: no match in buffer — recv more data ── */
@@ -434,7 +451,7 @@ retry:
         /* EAGAIN — re-arm and return */
         if (rc == CC_OPCODE_WAIT) {
             ccev__sock_rearm(sock->loop, sock);
-            return;
+            goto done;
         }
 
         /* Error or EOF */
@@ -450,12 +467,15 @@ retry:
             ccev__free_fn(rd);
             st->reader = NULL;
             if (cb) cb(cb_udata, NULL, 0, CCEV_ERR);
-            return;
+            goto done;
         }
 
         rd->len += (size_t)nread;
         goto retry;  /* recheck condition with new data */
     }
+
+done:
+    st->reading = false;
 }
 
 /* ════════════════════════════════════════════════════════════════
