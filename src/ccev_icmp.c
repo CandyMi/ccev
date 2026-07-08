@@ -84,7 +84,8 @@ static void ping_recv_ready(ccev_sock_t *sock, int events) {
         memset(&result, 0, sizeof(result));
         result.rtt_ms      = (double)(ccev__now_ms() - p->send_time);
         result.payload_len = p->reply_len;
-        result.ttl         = (p->ping.ttl >= 0) ? p->ping.ttl : 0;
+        result.ttl         = p->ping.ttl;
+        snprintf(result.ip, sizeof(result.ip), "%s", p->host);
 
         if (p->cb) p->cb(p->udata, &result);
     } else {
