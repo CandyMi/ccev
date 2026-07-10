@@ -27,7 +27,7 @@ ccev provides two levels of socket abstraction:
 
 - **`ccev_stream_t`** — buffered I/O + stream reader (protocol primitive).  
   Upgrade a sock via `ccev_stream_open()` (same address, backed by `ccev_sock_any_t`).  
-  Provides `ccev_stream_write()`, `ccev_stream_readline()`, `ccev_stream_readnum()`, `ccev_stream_sendfile()`.
+  Provides `ccev_stream_write()`, `ccev_stream_read()`, `ccev_stream_readline()`, `ccev_stream_readnum()`, `ccev_stream_sendfile()`.
 
 ```mermaid
 flowchart LR

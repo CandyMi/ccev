@@ -264,6 +264,10 @@ static void _reader_dispatch(ccev_stream_reader_t *rd,
      * region, so the callback's pointer remains valid. */
     cb(ud, rd->buf + data_off, consumed, status);
 
+    /* ★ callback may have freed rd via ccev_stream_read_stop — re-fetch */
+    rd = st->reader;
+    if (!rd) return;
+
     /* Compact: when pos has grown past half the buffer, move remaining
      * data to the front so the recv target area stays large. */
     if (rd->pos > rd->cap / 2 && rd->len > 0) {
@@ -272,7 +276,7 @@ static void _reader_dispatch(ccev_stream_reader_t *rd,
     }
 
     /* Free reader if no remaining data and no re-entrant read started */
-    if (remain == 0 && st->reader == rd && rd->cb == NULL) {
+    if (remain == 0 && rd->cb == NULL) {
         ccev__free_fn(rd->buf);
         ccev__free_fn(rd);
         st->reader = NULL;
@@ -280,14 +284,52 @@ static void _reader_dispatch(ccev_stream_reader_t *rd,
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Stream reader — raw dispatch (continuous mode)
+ * ════════════════════════════════════════════════════════════════ */
+
+static void _reader_raw_dispatch(ccev_stream_reader_t *rd,
+                                  size_t consumed, int status) {
+    ccev_stream_cb cb = rd->cb;
+    void          *ud = rd->udata;
+    ccev_sock_t   *sock = rd->sock;
+    size_t  data_off  = rd->pos;
+
+    rd->pos += consumed;
+    rd->len -= consumed;
+
+    /* Fire user callback — buffer remains valid during callback */
+    cb(ud, rd->buf + data_off, consumed, status);
+
+    /* ★ callback may have freed rd via ccev_stream_read_stop — re-fetch */
+    ccev_stream_t *st = _sock_to_stream(sock);
+    rd = st->reader;
+    if (!rd || !rd->is_raw) return;
+
+    /* Compact: when pos has grown past half the buffer, move remaining
+     * data to the front so the recv target area stays large.
+     * Always reset pos=0 after dispatch so recv space is at the front. */
+    if (rd->pos > rd->cap / 2) {
+        if (rd->len > 0)
+            memmove(rd->buf, rd->buf + rd->pos, rd->len);
+        rd->pos = 0;
+    } else if (rd->len == 0) {
+        rd->pos = 0;
+    }
+
+    /* Reader stays active — don't restore old_rcb, don't clear cb,
+     * don't free reader.  Continuous mode. */
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  Stream reader — start (internal)
  * ════════════════════════════════════════════════════════════════ */
 
 static int _reader_start(ccev_stream_t *st, size_t want,
-                          char delim, bool is_n,
+                          char delim, bool is_n, bool is_raw,
                           int timeout_ms,
                           ccev_stream_cb cb, void *udata) {
-    if (!st || !cb || want == 0 || st->sock.closed) return CCEV_ERR;
+    if (!st || !cb || st->sock.closed) return CCEV_ERR;
+    if (!is_raw && want == 0) return CCEV_ERR;
 
     ccev_stream_reader_t *rd = st->reader;
 
@@ -303,26 +345,29 @@ static int _reader_start(ccev_stream_t *st, size_t want,
                                         sizeof(ccev_stream_reader_t));
         if (!rd) return CCEV_ERR;
         memset(rd, 0, sizeof(*rd));
-        rd->buf = (char *)ccev__realloc_fn(NULL, want + 1);
+        size_t alloc = is_raw ? 16384 : (want + 1);
+        rd->buf = (char *)ccev__realloc_fn(NULL, alloc);
         if (!rd->buf) { ccev__free_fn(rd); return CCEV_ERR; }
-        rd->cap          = want + 1;
+        rd->cap          = alloc;
         rd->old_rcb      = st->sock.rcb;
         rd->sock         = &st->sock;
         st->reader       = rd;
     } else {
         /* Idle reader — grow buffer if needed */
-        if (rd->cap < want + 1) {
-            char *nb = (char *)ccev__realloc_fn(rd->buf, want + 1);
+        size_t need = is_raw ? 16384 : (want + 1);
+        if (rd->cap < need) {
+            char *nb = (char *)ccev__realloc_fn(rd->buf, need);
             if (!nb) { ccev_stream_read_stop(st); return CCEV_ERR; }
             rd->buf = nb;
-            rd->cap = want + 1;
+            rd->cap = need;
         }
         rd->old_rcb = st->sock.rcb;
     }
 
-    rd->want      = want;
+    rd->want      = is_raw ? rd->cap : want;
     rd->delim     = delim;
     rd->is_n      = is_n;
+    rd->is_raw    = is_raw;
     rd->cb        = cb;
     rd->udata     = udata;
 
@@ -335,13 +380,16 @@ static int _reader_start(ccev_stream_t *st, size_t want,
      * Instead, arm EPOLLIN and fall through to the compact+rearm path.
      * _stream_on_readable will pick up the buffered data in its retry
      * loop, keeping the call stack at a constant depth. */
-    if (rd->len >= want) {
-        /* Buffer already has enough data — arm and go; _stream_on_readable
-         * will dispatch from its retry loop. */
-        goto arm_reader;
-    }
-    if (!is_n && memchr(rd->buf + rd->pos, delim, rd->len)) {
-        goto arm_reader;  /* delim in buffer — arm and go */
+    if (!is_raw) {
+        if (rd->len >= want) {
+            goto arm_reader;
+        }
+        if (!is_n && memchr(rd->buf + rd->pos, delim, rd->len)) {
+            goto arm_reader;
+        }
+    } else {
+        if (rd->len > 0)
+            goto arm_reader;
     }
 
 arm_reader:
@@ -408,7 +456,15 @@ retry:
         size_t consumed = 0;
         int    status   = CCEV_OK;
 
-        if (rd->is_n) {
+        if (rd->is_raw) {
+            /* Raw mode: dispatch all accumulated data immediately */
+            if (rd->len > 0) {
+                consumed = rd->len;
+                _reader_raw_dispatch(rd, consumed, CCEV_OK);
+                /* Reader stays active (continuous).  After dispatch,
+                 * cb is still set so we go to the re-entrancy check. */
+            }
+        } else if (rd->is_n) {
             if (rd->len >= rd->want) {
                 consumed = rd->want;
             }
@@ -425,20 +481,27 @@ retry:
         }
 
         if (consumed > 0) {
-            _reader_dispatch(rd, consumed, status);
-            /* After dispatch, the user callback may have called ccev_stream_readline
-             * re-entrantly, setting up a new reader with more buffered data.
-             * Loop back to process it immediately instead of unwinding the stack
-             * and recursing through _reader_start → _reader_dispatch again.
-             *
-             * If the callback did NOT start a new read, rd->cb was set to NULL
-             * by _reader_dispatch and there is nothing left to deliver.
-             * The reader may also have been freed (remain==0 + no re-entrant
-             * read), making the local `rd` a dangling pointer — re-fetch
-             * st->reader to check. */
+            if (rd->is_raw) {
+                /* Raw mode: _reader_raw_dispatch already fired the callback.
+                 * Reader stays active (continuous) — cb is still set.
+                 * Go to re-entrancy check. */
+            } else {
+                _reader_dispatch(rd, consumed, status);
+                /* After dispatch, the user callback may have called ccev_stream_readline
+                 * re-entrantly, setting up a new reader with more buffered data.
+                 * Loop back to process it immediately instead of unwinding the stack
+                 * and recursing through _reader_start → _reader_dispatch again.
+                 *
+                 * If the callback did NOT start a new read, rd->cb was set to NULL
+                 * by _reader_dispatch and there is nothing left to deliver.
+                 * The reader may also have been freed (remain==0 + no re-entrant
+                 * read), making the local `rd` a dangling pointer — re-fetch
+                 * st->reader to check. */
+            }
+
             if (st->reader && st->reader->cb)
                 goto retry;
-            goto done;  /* reader freed or cb cleared — nothing more to deliver */
+            goto done;
         }
 
         /* ── Phase 2: no match in buffer — recv more data ── */
@@ -681,12 +744,17 @@ void ccev_stream_read_stop(ccev_stream_t *st) {
 
 int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
                           int timeout_ms, ccev_stream_cb cb, void *udata) {
-    return _reader_start(st, maxlen, delim, false, timeout_ms, cb, udata);
+    return _reader_start(st, maxlen, delim, false, false, timeout_ms, cb, udata);
 }
 
 int ccev_stream_readnum(ccev_stream_t *st, size_t n,
                          int timeout_ms, ccev_stream_cb cb, void *udata) {
-    return _reader_start(st, n, 0, true, timeout_ms, cb, udata);
+    return _reader_start(st, n, 0, true, false, timeout_ms, cb, udata);
+}
+
+int ccev_stream_read(ccev_stream_t *st, int timeout_ms,
+                      ccev_stream_cb cb, void *udata) {
+    return _reader_start(st, 0, 0, false, true, timeout_ms, cb, udata);
 }
 
 void ccev_stream_set_close_cb(ccev_stream_t *st, ccev_close_cb cb, void *udata) {

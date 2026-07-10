@@ -420,14 +420,14 @@ typedef void (*ccev_stream_cb)(void *udata, const char *data,
                                 size_t len, int status);
 ```
 
-Completion callback for `ccev_stream_readline()` and
-`ccev_stream_readnum()`. `data` is valid only during the callback
+Completion callback for `ccev_stream_read()`, `ccev_stream_readline()`,
+and `ccev_stream_readnum()`. `data` is valid only during the callback
 — do NOT free or store the pointer.
 
 | `status` | Meaning |
 |---|---|
-| `CCEV_OK` | Delimiter found (readline) or N bytes collected (readnum). |
-| `CCEV_ERR` | `maxlen` exceeded (readline) or connection closed / timeout. |
+| `CCEV_OK` | Data available (read), delimiter found (readline), or N bytes collected (readnum). |
+| `CCEV_ERR` | Connection closed, timeout, or maxlen exceeded (readline). |
 
 #### `ccev_stream_readline`
 
@@ -452,6 +452,23 @@ int ccev_stream_readnum(ccev_stream_t *st, size_t n,
 ```
 
 Read exactly `n` bytes. Same semantics as `ccev_stream_readline()`.
+
+#### `ccev_stream_read`
+
+```c
+int ccev_stream_read(ccev_stream_t *st, int timeout_ms,
+                      ccev_stream_cb cb, void *udata);
+```
+
+Read continuously — dispatch accumulated data as it arrives.
+
+Unlike `ccev_stream_readline/readnum` (one-shot), this mode keeps the
+reader active after each dispatch. The callback fires every time new
+data is available, until `ccev_stream_read_stop()` is called, the
+timeout fires, or the connection closes.
+
+If `timeout_ms > 0`, the callback fires with `CCEV_ERR` if no data
+arrives within the idle deadline.
 
 #### `ccev_stream_read_stop`
 

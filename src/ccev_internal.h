@@ -284,6 +284,7 @@ struct ccev_stream_reader_s {
     /* ── Timeout / delim state ── */
     char             delim;         /**< 0 = readnum, else delimiter.    */
     bool             is_n;          /**< true = readnum, false = readline*/
+    bool             is_raw;        /**< true = raw read (continuous dispatch)*/
 };
 
 /* ════════════════════════════════════════════════════════════════

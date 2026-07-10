@@ -540,6 +540,24 @@ int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
 int ccev_stream_readnum(ccev_stream_t *st, size_t n,
                           int timeout_ms, ccev_stream_cb cb, void *udata);
 
+/** @brief Read continuously — dispatch accumulated data as it arrives.
+ *
+ *  Unlike ccev_stream_readline/readnum (one-shot), this mode keeps the
+ *  reader active after each dispatch.  The callback fires every time
+ *  new data is available, until ccev_stream_read_stop() is called,
+ *  the timeout fires, or the connection closes.
+ *
+ *  Only one stream reader may be active at a time — calling this
+ *  while another reader is active cancels the previous one.
+ *
+ *  @param st         Stream handle.
+ *  @param timeout_ms Read idle timeout in ms (0 = no timeout).
+ *  @param cb         Dispatch callback.
+ *  @param udata      User pointer for @p cb.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_read(ccev_stream_t *st, int timeout_ms,
+                      ccev_stream_cb cb, void *udata);
+
 /** @brief Cancel the active stream reader (if any).
  *  Restores the underlying sock's read callback.
  *  Safe to call when no reader is active.
