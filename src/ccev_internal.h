@@ -351,7 +351,6 @@ struct ccev_tls_s {
 
     /* ── Handshake state ── */
     bool                 handshake_done;
-    bool                 shutdown_pending;
 
     /* ── Handshake callback + user data ── */
     ccev_tls_handshake_cb handshake_cb;

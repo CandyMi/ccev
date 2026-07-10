@@ -6,6 +6,9 @@
  *  Forward declarations
  * ════════════════════════════════════════════════════════════════ */
 
+/* _tls_handshake_pump return: CCEV_TLS_HS_AGAIN = WANT_READ */
+#define CCEV_TLS_HS_AGAIN 1
+
 static void _tls_on_readable(ccev_sock_t *sock, int events);
 static void _tls_handshake_timeout_cb(void *udata);
 static void _tls_read_timeout_cb(void *udata);
@@ -58,7 +61,7 @@ static void _tls_on_readable(ccev_sock_t *sock, int events) {
             BIO_write(SSL_get_rbio(tls->ssl), hs_buf, nread);
 
         int rc = _tls_handshake_pump(tls);
-        if (rc != 1) {
+        if (rc != CCEV_TLS_HS_AGAIN) {
             tls->handshake_done = true;
             if (tls->timer) {
                 ccev_timer_del(sock->loop, tls->timer);
@@ -71,23 +74,8 @@ static void _tls_on_readable(ccev_sock_t *sock, int events) {
                 tls->handshake_cb = NULL;
                 cb(ud, tls, status);
             }
-            if (rc != CCEV_TLS_OK)
+            if (status != CCEV_TLS_OK)
                 ccev__sock_schedule_close(sock->loop, sock);
-        }
-        return;
-    }
-
-    /* ── Shutdown pending (waiting for peer close_notify)? ── */
-    if (tls->shutdown_pending) {
-        char buf[256];
-        int nread = 0;
-        ccsocket_recv(sock->fd, buf, sizeof(buf), &nread);
-        if (nread > 0)
-            BIO_write(SSL_get_rbio(tls->ssl), buf, nread);
-        if (SSL_shutdown(tls->ssl) == 1) {
-            _tls_complete_cleanup(tls);
-        } else {
-            ccev__sock_rearm(sock->loop, sock);
         }
         return;
     }
@@ -130,7 +118,11 @@ static void _tls_on_readable(ccev_sock_t *sock, int events) {
                         tls->read_cb = NULL;
                         cb(ud, NULL, 0, CCEV_ERR);
                     }
-                    tls->shutdown_pending = true;
+                    /* Peer sent close_notify — close immediately.
+                     * TCP TIME_WAIT covers any delayed packets. */
+                    _tls_complete_cleanup(tls);
+                    ccev_stream_close(&tls->st);
+                    return;
                 }
                 break;
             }
@@ -179,8 +171,13 @@ int ccev_tls_write(ccev_tls_t *tls, const void *data, size_t len,
     if (!tls || !tls->ssl || !tls->handshake_done) return CCEV_ERR;
     if (!data || !len) return 0;
 
-    if (SSL_write(tls->ssl, data, (int)len) <= 0)
+    if (SSL_write(tls->ssl, data, (int)len) <= 0) {
+        /* Flush wbio even on error — OpenSSL may have queued a fatal
+         * alert (e.g. decrypt_error, bad_certificate).  Without this
+         * the peer receives only a TCP RST with no diagnostic. */
+        _tls_flush_wbio(tls);
         return CCEV_ERR;
+    }
 
     /* Encrypted data is now in wbio — flush to the stream write buffer,
      * passing the user's write-completion callback through. */
@@ -309,6 +306,8 @@ static void _tls_reader_accumulate(ccev_tls_t *tls, const char *data, size_t len
                 tls->read_cb = NULL;
                 cb(ud, NULL, 0, CCEV_ERR);
             }
+            /* OOM is unrecoverable — close the connection. */
+            ccev__sock_schedule_close(tls->st.sock.loop, &tls->st.sock);
             return;
         }
         tls->read_buf = nb;
@@ -404,7 +403,7 @@ static int _tls_handshake_pump(ccev_tls_t *tls) {
 
     int err = SSL_get_error(tls->ssl, ret);
     if (err == SSL_ERROR_WANT_READ)
-        return 1;
+        return CCEV_TLS_HS_AGAIN;
 
     return CCEV_TLS_ERR_PROTO;
 }
@@ -500,7 +499,7 @@ int ccev_tls_handshake(ccev_tls_t *tls,
     ccev__sock_rearm(tls->st.sock.loop, &tls->st.sock);
 
     int rc = _tls_handshake_pump(tls);
-    if (rc != 1) {
+    if (rc != CCEV_TLS_HS_AGAIN) {
         tls->handshake_done = true;
         if (tls->timer) {
             ccev_timer_del(tls->st.sock.loop, tls->timer);
@@ -515,12 +514,21 @@ int ccev_tls_handshake(ccev_tls_t *tls,
         return rc;
     }
 
-    return 1;
+    return CCEV_TLS_HS_AGAIN;
 }
 
 int ccev_tls_set_servername(ccev_tls_t *tls, const char *hostname) {
     if (!tls || !tls->ssl) return CCEV_TLS_ERR_SYS;
+    if (tls->handshake_done) return CCEV_ERR;
     if (!hostname) return CCEV_TLS_OK;
+
+    /* Set SNI extension + enable hostname verification.
+     * Without SSL_set1_host, the peer certificate's CN/SAN is never
+     * checked against the target hostname — a valid cert for any
+     * domain would be accepted (MITM). */
+    if (!SSL_set1_host(tls->ssl, hostname))
+        return CCEV_TLS_ERR_SYS;
+
     return SSL_set_tlsext_host_name(tls->ssl, hostname) ? CCEV_TLS_OK : CCEV_TLS_ERR_SYS;
 }
 
@@ -546,11 +554,6 @@ int ccev_tls_set_alpn(ccev_tls_t *tls, const char *protos) {
     return (ret == 0) ? CCEV_TLS_OK : CCEV_TLS_ERR_SYS;
 }
 
-int ccev_tls_set_ciphers(ccev_tls_t *tls, const char *cipher_list) {
-    if (!tls || !tls->ssl) return CCEV_TLS_ERR_SYS;
-    if (!cipher_list) return CCEV_TLS_OK;
-    return SSL_set_cipher_list(tls->ssl, cipher_list) ? CCEV_TLS_OK : CCEV_TLS_ERR_SYS;
-}
 
 ccev_tls_t *ccev_tls_wrap_stream(ccev_sock_t *sock,
                                    ccev_tls_ctx_t *ctx,
@@ -599,15 +602,11 @@ int ccev_tls_close(ccev_tls_t *tls) {
     ccev_stream_flush(&tls->st);
 
     if (tls->ssl) {
-        int ret = SSL_shutdown(tls->ssl);
-        if (ret == 0) {
-            _tls_flush_wbio(tls);
-            ccev_stream_flush(&tls->st);
-            tls->shutdown_pending = true;
-            tls->st.sock.rcb = _tls_on_readable;
-            ccev__sock_rearm(tls->st.sock.loop, &tls->st.sock);
-            return CCEV_OK;
-        }
+        /* Best-effort: try SSL_shutdown once to send close_notify.
+         * Do NOT wait for peer's reply — TCP TIME_WAIT covers
+         * any delayed packets on the wire. */
+        SSL_shutdown(tls->ssl);
+        _tls_flush_wbio(tls);
     }
 
     _tls_complete_cleanup(tls);

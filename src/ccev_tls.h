@@ -109,7 +109,24 @@ ccev_tls_ctx_t *ccev_tls_ctx_server(const char *cert_file,
  *  Loads the system default CA certificates.
  *  The context is configured for CCEV_TLS_CLIENT mode.
  *
- *  @return TLS context, or NULL on failure. */
+ *  Peer certificate verification is enabled by default
+ *  (CCEV_TLS_VERIFY_PEER).  Call ccev_tls_ctx_set_verify() with
+ *  CCEV_TLS_VERIFY_NONE to disable.
+ *
+ *  @note                        Windows users
+ *  Windows has no standard system CA path.  This function
+ *  returns NULL on Windows because the system trust store
+ *  cannot be loaded.  You MUST call ccev_tls_ctx_set_ca_file()
+ *  with a CA bundle (e.g. a curl-style ca-bundle.crt) before
+ *  using the context for connections.
+ *
+ *  @note                        POSIX systems
+ *  Return NULL if the system CA path (/etc/ssl/certs/ etc.)
+ *  is missing or broken — resolve the system certificate
+ *  configuration and retry.
+ *
+ *  @return TLS context, or NULL on failure
+ *          (system CA store unavailable or OOM). */
 ccev_tls_ctx_t *ccev_tls_ctx_client(void);
 
 /** @brief Set CA file(s) for certificate verification.
@@ -141,11 +158,30 @@ int ccev_tls_ctx_set_alpn(ccev_tls_ctx_t *ctx, const char *protos);
  *  @return CCEV_TLS_OK or CCEV_TLS_ERR_SYS. */
 int ccev_tls_ctx_set_ciphers(ccev_tls_ctx_t *ctx, const char *cipher_list);
 
+/** @brief Load a certificate and private key onto an existing context.
+ *
+ *  Can be called on both client and server contexts.  The private key
+ *  is verified against the certificate.  Useful for client certificate
+ *  authentication (mutual TLS).
+ *
+ *  @param ctx       TLS context.
+ *  @param cert_file Path to the PEM certificate file.
+ *  @param key_file  Path to the PEM private key file.
+ *  @return CCEV_TLS_OK or CCEV_TLS_ERR_SYS. */
+int ccev_tls_ctx_use_certificate(ccev_tls_ctx_t *ctx,
+                                  const char *cert_file,
+                                  const char *key_file);
+
 /** @brief Free a TLS context.
  *
  *  Safe to call while TLS connections using this context are still alive
- *  (OpenSSL uses reference counting internally).  Do NOT pass the context
- *  to ccev_tls_open() after this call.
+ *  (OpenSSL uses reference counting internally).
+ *
+ *  @warning After this call the @p ctx pointer becomes invalid and MUST
+ *  NOT be passed to any other ccev_tls_ctx_*() function or to
+ *  ccev_tls_open().  The context is freed immediately; OpenSSL's
+ *  reference counting only protects SSL objects already created from
+ *  it.
  *
  *  @param ctx TLS context (NULL-safe). */
 void ccev_tls_ctx_free(ccev_tls_ctx_t *ctx);
@@ -180,12 +216,6 @@ int ccev_tls_set_servername(ccev_tls_t *tls, const char *hostname);
  *  @param protos Comma-separated protocol list, or NULL to clear.
  *  @return CCEV_TLS_OK or CCEV_TLS_ERR_SYS. */
 int ccev_tls_set_alpn(ccev_tls_t *tls, const char *protos);
-
-/** @brief Step 2 (optional): Set ciphers (must be before handshake).
- *  @param tls         TLS handle.
- *  @param cipher_list OpenSSL cipher string, or NULL for defaults.
- *  @return CCEV_TLS_OK or CCEV_TLS_ERR_SYS. */
-int ccev_tls_set_ciphers(ccev_tls_t *tls, const char *cipher_list);
 
 /** @brief Step 3: Start TLS handshake.
  *

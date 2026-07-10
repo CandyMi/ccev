@@ -20,7 +20,10 @@
  *  OpenSSL initialisation (single-shot, idempotent)
  * ════════════════════════════════════════════════════════════════ */
 
-static volatile int ccev_tls__initialized = 0;
+/* Guard: 0 = uninitialized, 1 = initialized.  Written via CAS on the
+ * first thread; read non-atomically on the fast path because stale
+ * (seeing 0 when already 1) is harmless — the CAS serialises. */
+static int ccev_tls__initialized = 0;
 
 /* ── Allocator wrappers for CRYPTO_set_mem_functions ──
  * OpenSSL 3.x added const char *file, int line params.  We provide
@@ -51,6 +54,18 @@ static void _tls_ossl_free(void *p) {
 #endif
 
 static void _tls_do_init(void) {
+    /* CRYPTO_set_mem_functions MUST be called before any OpenSSL
+     * initialisation (OpenSSL docs).  This is the only place where
+     * allocator syncing happens — no thread races here because the
+     * CAS gate (ccev__tls_init) ensures only one thread enters. */
+    if (ccev__realloc_fn && ccev__free_fn) {
+        CRYPTO_set_mem_functions(
+            _tls_ossl_malloc,
+            _tls_ossl_realloc,
+            _tls_ossl_free
+        );
+    }
+
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
                      OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
@@ -59,22 +74,23 @@ static void _tls_do_init(void) {
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
 #endif
-
-    /* Synchronise allocator: if user called ccev_set_allocator, propagate
-     * to OpenSSL so all SSL* internals use the same heap. */
-    if (ccev__realloc_fn && ccev__free_fn) {
-        CRYPTO_set_mem_functions(
-            _tls_ossl_malloc,
-            _tls_ossl_realloc,
-            _tls_ossl_free
-        );
-    }
 }
 
 void ccev__tls_init(void) {
+    /* Fast path: single non-atomic read — stale 0 only enters the
+     * CAS slow path, which serialises correctly. */
     if (ccev_tls__initialized) return;
+
+    /* CAS serialises: only the first thread sets 0→1 and runs init. */
+#if defined(_MSC_VER)
+    if (_InterlockedCompareExchange((long volatile *)&ccev_tls__initialized, 1, 0) != 0)
+        return;
+#else
+    if (!__sync_bool_compare_and_swap(&ccev_tls__initialized, 0, 1))
+        return;
+#endif
+
     _tls_do_init();
-    ccev_tls__initialized = 1;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -103,33 +119,47 @@ static SSL_CTX *_ctx_create_base(void) {
  *  Public API
  * ════════════════════════════════════════════════════════════════ */
 
+int ccev_tls_ctx_use_certificate(ccev_tls_ctx_t *ctx,
+                                  const char *cert_file,
+                                  const char *key_file) {
+    if (!ctx || !ctx->ssl_ctx) return CCEV_TLS_ERR_SYS;
+    if (!cert_file || !key_file) return CCEV_TLS_ERR_SYS;
+
+    if (SSL_CTX_use_certificate_file(ctx->ssl_ctx, cert_file,
+                                      SSL_FILETYPE_PEM) <= 0)
+        return CCEV_TLS_ERR_SYS;
+
+    if (SSL_CTX_use_PrivateKey_file(ctx->ssl_ctx, key_file,
+                                     SSL_FILETYPE_PEM) <= 0)
+        return CCEV_TLS_ERR_SYS;
+
+    if (!SSL_CTX_check_private_key(ctx->ssl_ctx))
+        return CCEV_TLS_ERR_SYS;
+
+    return CCEV_TLS_OK;
+}
+
 ccev_tls_ctx_t *ccev_tls_ctx_server(const char *cert_file,
                                      const char *key_file) {
     if (!cert_file || !key_file) return NULL;
 
-    SSL_CTX *ctx = _ctx_create_base();
-    if (!ctx) return NULL;
-
-    if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0) {
-        SSL_CTX_free(ctx);
-        return NULL;
-    }
-    if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0) {
-        SSL_CTX_free(ctx);
-        return NULL;
-    }
-    if (!SSL_CTX_check_private_key(ctx)) {
-        SSL_CTX_free(ctx);
-        return NULL;
-    }
+    SSL_CTX *ssl_ctx = _ctx_create_base();
+    if (!ssl_ctx) return NULL;
 
     ccev_tls_ctx_t *tls_ctx = (ccev_tls_ctx_t *)ccev__realloc_fn(
         NULL, sizeof(ccev_tls_ctx_t));
     if (!tls_ctx) {
-        SSL_CTX_free(ctx);
+        SSL_CTX_free(ssl_ctx);
         return NULL;
     }
-    tls_ctx->ssl_ctx = ctx;
+    tls_ctx->ssl_ctx = ssl_ctx;
+
+    if (ccev_tls_ctx_use_certificate(tls_ctx, cert_file, key_file)
+        != CCEV_TLS_OK) {
+        ccev_tls_ctx_free(tls_ctx);
+        return NULL;
+    }
+
     return tls_ctx;
 }
 
@@ -137,10 +167,25 @@ ccev_tls_ctx_t *ccev_tls_ctx_client(void) {
     SSL_CTX *ctx = _ctx_create_base();
     if (!ctx) return NULL;
 
-    /* Load system default CA certificates. */
+    /* Load system default CA certificates.
+     *
+     * On POSIX systems this reads the system trust store
+     * (/etc/ssl/certs/ etc.).  On Windows there is no standard
+     * system CA path — SSL_CTX_set_default_verify_paths will
+     * fail, which is expected.  In either case, failure means
+     * we return NULL: an empty trust anchor is a security hole
+     * (every certificate would pass verification silently).
+     *
+     * Windows users MUST call ccev_tls_ctx_set_ca_file()
+     * with a CA bundle before using the context. */
     if (!SSL_CTX_set_default_verify_paths(ctx)) {
-        /* Non-fatal — user can still set custom CA via set_ca_file. */
+        SSL_CTX_free(ctx);
+        return NULL;
     }
+
+    /* Enable peer certificate verification by default.
+     * Without this, all connections accept any certificate. */
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 
     ccev_tls_ctx_t *tls_ctx = (ccev_tls_ctx_t *)ccev__realloc_fn(
         NULL, sizeof(ccev_tls_ctx_t));
@@ -160,7 +205,9 @@ int ccev_tls_ctx_set_ca_file(ccev_tls_ctx_t *ctx,
 
     if (replace) {
         /* Clear existing CA store and load only the specified file. */
-        SSL_CTX_set_cert_store(ctx->ssl_ctx, X509_STORE_new());
+        X509_STORE *store = X509_STORE_new();
+        if (!store) return CCEV_TLS_ERR_SYS;
+        SSL_CTX_set_cert_store(ctx->ssl_ctx, store);
     }
 
     if (SSL_CTX_load_verify_locations(ctx->ssl_ctx, ca_file, NULL) <= 0)
@@ -212,7 +259,15 @@ int ccev_tls_ctx_set_ciphers(ccev_tls_ctx_t *ctx, const char *cipher_list) {
     if (!ctx || !ctx->ssl_ctx) return CCEV_TLS_ERR_SYS;
 
     if (cipher_list) {
+        /* TLS 1.2 (and below) cipher configuration. */
         if (!SSL_CTX_set_cipher_list(ctx->ssl_ctx, cipher_list))
+            return CCEV_TLS_ERR_SYS;
+
+        /* TLS 1.3 uses a separate cipher suite API.  Same string
+         * format (e.g. "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384").
+         * OpenSSL accepts an empty/unknown cipher list gracefully —
+         * it keeps the default.  Safe to always call. */
+        if (!SSL_CTX_set_ciphersuites(ctx->ssl_ctx, cipher_list))
             return CCEV_TLS_ERR_SYS;
     }
     return CCEV_TLS_OK;
