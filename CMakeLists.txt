@@ -19,6 +19,7 @@ endif()
 option(BUILD_TESTING  "Build tests"    ON)
 option(BUILD_EXAMPLES "Build examples" ON)
 option(CCEV_SANITIZE  "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+option(CCEV_TLS       "Build TLS support (requires OpenSSL)" OFF)
 
 # ── Submodule check ──
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/epoll/include/epoll/epoll.h" OR
@@ -81,7 +82,7 @@ target_compile_definitions(ccev_ccsocket PRIVATE
 )
 
 # ── Static library: ccev ────────────────────────────────────
-add_library(ccev STATIC
+set(CCEV_SOURCES
     src/ccev.c
     src/ccev_mem.c
     src/ccev_timer.c
@@ -91,9 +92,27 @@ add_library(ccev STATIC
     src/ccev_icmp.c
     src/ccev_signal.c
     src/ccev_poll.c
+)
+
+if(CCEV_TLS)
+    find_package(OpenSSL QUIET)
+    if(OpenSSL_FOUND)
+        list(APPEND CCEV_SOURCES src/ccev_tls.c src/ccev_tls_ctx.c)
+    else()
+        message(STATUS "OpenSSL not found — TLS support disabled (CCEV_TLS=ON ignored)")
+    endif()
+endif()
+
+add_library(ccev STATIC
+    ${CCEV_SOURCES}
     $<TARGET_OBJECTS:ccev_epoll>
     $<TARGET_OBJECTS:ccev_ccsocket>
 )
+
+if(CCEV_TLS AND OpenSSL_FOUND)
+    target_compile_definitions(ccev PRIVATE CCEV_HAVE_TLS=1)
+endif()
+
 set_target_properties(ccev PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(ccev PUBLIC
@@ -112,6 +131,14 @@ endif()
 unset(_have_atomic)
 
 # ── Platform-specific ────────────────────────────────────────
+if(CCEV_TLS AND OpenSSL_FOUND)
+    if(TARGET OpenSSL::SSL_Static)
+        target_link_libraries(ccev PUBLIC OpenSSL::SSL_Static OpenSSL::Crypto_Static)
+    else()
+        target_link_libraries(ccev PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+endif()
+
 if(WIN32)
     target_link_libraries(ccev PUBLIC ws2_32)
 endif()
@@ -184,8 +211,13 @@ install(TARGETS ccev
     LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+set(CCEV_INSTALL_TLS)
+if(CCEV_TLS AND OpenSSL_FOUND)
+    set(CCEV_INSTALL_TLS src/ccev_tls.h)
+endif()
 install(FILES
     src/ccev.h
+    ${CCEV_INSTALL_TLS}
     deps/ccsocket/include/ccsocket.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )

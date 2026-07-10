@@ -312,6 +312,68 @@ struct ccev_stream_s {
 };
 
 /* ════════════════════════════════════════════════════════════════
+ *  TLS structure (requires OpenSSL; only in TLS builds)
+ * ════════════════════════════════════════════════════════════════ */
+
+#ifdef CCEV_HAVE_TLS
+/* Include public TLS header for ccev_tls_mode_t, ccev_tls_handshake_cb, etc.
+ * This is safe: ccev.h is already included above, and ccev_tls.h's include
+ * guard prevents double inclusion by ccev_tls_internal.h later. */
+#  include "ccev_tls.h"
+
+/* Forward declare OpenSSL SSL type (pointer only — no header needed). */
+struct ssl_st;
+
+typedef enum {
+    CCEV_TLS_READ     = 0,
+    CCEV_TLS_READLINE = 1,
+    CCEV_TLS_READNUM  = 2,
+} ccev_tls_read_mode_t;
+
+/**
+ * @brief TLS connection — embeds ccev_stream_t as first field.
+ *
+ * Shares the same ccev_sock_any_t allocation as sock/stream via the
+ * common-initial-sequence rule.  ccev_tls_open() reinterprets the
+ * union, zeros TLS fields beyond the embedded stream, and sets up
+ * Memory BIO-based OpenSSL I/O.
+ *
+ * OpenSSL BIO instances are accessed via SSL_get_*bio() (not stored).
+ */
+struct ccev_tls_s {
+    /* ── First field: ccev_stream_t (also contains ccev_sock_t) ── */
+    ccev_stream_t        st;
+
+    /* ── OpenSSL ── */
+    struct ssl_st       *ssl;
+    ccev_tls_mode_t      mode;
+    ccev_tls_read_mode_t read_mode;
+
+    /* ── Handshake state ── */
+    bool                 handshake_done;
+    bool                 shutdown_pending;
+
+    /* ── Handshake callback + user data ── */
+    ccev_tls_handshake_cb handshake_cb;
+    void                 *handshake_udata;
+
+    /* ── Timer (shared between handshake and read timeout) ── */
+    ccev_timer_t         *timer;
+
+    /* ── Read path: independent accumulation buffer ── */
+    char                 *read_buf;
+    size_t                read_cap;
+    size_t                read_len;
+    size_t                read_pos;
+    size_t                read_want;
+    ccev_stream_cb        read_cb;
+    void                 *read_udata;
+    char                  read_delim;
+    bool                  read_is_n;
+};
+#endif
+
+/* ════════════════════════════════════════════════════════════════
  *  Socket allocation union — one allocation fits any variant
  * ════════════════════════════════════════════════════════════════ */
 
@@ -323,14 +385,16 @@ struct ccev_stream_s {
  * because every variant has ccev_sock_t as its first field —
  * guaranteed safe by the common-initial-sequence rule (C11 §6.5.2.3p6).
  *
- * All variants share ccev_sock_t as their first field (C11 §6.5.2.3p6).
- * Add future variants (e.g. ccev_dgram_t) here; the union size grows automatically.
+ * Add future variants here; the union size grows automatically.
  */
 typedef union {
     ccev_sock_t        sock;
     ccev_stream_t      stream;
     ccev_listener_t    listener;
     ccev_connector_t   connector;
+#ifdef CCEV_HAVE_TLS
+    struct ccev_tls_s  tls;
+#endif
     /* ccev_dgram_t    dgram; */
 } ccev_sock_any_t;
 
