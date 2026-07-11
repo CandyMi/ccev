@@ -208,7 +208,7 @@ static void _stream_on_readable(ccev_sock_t *sock, int events);
  *  Stream reader — timeout callback
  * ════════════════════════════════════════════════════════════════ */
 
-static void _stream_timeout_cb(void *udata) {
+static void _stream_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_stream_reader_t *rd = (ccev_stream_reader_t *)udata;
     ccev_sock_t *sock = rd->sock;
     if (!sock || sock->closed) return;

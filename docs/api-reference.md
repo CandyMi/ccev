@@ -94,7 +94,7 @@ typedef void (*ccev_stream_cb)(void *udata, const char *data,
                                 size_t len, int status);
 
 /* Timer expiry */
-typedef void (*ccev_timer_cb)(void *udata);
+typedef void (*ccev_timer_cb)(ccev_timer_t *timer, void *udata);
 
 /* DNS resolution */
 typedef void (*ccev_dns_cb)(void *udata, const char *address, int status);

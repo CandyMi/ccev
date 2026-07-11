@@ -36,7 +36,7 @@ int ccev__timer_process(ccev_loop_t *loop, uint64_t now_ms) {
         cclink_node_t *n = cclink_pop_front(&expired);
         ccev_timer_t *timer = CCLINK_CONTAINER(n, ccev_timer_t, tlist);
 
-        timer->cb(timer->udata);
+        timer->cb(timer, timer->udata);
 
         if (timer->active && timer->mode == CCEV_TIMER_REPEAT) {
             ccheap_node_set(&timer->node, timeout, ccev__now_ms() + timer->interval);

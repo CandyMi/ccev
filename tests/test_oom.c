@@ -48,7 +48,7 @@ static void *oom_realloc(void *ptr, size_t sz) {
 
 static void oom_free(void *ptr) { free(ptr); }
 
-static void timer_stop_loop(void *udata) {
+static void timer_stop_loop(ccev_timer_t *timer, void *udata) {
     ccev_loop_stop((ccev_loop_t *)udata);
 }
 

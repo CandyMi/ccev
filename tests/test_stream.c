@@ -25,7 +25,7 @@ static int passed, failed;
 } while(0)
 #define RUN(name) do { printf("  %s\n", #name); fflush(stdout); test_##name(); } while(0)
 
-static void timer_stop_loop(void *udata) {
+static void timer_stop_loop(ccev_timer_t *timer, void *udata) {
     ccev_loop_stop((ccev_loop_t *)udata);
 }
 

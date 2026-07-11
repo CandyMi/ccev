@@ -10,8 +10,8 @@
 #define CCEV_TLS_HS_AGAIN 1
 
 static void _tls_on_readable(ccev_sock_t *sock, int events);
-static void _tls_handshake_timeout_cb(void *udata);
-static void _tls_read_timeout_cb(void *udata);
+static void _tls_handshake_timeout_cb(ccev_timer_t *timer, void *udata);
+static void _tls_read_timeout_cb(ccev_timer_t *timer, void *udata);
 static int  _tls_handshake_pump(ccev_tls_t *tls);
 static void _tls_flush_wbio(ccev_tls_t *tls);
 static void _tls_complete_cleanup(ccev_tls_t *tls);
@@ -138,7 +138,7 @@ static void _tls_on_readable(ccev_sock_t *sock, int events) {
  *  Timer callbacks
  * ════════════════════════════════════════════════════════════════ */
 
-static void _tls_handshake_timeout_cb(void *udata) {
+static void _tls_handshake_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_tls_t *tls = (ccev_tls_t *)udata;
     if (!tls || tls->handshake_done) return;
     tls->timer = NULL;
@@ -152,7 +152,7 @@ static void _tls_handshake_timeout_cb(void *udata) {
     ccev__sock_schedule_close(tls->st.sock.loop, &tls->st.sock);
 }
 
-static void _tls_read_timeout_cb(void *udata) {
+static void _tls_read_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_tls_t *tls = (ccev_tls_t *)udata;
     if (!tls || !tls->read_cb) return;
     tls->timer = NULL;

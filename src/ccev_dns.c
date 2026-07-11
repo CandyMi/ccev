@@ -408,7 +408,7 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
     /* q is freed by close_cb (set in ccev_dns_resolve) */
 }
 
-static void dns_timeout_cb(void *udata) {
+static void dns_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_dns_query_t *q = (ccev_dns_query_t *)udata;
     if (!q || q->finished) return;
     q->finished = true;

@@ -311,7 +311,7 @@ static void _connector_close_cb(void *udata) {
 }
 
 /* ── Connect timeout callback ── */
-static void _connect_timeout_cb(void *udata) {
+static void _connect_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_sock_any_t *any = (ccev_sock_any_t *)udata;
     if (any->sock.mode != CCEV_SOCK_CONNECT) return;
     any->connector.timer = NULL;

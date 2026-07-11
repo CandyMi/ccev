@@ -164,7 +164,7 @@ int main(void) {
 #include "ccev.h"
 #include <stdio.h>
 
-static void on_timer(void *udata) {
+static void on_timer(ccev_timer_t *timer, void *udata) {
     printf("timer fired!\n");
     ccev_loop_stop((ccev_loop_t *)udata);
 }

@@ -162,8 +162,9 @@ typedef void (*ccev_stream_cb)(void *udata, const char *data,
                                 size_t len, int status);
 
 /** @brief Timer expiry callback.
+ *  @param timer  The timer that expired (lives for callback duration).
  *  @param udata  User-provided context pointer. */
-typedef void (*ccev_timer_cb)(void *udata);
+typedef void (*ccev_timer_cb)(ccev_timer_t *timer, void *udata);
 
 /** @brief DNS resolution callback.
  *  @param udata    User-provided context pointer.

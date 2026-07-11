@@ -49,7 +49,7 @@ static void ping_close_cb(void *udata) {
 
 /* ── Timeout callback ─────────────────────────────────────────────── */
 
-static void ping_timeout_cb(void *udata) {
+static void ping_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_ping_t *p = (ccev_ping_t *)udata;
 
     if (p->cb) p->cb(p->udata, NULL);

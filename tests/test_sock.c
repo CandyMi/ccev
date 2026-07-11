@@ -30,7 +30,7 @@ static int passed, failed;
     test_##name(); \
 } while(0)
 
-static void timer_stop_loop(void *udata) {
+static void timer_stop_loop(ccev_timer_t *timer, void *udata) {
     (void)udata;
     ccev_loop_stop(*(ccev_loop_t **)udata);
 }
@@ -599,7 +599,7 @@ static void each_stop_cb(ccev_loop_t *loop, void *args) {
 /* No-op timer callback — keeps the loop iterating without stopping it.
  * Used as a repeat timer in multi-iteration tests to prevent epoll_wait
  * from blocking indefinitely between iterations. */
-static void each_drive_cb(void *udata) {
+static void each_drive_cb(ccev_timer_t *timer, void *udata) {
     (void)udata;
 }
 
