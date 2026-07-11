@@ -18,14 +18,14 @@ typedef struct {
     int          reset_count;
 } demo_ctx;
 
-static void on_once(void *udata) {
+static void on_once(ccev_timer_t *timer, void *udata) {
     demo_ctx *ctx = (demo_ctx *)udata;
     ctx->once_count++;
     printf("  [once] timer fired! (%d)\n", ctx->once_count);
     ccev_loop_stop(ctx->loop);
 }
 
-static void on_repeat(void *udata) {
+static void on_repeat(ccev_timer_t *timer, void *udata) {
     demo_ctx *ctx = (demo_ctx *)udata;
     ctx->repeat_count++;
     printf("  [repeat] timer fired! (%d)\n", ctx->repeat_count);
@@ -33,7 +33,7 @@ static void on_repeat(void *udata) {
         ccev_loop_stop(ctx->loop);
 }
 
-static void on_reset_expiry(void *udata) {
+static void on_reset_expiry(ccev_timer_t *timer, void *udata) {
     demo_ctx *ctx = (demo_ctx *)udata;
     ctx->reset_count++;
     printf("  [reset] timer fired! (%d)\n", ctx->reset_count);
