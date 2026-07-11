@@ -259,15 +259,13 @@ int ccev_tls_ctx_set_ciphers(ccev_tls_ctx_t *ctx, const char *cipher_list) {
     if (!ctx || !ctx->ssl_ctx) return CCEV_TLS_ERR_SYS;
 
     if (cipher_list) {
-        /* TLS 1.2 (and below) cipher configuration. */
-        if (!SSL_CTX_set_cipher_list(ctx->ssl_ctx, cipher_list))
-            return CCEV_TLS_ERR_SYS;
-
-        /* TLS 1.3 uses a separate cipher suite API.  Same string
-         * format (e.g. "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384").
-         * OpenSSL accepts an empty/unknown cipher list gracefully —
-         * it keeps the default.  Safe to always call. */
-        if (!SSL_CTX_set_ciphersuites(ctx->ssl_ctx, cipher_list))
+        /* The same string may be a TLS 1.2 cipher list ("ECDHE-...")
+         * or a TLS 1.3 cipher suite ("TLS_AES_128_GCM_SHA256") or
+         * both.  Try each independently — accept if at least one
+         * matched, fail only if neither matched (bogus string). */
+        int rc12 = SSL_CTX_set_cipher_list(ctx->ssl_ctx, cipher_list);
+        int rc13 = SSL_CTX_set_ciphersuites(ctx->ssl_ctx, cipher_list);
+        if (!rc12 && !rc13)
             return CCEV_TLS_ERR_SYS;
     }
     return CCEV_TLS_OK;

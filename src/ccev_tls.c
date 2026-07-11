@@ -197,8 +197,13 @@ int ccev_tls_write_batch(ccev_tls_t *tls, const void *data, size_t len,
     if (!tls || !tls->ssl || !tls->handshake_done) return CCEV_ERR;
 
     if (data && len > 0) {
-        if (SSL_write(tls->ssl, data, (int)len) <= 0)
+        if (SSL_write(tls->ssl, data, (int)len) <= 0) {
+            /* Flush wbio even on error — OpenSSL may have queued a fatal
+             * alert (e.g. decrypt_error, bad_certificate).  Without this
+             * the peer receives only a TCP RST with no diagnostic. */
+            _tls_flush_wbio(tls);
             return CCEV_ERR;
+        }
         _tls_flush_wbio(tls);
     }
 
@@ -402,8 +407,21 @@ static int _tls_handshake_pump(ccev_tls_t *tls) {
         return CCEV_TLS_OK;
 
     int err = SSL_get_error(tls->ssl, ret);
-    if (err == SSL_ERROR_WANT_READ)
+
+    /* With Memory BIOs, WANT_WRITE is rare (wbio is always writable)
+     * but not guaranteed absent (TLS 1.3 HRR, OpenSSL internals).
+     * Defensively treat both WANT_* as "try again". */
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
         return CCEV_TLS_HS_AGAIN;
+
+    /* Check certificate verification result before falling through
+     * to protocol error — lets the caller distinguish "bad cert"
+     * from "protocol mismatch".  SSL_get_verify_result is safe to
+     * call regardless of handshake state (returns X509_V_OK if no
+     * verification was performed or no cert was presented). */
+    long verify_err = SSL_get_verify_result(tls->ssl);
+    if (verify_err != X509_V_OK)
+        return CCEV_TLS_ERR_CERT;
 
     return CCEV_TLS_ERR_PROTO;
 }
@@ -484,7 +502,13 @@ int ccev_tls_handshake(ccev_tls_t *tls,
                         ccev_tls_handshake_cb cb,
                         void *udata) {
     if (!tls || !tls->ssl || !cb) return CCEV_ERR;
-    if (tls->handshake_done) return CCEV_TLS_OK;
+
+    /* Idempotent: if handshake already completed, fire callback
+     * immediately so callers always get a notification. */
+    if (tls->handshake_done) {
+        cb(udata, tls, CCEV_TLS_OK);
+        return CCEV_TLS_OK;
+    }
 
     tls->handshake_cb   = cb;
     tls->handshake_udata = udata;
@@ -576,6 +600,17 @@ ccev_tls_t *ccev_tls_wrap_stream(ccev_sock_t *sock,
 
 static void _tls_complete_cleanup(ccev_tls_t *tls) {
     if (!tls) return;
+
+    /* Fire pending handshake callback before releasing SSL.
+     * If close() is called mid-handshake the user's state machine
+     * would otherwise wait forever for a callback that never comes. */
+    if (!tls->handshake_done && tls->handshake_cb) {
+        ccev_tls_handshake_cb cb = tls->handshake_cb;
+        void *ud = tls->handshake_udata;
+        tls->handshake_cb = NULL;
+        cb(ud, tls, CCEV_TLS_ERR_IO);
+    }
+
     if (tls->timer) {
         ccev_timer_del(tls->st.sock.loop, tls->timer);
         tls->timer = NULL;

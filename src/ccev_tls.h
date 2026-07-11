@@ -98,6 +98,23 @@ typedef void (*ccev_tls_handshake_cb)(void *udata,
  *  Loads the specified certificate and private key files.
  *  The context is configured for CCEV_TLS_SERVER mode.
  *
+ *  @note Peer certificate verification is DISABLED by default
+ *  (CCEV_TLS_VERIFY_NONE).  Most servers do not require client
+ *  certificates, so this is the safe default.
+ *
+ *  @section mtls   Mutual TLS (mTLS) setup
+ *
+ *  To require and verify client certificates on the server side:
+ *
+ *    ccev_tls_ctx_t *ctx = ccev_tls_ctx_server("cert.pem", "key.pem");
+ *
+ *    // Step 1 — require a client certificate
+ *    ccev_tls_ctx_set_verify(ctx, CCEV_TLS_VERIFY_PEER);
+ *
+ *    // Step 2 — specify which CAs to trust for client certs.
+ *    // replace=true means ONLY this file (ignore any default CAs).
+ *    ccev_tls_ctx_set_ca_file(ctx, "client-ca.pem", true);
+ *
  *  @param cert_file  Path to the PEM certificate file.
  *  @param key_file   Path to the PEM private key file.
  *  @return TLS context, or NULL on failure. */

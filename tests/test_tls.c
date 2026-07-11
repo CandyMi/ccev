@@ -784,6 +784,46 @@ TEST(server_cert_verify) {
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Cipher configuration test
+ * ════════════════════════════════════════════════════════════════ */
+
+TEST(cipher_config) {
+    /* Valid TLS 1.2 cipher — must succeed. */
+    ccev_tls_ctx_t *ctx = ccev_tls_ctx_client();
+    if (!ctx) { passed++; return; }
+    ASSERT(ccev_tls_ctx_set_ciphers(ctx,
+        "ECDHE-RSA-AES128-GCM-SHA256") == CCEV_TLS_OK);
+    ccev_tls_ctx_free(ctx);
+
+    /* Valid TLS 1.3 cipher suite — must succeed. */
+    ctx = ccev_tls_ctx_client();
+    if (!ctx) { passed++; return; }
+    ASSERT(ccev_tls_ctx_set_ciphers(ctx,
+        "TLS_AES_128_GCM_SHA256") == CCEV_TLS_OK);
+    ccev_tls_ctx_free(ctx);
+
+    /* Both TLS 1.2 + 1.3 — must succeed. */
+    ctx = ccev_tls_ctx_client();
+    if (!ctx) { passed++; return; }
+    ASSERT(ccev_tls_ctx_set_ciphers(ctx,
+        "ECDHE-RSA-AES128-GCM-SHA256:TLS_AES_128_GCM_SHA256") == CCEV_TLS_OK);
+    ccev_tls_ctx_free(ctx);
+
+    /* Bogus cipher — must fail. */
+    ctx = ccev_tls_ctx_client();
+    if (!ctx) { passed++; return; }
+    ASSERT(ccev_tls_ctx_set_ciphers(ctx,
+        "BOGUS-CIPHER-THAT-DOES-NOT-EXIST") == CCEV_TLS_ERR_SYS);
+    ccev_tls_ctx_free(ctx);
+
+    /* NULL resets to default — must succeed. */
+    ctx = ccev_tls_ctx_client();
+    if (!ctx) { passed++; return; }
+    ASSERT(ccev_tls_ctx_set_ciphers(ctx, NULL) == CCEV_TLS_OK);
+    ccev_tls_ctx_free(ctx);
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  Main
  * ════════════════════════════════════════════════════════════════ */
 
@@ -801,6 +841,7 @@ int main(void) {
     RUN(alpn_negotiation);
     RUN(large_data_transfer);
     RUN(server_cert_verify);
+    RUN(cipher_config);
 
     printf("\n%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
