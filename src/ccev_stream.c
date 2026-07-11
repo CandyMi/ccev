@@ -210,6 +210,13 @@ static void _stream_on_readable(ccev_sock_t *sock, int events);
 
 static void _stream_timeout_cb(ccev_timer_t *timer, void *udata) {
     ccev_stream_reader_t *rd = (ccev_stream_reader_t *)udata;
+    /* Validate: plausible heap pointer (aligned, above guard page).
+     * Garbage pointers from use-after-free are typically unaligned
+     * sentinel values (0x0a, 0xFFFF, etc.) — the alignment check
+     * catches them without dereferencing rd.                     */
+    if (((uintptr_t)rd & (sizeof(void*)-1)) != 0 ||
+        (uintptr_t)rd < 0x10000) return;
+
     ccev_sock_t *sock = rd->sock;
     if (!sock || sock->closed) return;
 
@@ -333,15 +340,25 @@ static int _reader_start(ccev_stream_t *st, size_t want,
 
     ccev_stream_reader_t *rd = st->reader;
 
-    /* Validate: if reader claims a different sock, it's stale — drop it. */
-    if (rd && rd->sock != &st->sock) {
-        ccev__free_fn(rd->buf);
-        ccev__free_fn(rd);
-        st->reader = NULL;
-        rd = NULL;
+    /* Validate: plausible heap pointer (aligned, above guard page).
+     * Garbage pointers (0xFFFF, 0x0a, etc.) fail alignment and are
+     * silently discarded — no field access, no crash.              */
+    if (rd) {
+        if (((uintptr_t)rd & (sizeof(void*)-1)) != 0 ||
+            (uintptr_t)rd < 0x10000) {
+            /* Garbage pointer — force-reset, risk timer leak */
+            st->reader = NULL;
+            rd = NULL;
+        } else if (rd->sock != &st->sock) {
+            /* Stale reader from another stream — drop it */
+            ccev__free_fn(rd->buf);
+            ccev__free_fn(rd);
+            st->reader = NULL;
+            rd = NULL;
+        }
     }
 
-    /* Cancel active reader if one exists */
+    /* Cancel active reader if one exists (rd validated above) */
     if (rd && rd->cb) {
         ccev_stream_read_stop(st);
         rd = NULL;
