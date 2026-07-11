@@ -333,6 +333,14 @@ static int _reader_start(ccev_stream_t *st, size_t want,
 
     ccev_stream_reader_t *rd = st->reader;
 
+    /* Validate: if reader claims a different sock, it's stale — drop it. */
+    if (rd && rd->sock != &st->sock) {
+        ccev__free_fn(rd->buf);
+        ccev__free_fn(rd);
+        st->reader = NULL;
+        rd = NULL;
+    }
+
     /* Cancel active reader if one exists */
     if (rd && rd->cb) {
         ccev_stream_read_stop(st);
