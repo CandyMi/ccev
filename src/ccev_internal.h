@@ -148,6 +148,12 @@ extern void  (*ccev__free_fn)(void*);
 #define CCHEAP_COMPARE(a, b) \
     ((int64_t)((b)->timeout) - (int64_t)((a)->timeout))
 
+/* Reduce default bucket count: DNS cache is typically <50 entries,
+ * and dns_pending is <5.  64 default slots waste ~85% of the bucket
+ * array (512 bytes × 2 maps).  16 fits hosts + a few resolved domains
+ * without immediate resize.  See also cchashmap.h:CCHASHMAP_MAX_LOAD. */
+#define CCHASHMAP_DEFAULT_SLOT 16
+
 /* ccalg data structures */
 #include "ccheap.h"
 #include "cclist.h"
