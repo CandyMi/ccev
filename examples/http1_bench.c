@@ -1,18 +1,9 @@
 /**
  * @file http1_bench.c
- * @brief HTTP/1.1 benchmark server using the high-level ccev_stream_t API.
+ * @brief HTTP/1.1 benchmark server using ccev_stream_t readline + write.
  *
  * Designed for wrk / ab / hey:
  *   wrk -t4 -c100 -d30s http://127.0.0.1:8080/
- *
- * Reads the HTTP request line-by-line using ccev_stream_readline,
- * then sends a fixed "Hello, World!" response with Keep-Alive.
- *
- * Key design: the response write is fire-and-forget (no on_sent callback).
- * The next ccev_stream_readline is started immediately after writing,
- * so there is never a window where st->reader == NULL but the socket
- * is re-armed for EPOLLIN (which would cause a busy-loop on leftover
- * kernel data).
  */
 
 #include "ccev.h"
@@ -28,75 +19,46 @@
                  "\r\n" \
                  "Hello, World!"
 
-/* ── Forward declarations ── */
-
+static void on_body_line(void *udata, const char *data,
+                          size_t len, int status);
 static void on_request_line(void *udata, const char *data,
                              size_t len, int status);
-static void on_header_line(void *udata, const char *data,
-                            size_t len, int status);
 
-/* ── Callbacks ── */
-
-/** Called after reading one header line.  Empty line = end of headers. */
-static void on_header_line(void *udata, const char *data,
-                            size_t len, int status) {
+static void on_body_line(void *udata, const char *data,
+                          size_t len, int status) {
     ccev_stream_t *st = (ccev_stream_t *)udata;
-    if (status != CCEV_OK || len == 0) {
-        ccev_stream_close(st);
-        return;
-    }
+    if (status != CCEV_OK || len == 0) { ccev_stream_close(st); return; }
 
-    /* Detect end of headers: "\r\n" (len=2) or "\n" (len=1). */
+    /* End of headers (empty line "\r\n" or "\n")? */
     if ((len == 1 && data[0] == '\n') ||
         (len == 2 && data[0] == '\r' && data[1] == '\n')) {
-        /* Headers complete — send the fixed response (fire-and-forget)
-         * and immediately start reading the next request.
-         * The reader stays active, avoiding the busy-loop window. */
         ccev_stream_write(st, RESPONSE, strlen(RESPONSE), NULL, NULL);
         ccev_stream_readline(st, '\n', 8192, 0, on_request_line, st);
         return;
     }
-
-    /* More headers — read the next line. */
-    ccev_stream_readline(st, '\n', 8192, 0, on_header_line, st);
+    ccev_stream_readline(st, '\n', 8192, 0, on_body_line, st);
 }
 
-/** Called after reading the request line — read headers next. */
 static void on_request_line(void *udata, const char *data,
                              size_t len, int status) {
     ccev_stream_t *st = (ccev_stream_t *)udata;
-    if (status != CCEV_OK || len == 0) {
-        ccev_stream_close(st);
-        return;
-    }
-
-    /* Got the request line (e.g. "GET / HTTP/1.1\r\n").
-     * No parsing needed — just read headers. */
-    ccev_stream_readline(st, '\n', 8192, 0, on_header_line, st);
+    if (status != CCEV_OK || len == 0) { ccev_stream_close(st); return; }
+    ccev_stream_readline(st, '\n', 8192, 0, on_body_line, st);
 }
 
-/** Called when the connection is closed by the peer or on error. */
 static void on_close(void *udata) {
     ccev_stream_t *st = (ccev_stream_t *)udata;
-    ccev_stream_close(st);  /* frees write buffers and reader */
+    ccev_stream_close(st);
 }
 
-/** Accept callback — upgrade the client socket to a stream. */
 static void on_accept(void *udata, ccev_sock_t *client,
                        const char *ip, int port) {
     (void)udata; (void)ip; (void)port;
-
     ccev_stream_t *st = ccev_stream_open(client);
-    if (!st) {
-        ccev_sock_close(client);
-        return;
-    }
-
+    if (!st) { ccev_sock_close(client); return; }
     ccev_stream_set_close_cb(st, on_close, st);
     ccev_stream_readline(st, '\n', 8192, 0, on_request_line, st);
 }
-
-/* ── Main ── */
 
 int main(int argc, char **argv) {
     const char *host = argc > 2 ? argv[2] : "0.0.0.0";
