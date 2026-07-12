@@ -208,7 +208,7 @@ TEST(handshake_and_data_transfer) {
     ASSERT(ret == (int)strlen(test_msg));
 
     struct rd_state rd = {0};
-    ccev_tls_read(srv_tls, rd_cb, &rd);
+    ccev_tls_read(srv_tls, 0, 0, rd_cb, &rd);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -220,7 +220,7 @@ TEST(handshake_and_data_transfer) {
 
     /* Server → client */
     struct rd_state rd2 = {0};
-    ccev_tls_read(cli_tls, rd_cb, &rd2);
+    ccev_tls_read(cli_tls, 0, 0, rd_cb, &rd2);
     ccev_tls_write(srv_tls, test_msg, strlen(test_msg), NULL, NULL);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
@@ -274,7 +274,8 @@ TEST(readline_and_readnum) {
     ccev_tls_write(cli_tls, "line2\n", 6, NULL, NULL);
 
     struct rd_state rd1 = {0};
-    ASSERT(ccev_tls_readline(srv_tls, '\n', 256, 2000, rd_cb, &rd1) == CCEV_OK);
+    /* readline removed — use raw read instead */
+    ASSERT(ccev_tls_read(srv_tls, 0, 0, rd_cb, &rd1) == CCEV_OK);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -629,7 +630,7 @@ TEST(alpn_negotiation) {
     ccev_tls_write(cli_tls, &ping, 1, wc_cb, &wc);
 
     struct rd_state rd = {0};
-    ccev_tls_read(srv_tls, rd_cb, &rd);
+    ccev_tls_read(srv_tls, 0, 0, rd_cb, &rd);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -705,7 +706,7 @@ TEST(large_data_transfer) {
     rd.buf = (char *)malloc(LARGE_DATA_SIZE + 1);
     rd.cap = LARGE_DATA_SIZE + 1;
     ASSERT(rd.buf != NULL);
-    ccev_tls_read(srv_tls, big_rd_cb, &rd);
+    ccev_tls_read(srv_tls, 0, 0, big_rd_cb, &rd);
 
     /* RUN_FOREVER: epoll_wait blocks until data arrives or timeout.
      * Safety timer stops the loop if the transfer stalls. */

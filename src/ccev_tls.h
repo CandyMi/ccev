@@ -313,26 +313,17 @@ int ccev_tls_flush(ccev_tls_t *tls);
 
 /** @brief Read continuously — dispatch decrypted data as it arrives.
  *
- *  Unlike readline/readnum (one-shot), this keeps the reader active
- *  after each dispatch until ccev_tls_read_stop() or error.
+ *  Raw dispatch mode: at most @p limit bytes per callback (0 = unlimited).
+ *  Active until ccev_tls_read_stop(), timeout, or error.
  *
  *  @param tls        TLS handle.
+ *  @param limit      Max bytes per callback (0 = unlimited).
+ *  @param timeout_ms Idle timeout in ms (0 = no timeout).
  *  @param cb         Dispatch callback.
  *  @param udata      User pointer for @p cb.
  *  @return CCEV_OK or CCEV_ERR. */
-int ccev_tls_read(ccev_tls_t *tls,
+int ccev_tls_read(ccev_tls_t *tls, size_t limit, int timeout_ms,
                    ccev_stream_cb cb, void *udata);
-
-/** @brief Read until delimiter (delimiter inclusive).
- *  @param tls        TLS handle.
- *  @param delim      Delimiter byte.
- *  @param maxlen     Maximum bytes before CCEV_ERR.
- *  @param timeout_ms Read timeout in ms (0 = no timeout).
- *  @param cb         Completion callback.
- *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
-int ccev_tls_readline(ccev_tls_t *tls, char delim, size_t maxlen,
-                       int timeout_ms, ccev_stream_cb cb, void *udata);
 
 /** @brief Read exactly N bytes.
  *  @param tls        TLS handle.

@@ -239,14 +239,21 @@ static void _tls_reader_dispatch(ccev_tls_t *tls, size_t consumed, int status) {
     tls->read_len  = remaining;
     tls->read_cb   = NULL;
 
-    cb(ud, tls->read_buf + data_off, consumed, status);
+    /* Save buffer before callback — cb may replace read_buf
+     * (re-entrant _tls_reader_start frees old + allocs new). */
+    char   *old_buf = tls->read_buf;
+    size_t  old_cap = tls->read_cap;
 
-    if (tls->read_pos > tls->read_cap / 2 && tls->read_len > 0) {
+    cb(ud, old_buf + data_off, consumed, status);
+
+    /* Compact if buffer wasn't replaced by callback. */
+    if (tls->read_buf == old_buf && tls->read_pos > tls->read_cap / 2
+        && tls->read_len > 0) {
         memmove(tls->read_buf, tls->read_buf + tls->read_pos, tls->read_len);
         tls->read_pos = 0;
     }
 
-    if (remaining == 0) {
+    if (remaining == 0 && tls->read_buf == old_buf) {
         ccev__free_fn(tls->read_buf);
         tls->read_buf = NULL;
         tls->read_cap = 0;
@@ -274,19 +281,9 @@ static void _tls_reader_acc_dispatch(ccev_tls_t *tls) {
             cb(ud, tls->read_buf + data_off, consumed, CCEV_OK);
             tls->read_pos = 0;
         }
-    } else if (tls->read_is_n) {
+    } else { /* CCEV_TLS_READNUM */
         if (tls->read_len >= tls->read_want)
             consumed = tls->read_want;
-    } else {
-        const char *found = (const char *)memchr(
-            tls->read_buf + tls->read_pos, tls->read_delim, tls->read_len);
-        if (found) {
-            consumed = (size_t)(found - (tls->read_buf + tls->read_pos)) + 1;
-        }
-        if (consumed == 0 && tls->read_len >= tls->read_want) {
-            consumed = tls->read_want;
-            status   = CCEV_ERR;
-        }
     }
 
     if (consumed > 0) {
@@ -326,8 +323,7 @@ static void _tls_reader_accumulate(ccev_tls_t *tls, const char *data, size_t len
 }
 
 static int _tls_reader_start(ccev_tls_t *tls, size_t want,
-                              char delim, bool is_n, bool is_raw,
-                              int timeout_ms,
+                              bool is_raw, int timeout_ms,
                               ccev_stream_cb cb, void *udata) {
     if (!tls || !cb || !tls->handshake_done) return CCEV_ERR;
     if (!is_raw && want == 0) return CCEV_ERR;
@@ -338,57 +334,48 @@ static int _tls_reader_start(ccev_tls_t *tls, size_t want,
         tls->timer = NULL;
     }
 
-    if (is_raw) {
-        if (!tls->read_buf) {
-            tls->read_buf = (char *)ccev__realloc_fn(NULL, 16384);
-            if (!tls->read_buf) return CCEV_ERR;
-            tls->read_cap = 16384;
-        }
-        tls->read_pos = 0;
-        tls->read_len = 0;
-    } else {
-        if (tls->read_cap < want + 1) {
-            char *nb = (char *)ccev__realloc_fn(tls->read_buf, want + 1);
-            if (!nb) return CCEV_ERR;
-            tls->read_buf = nb;
-            tls->read_cap = want + 1;
-        }
+    /* Free old buffer from a previous read mode. */
+    if (tls->read_buf) {
+        ccev__free_fn(tls->read_buf);
+        tls->read_buf = NULL;
+        tls->read_cap = 0;
     }
 
+    if (is_raw) {
+        tls->read_buf = (char *)ccev__realloc_fn(NULL, 16384);
+        if (!tls->read_buf) return CCEV_ERR;
+        tls->read_cap = 16384;
+    } else {
+        tls->read_buf = (char *)ccev__realloc_fn(NULL, want + 1);
+        if (!tls->read_buf) return CCEV_ERR;
+        tls->read_cap = want + 1;
+    }
+    tls->read_pos = 0;
+    tls->read_len = 0;
+
     tls->read_want  = is_raw ? tls->read_cap : want;
-    tls->read_delim = delim;
-    tls->read_is_n  = is_n;
-    tls->read_mode  = is_raw ? CCEV_TLS_READ
-                              : (is_n ? CCEV_TLS_READNUM : CCEV_TLS_READLINE);
+    tls->read_mode  = is_raw ? CCEV_TLS_READ : CCEV_TLS_READNUM;
     tls->read_cb    = cb;
     tls->read_udata = udata;
 
-    if (tls->read_len > 0)
-        _tls_reader_acc_dispatch(tls);
-
-    if (tls->read_cb && timeout_ms > 0 && !tls->timer) {
+    if (timeout_ms > 0 && !tls->timer) {
         tls->timer = ccev_timer_add(tls->st.sock.loop, (uint64_t)timeout_ms,
                                      CCEV_TIMER_ONCE, _tls_read_timeout_cb, tls);
     }
 
-    if (tls->read_cb) {
-        tls->st.sock.rcb = _tls_on_readable;
-        ccev__sock_rearm(tls->st.sock.loop, &tls->st.sock);
-    }
+    tls->st.sock.rcb = _tls_on_readable;
+    ccev__sock_rearm(tls->st.sock.loop, &tls->st.sock);
 
     return CCEV_OK;
 }
 
-int ccev_tls_read(ccev_tls_t *tls, ccev_stream_cb cb, void *udata) {
-    return _tls_reader_start(tls, 0, 0, false, true, 0, cb, udata);
+int ccev_tls_read(ccev_tls_t *tls, size_t limit, int timeout_ms,
+                   ccev_stream_cb cb, void *udata) {
+    return _tls_reader_start(tls, limit, true, timeout_ms, cb, udata);
 }
-int ccev_tls_readline(ccev_tls_t *tls, char delim, size_t maxlen,
-                       int timeout_ms, ccev_stream_cb cb, void *udata) {
-    return _tls_reader_start(tls, maxlen, delim, false, false, timeout_ms, cb, udata);
-}
-int ccev_tls_readnum(ccev_tls_t *tls, size_t n,
-                      int timeout_ms, ccev_stream_cb cb, void *udata) {
-    return _tls_reader_start(tls, n, 0, true, false, timeout_ms, cb, udata);
+int ccev_tls_readnum(ccev_tls_t *tls, size_t n, int timeout_ms,
+                      ccev_stream_cb cb, void *udata) {
+    return _tls_reader_start(tls, n, false, timeout_ms, cb, udata);
 }
 
 /* ════════════════════════════════════════════════════════════════
