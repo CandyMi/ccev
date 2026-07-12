@@ -1,27 +1,20 @@
 /**
  * @file ccev_stream.c
- * @brief Stream — write buffering, sendfile, stream reader (readline/readnum).
+ * @brief Stream — write buffering, sendfile, stream read (raw / readnum / readline).
  *
  * @author CandyMi
  * @license MIT
  *
- * The stream embeds a ccev_sock_t by value and takes over its rcb/wcb
- * to drive buffered I/O and the stream reader state machine.
+ * The stream embeds a ccev_sock_t by value and takes over its wcb
+ * for buffered I/O.  The read path offers three modes, all zero-
+ * allocation in the common case (data already in kernel buffer):
  *
- * Write path:
- *   ccev_stream_write() appends data to wlist, then tries a non-blocking
- *   sendv.  If EAGAIN, arms EPOLLOUT.  Per-buffer callbacks fire when
- *   that specific buffer chunk has been flushed.
+ *   ccev_stream_read()     — raw dispatch
+ *   ccev_stream_readnum()  — fixed-N bytes
+ *   ccev_stream_readline() — delimiter-based
  *
- * Read path:
- *   ccev_stream_readline/readnum temporarily replace the sock's rcb
- *   with an internal accumulation function.  When the delimiter or
- *   requested byte count is reached, the user callback fires once and
- *   the original rcb is restored.  A timeout timer can be set to
- *   cancel the read if no data arrives within the deadline.
- *
- * Sendfile:
- *   Opens the file, calls ccsocket_sendfile() in a loop on EPOLLOUT.
+ * Stack buffer size is configurable at compile time:
+ *   -DCCEV_READ_STACK_SIZE=4096
  *
  * File: ccev_stream.c
  */
@@ -199,235 +192,76 @@ static void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st)
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  Stream reader — forward declarations
+ *  Stream reader — internal recv callback (replaces sock->rcb)
  * ════════════════════════════════════════════════════════════════ */
 
-static void _stream_on_readable(ccev_sock_t *sock, int events);
+#ifndef CCEV_READ_STACK_SIZE
+#  define CCEV_READ_STACK_SIZE 16384
+#endif
+#define READ_STACK_SZ CCEV_READ_STACK_SIZE
 
-/* ════════════════════════════════════════════════════════════════
- *  Stream reader — timeout callback
- * ════════════════════════════════════════════════════════════════ */
-
-static void _stream_timeout_cb(ccev_timer_t *timer, void *udata) {
-    ccev_stream_reader_t *rd = (ccev_stream_reader_t *)udata;
-    ccev_sock_t *sock = rd->sock;
-    if (!sock || sock->closed) return;
-
-    ccev_stream_cb cb = rd->cb;
-    void *cb_udata   = rd->udata;
-
-    /* Restore original rcb */
-    sock->rcb = rd->old_rcb;
-
-    /* Free reader resources */
-    rd->timer = NULL; /* timer is self-deleting (ONCE) or already deleted */
-    ccev__free_fn(rd->buf);
-    ccev__free_fn(rd);
-
-    /* Clear reader on stream */
-    ccev_stream_t *st = _sock_to_stream(sock);
-    st->reader = NULL;
-
-    if (cb) cb(cb_udata, NULL, 0, CCEV_ERR);
+static void _read_timeout_cb(ccev_timer_t *timer, void *udata) {
+    ccev_stream_t *st = (ccev_stream_t *)udata;
+    (void)timer;
+    if (!st || st->sock.closed) return;
+    st->read_timer = NULL;
+    if (st->rn_heap) { ccev__free_fn(st->rn_heap); st->rn_heap = NULL; }
+    st->want  = 0;
+    st->delim = 0;
+    if (st->read_cb) {
+        ccev_stream_cb cb = st->read_cb;
+        st->read_cb = NULL;
+        cb(st->read_udata, NULL, 0, CCEV_ERR);
+    }
+    ccev__sock_schedule_close(st->sock.loop, &st->sock);
 }
 
-/* ════════════════════════════════════════════════════════════════
- *  Stream reader — dispatch
- * ════════════════════════════════════════════════════════════════ */
+/* Reset idle timer on data arrival. */
+static void _read_timer_bump(ccev_stream_t *st) {
+    if (st->read_timer)
+        ccev_timer_reset(st->sock.loop, st->read_timer,
+                          (uint64_t)st->timeout_ms);
+}
 
-static void _reader_dispatch(ccev_stream_reader_t *rd,
-                              size_t consumed, int status) {
-    ccev_sock_t      *sock = rd->sock;
-    ccev_stream_t    *st   = _sock_to_stream(sock);
-    ccev_stream_cb    cb   = rd->cb;
-    void             *ud   = rd->udata;
-    size_t            remain = rd->len - consumed;
-
-    /* Cancel timeout timer if active */
-    if (rd->timer) {
-        ccev_timer_del(sock->loop, rd->timer);
-        rd->timer = NULL;
-    }
-
-    /* Restore original rcb */
-    sock->rcb = rd->old_rcb;
-
-    /* Save where the consumed data starts, then advance position. */
-    size_t data_off = rd->pos;
-    rd->pos += consumed;
-    rd->len  = remain;
-    rd->cb   = NULL; /* Mark idle — re-entrant readline/num can take over */
-
-    /* Fire user callback — rd->buf[data_off .. data_off+consumed-1] is stable
-     * because rd->buf is not realloced during the callback.  A re-entrant
-     * _reader_start searches rd->buf[rd->pos ..] which is past the consumed
-     * region, so the callback's pointer remains valid. */
-    cb(ud, rd->buf + data_off, consumed, status);
-
-    /* ★ callback may have freed rd via ccev_stream_read_stop — re-fetch */
-    rd = st->reader;
-    if (!rd) return;
-
-    /* Compact: when pos has grown past half the buffer, move remaining
-     * data to the front so the recv target area stays large. */
-    if (rd->pos > rd->cap / 2 && rd->len > 0) {
-        memmove(rd->buf, rd->buf + rd->pos, rd->len);
-        rd->pos = 0;
-    }
-
-    /* Free reader if no remaining data and no re-entrant read started */
-    if (remain == 0 && rd->cb == NULL) {
-        ccev__free_fn(rd->buf);
-        ccev__free_fn(rd);
-        st->reader = NULL;
+/* Release all read state.  Does NOT fire cb. */
+static void _read_drop(ccev_stream_t *st) {
+    if (st->rn_heap) { ccev__free_fn(st->rn_heap); st->rn_heap = NULL; }
+    st->rn_total = 0;
+    st->want     = 0;
+    st->delim    = 0;
+    if (st->read_timer) {
+        ccev_timer_del(st->sock.loop, st->read_timer);
+        st->read_timer = NULL;
     }
 }
 
-/* ════════════════════════════════════════════════════════════════
- *  Stream reader — raw dispatch (continuous mode)
- * ════════════════════════════════════════════════════════════════ */
+/* ── completion helpers: clear state before callback, free after ── */
 
-static void _reader_raw_dispatch(ccev_stream_reader_t *rd,
-                                  size_t consumed, int status) {
-    ccev_stream_cb cb = rd->cb;
-    void          *ud = rd->udata;
-    ccev_sock_t   *sock = rd->sock;
-    size_t  data_off  = rd->pos;
-
-    rd->pos += consumed;
-    rd->len -= consumed;
-
-    /* Fire user callback — buffer remains valid during callback */
-    cb(ud, rd->buf + data_off, consumed, status);
-
-    /* ★ callback may have freed rd via ccev_stream_read_stop — re-fetch */
-    ccev_stream_t *st = _sock_to_stream(sock);
-    rd = st->reader;
-    if (!rd || !rd->is_raw) return;
-
-    /* Compact: when pos has grown past half the buffer, move remaining
-     * data to the front so the recv target area stays large.
-     * Always reset pos=0 after dispatch so recv space is at the front. */
-    if (rd->pos > rd->cap / 2) {
-        if (rd->len > 0)
-            memmove(rd->buf, rd->buf + rd->pos, rd->len);
-        rd->pos = 0;
-    } else if (rd->len == 0) {
-        rd->pos = 0;
-    }
-
-    /* Reader stays active — don't restore old_rcb, don't clear cb,
-     * don't free reader.  Continuous mode. */
+static void _readnum_done(ccev_stream_t *st, char *heap, size_t n) {
+    st->rn_heap = NULL; st->rn_total = 0; st->want = 0; st->delim = 0;
+    st->read_cb(st->read_udata, heap, n, CCEV_OK);
+    ccev__free_fn(heap);
 }
 
-/* ════════════════════════════════════════════════════════════════
- *  Stream reader — start (internal)
- * ════════════════════════════════════════════════════════════════ */
+static void _readline_done(ccev_stream_t *st, char *heap,
+                            size_t line_len, size_t total) {
+    size_t tail = total - line_len;
+    char  *tail_ptr = heap + line_len;
 
-static int _reader_start(ccev_stream_t *st, size_t want,
-                          char delim, bool is_n, bool is_raw,
-                          int timeout_ms,
-                          ccev_stream_cb cb, void *udata) {
-    if (!st || !cb || st->sock.closed) return CCEV_ERR;
-    if (!is_raw && want == 0) return CCEV_ERR;
+    st->rn_heap = NULL; st->rn_total = 0; st->want = 0; st->delim = 0;
+    st->read_cb(st->read_udata, heap, line_len, CCEV_OK);
 
-    ccev_stream_reader_t *rd = st->reader;
-
-    /* Cancel active reader if one exists */
-    if (rd && rd->cb) {
-        ccev_stream_read_stop(st);
-        rd = NULL;
-    }
-
-    /* Create or reuse reader */
-    if (!rd) {
-        rd = (ccev_stream_reader_t *)ccev__realloc_fn(NULL,
-                                        sizeof(ccev_stream_reader_t));
-        if (!rd) return CCEV_ERR;
-        memset(rd, 0, sizeof(*rd));
-        size_t alloc = is_raw ? 16384 : (want + 1);
-        rd->buf = (char *)ccev__realloc_fn(NULL, alloc);
-        if (!rd->buf) { ccev__free_fn(rd); return CCEV_ERR; }
-        rd->cap          = alloc;
-        rd->old_rcb      = st->sock.rcb;
-        rd->sock         = &st->sock;
-        st->reader       = rd;
-    } else {
-        /* Idle reader — grow buffer if needed */
-        size_t need = is_raw ? 16384 : (want + 1);
-        if (rd->cap < need) {
-            char *nb = (char *)ccev__realloc_fn(rd->buf, need);
-            if (!nb) { ccev_stream_read_stop(st); return CCEV_ERR; }
-            rd->buf = nb;
-            rd->cap = need;
+    /* Callback may have switched mode.  If heap had bytes after the
+     * dispatched line, preserve them for the new mode. */
+    if (tail > 0 && st->want > 0) {
+        st->rn_heap = (char *)ccev__realloc_fn(NULL, st->want);
+        if (st->rn_heap) {
+            size_t cp = tail < st->want ? tail : st->want;
+            memcpy(st->rn_heap, tail_ptr, cp);
+            st->rn_total = cp;
         }
-        rd->old_rcb = st->sock.rcb;
     }
-
-    rd->want      = is_raw ? rd->cap : want;
-    rd->delim     = delim;
-    rd->is_n      = is_n;
-    rd->is_raw    = is_raw;
-    rd->cb        = cb;
-    rd->udata     = udata;
-
-    /* Try to satisfy from existing buffered data.
-     *
-     * Do NOT call _reader_dispatch here — that creates deep recursion:
-     *   _reader_dispatch → on_header_line → ccev_stream_readline
-     *     → _reader_start → _reader_dispatch → ... (N headers deep)
-     *
-     * Instead, arm EPOLLIN and fall through to the compact+rearm path.
-     * _stream_on_readable will pick up the buffered data in its retry
-     * loop, keeping the call stack at a constant depth. */
-    if (!is_raw) {
-        if (rd->len >= want) {
-            goto arm_reader;
-        }
-        if (!is_n && memchr(rd->buf + rd->pos, delim, rd->len)) {
-            goto arm_reader;
-        }
-    } else {
-        if (rd->len > 0)
-            goto arm_reader;
-    }
-
-arm_reader:
-    /* Compact buffer to maximise recv space */
-    if (rd->pos > 0 && rd->len > 0) {
-        memmove(rd->buf, rd->buf + rd->pos, rd->len);
-    }
-    rd->pos = 0;
-    st->sock.rcb = _stream_on_readable;
-
-    /* Re-arm only when there's no buffered data — the dispatch paths
-     * below re-arm internally through Phase 2's EAGAIN handler:
-     *
-     *   rd->len == 0       → re-arm now, wait for epoll
-     *   rd->len > 0 (re-entrant) → retry loop → recv → EAGAIN → re-arm
-     *   rd->len > 0 (sync) → _stream_on_readable retry loop → recv → EAGAIN → re-arm
-     */
-    if (rd->len == 0)
-        ccev__sock_rearm(st->sock.loop, &st->sock);
-
-    /* When called from user code (not re-entrantly) with buffered data
-     * already in rd->buf, dispatch it immediately.  The st->reading flag
-     * prevents recursion if the user callback re-entrantly calls readline:
-     * _stream_on_readable sets st->reading = true, so the nested call
-     * to _reader_start will skip this path and rely on the retry loop. */
-    if (rd->len > 0 && !st->reading)
-        _stream_on_readable(&st->sock, 0);
-
-    /* Re-fetch reader — the direct dispatch above may have freed it
-     * (remain==0 + no re-entrant read) or a re-entrant read already
-     * replaced it with its own timer.  Skip timer setup in both cases. */
-    rd = st->reader;
-    if (rd && timeout_ms > 0 && rd->timer == NULL) {
-        rd->timer = ccev_timer_add(st->sock.loop, (uint64_t)timeout_ms,
-                                    CCEV_TIMER_ONCE, _stream_timeout_cb, rd);
-    }
-
-    return CCEV_OK;
+    ccev__free_fn(heap);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -438,107 +272,262 @@ static void _stream_on_readable(ccev_sock_t *sock, int events) {
     (void)events;
     if (!sock || sock->closed) return;
     ccev_stream_t *st = _sock_to_stream(sock);
-    st->reading = true;
+    char stack[READ_STACK_SZ];
 
-    /* ── Retry loop: process buffered data without recursion ──
-     *
-     * The re-entrant pattern (callback → ccev_stream_readline → _reader_start
-     * → _reader_dispatch → callback → ...) creates deep recursion proportional
-     * to the number of header lines in one TCP segment.  By looping here
-     * instead of inlining _reader_dispatch in _reader_start, the call stack
-     * stays at a constant depth regardless of how many lines arrive. */
-retry:
-    {
-        ccev_stream_reader_t *rd = st->reader;
-        if (!rd) goto done;
+    /* Retry point: mode-switch guard may have populated rn_heap
+     * without a kernel recv.  Loop back to process it immediately. */
+retry_heap:
 
-        /* ── Phase 1: check buffered data first ── */
-        size_t consumed = 0;
-        int    status   = CCEV_OK;
-
-        if (rd->is_raw) {
-            /* Raw mode: dispatch all accumulated data immediately */
-            if (rd->len > 0) {
-                consumed = rd->len;
-                _reader_raw_dispatch(rd, consumed, CCEV_OK);
-                /* Reader stays active (continuous).  After dispatch,
-                 * cb is still set so we go to the re-entrancy check. */
+    /* ── Raw mode ── */
+    if (st->want == 0 && st->delim == 0) {
+        if (!st->read_cb) return;
+        for (;;) {
+            int to_read = (st->limit == 0) ? (int)sizeof(stack)
+                         : (st->limit < sizeof(stack) ? (int)st->limit
+                                                       : (int)sizeof(stack));
+            int nread = 0;
+            ccsocket_stcode_t rc = ccsocket_recv(sock->fd, stack,
+                                                   to_read, &nread);
+            if (rc == CC_OPCODE_OK && nread > 0) {
+                st->read_cb(st->read_udata, stack, (size_t)nread, CCEV_OK);
+                _read_timer_bump(st);
+                if (st->want != 0 || st->delim != 0) return; /* switched */
+                continue;
             }
-        } else if (rd->is_n) {
-            if (rd->len >= rd->want) {
-                consumed = rd->want;
-            }
-        } else {
-            const char *found = (const char *)memchr(
-                rd->buf + rd->pos, rd->delim, rd->len);
-            if (found) {
-                consumed = (size_t)(found - (rd->buf + rd->pos)) + 1;
-            }
-            if (consumed == 0 && rd->len >= rd->want) {
-                consumed = rd->want;
-                status   = CCEV_ERR;
-            }
+            if (rc == CC_OPCODE_WAIT) { ccev__sock_rearm(sock->loop, sock); return; }
+            st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+            _read_drop(st);
+            ccev__sock_schedule_close(sock->loop, sock);
+            return;
         }
-
-        if (consumed > 0) {
-            if (rd->is_raw) {
-                /* Raw mode: _reader_raw_dispatch already fired the callback.
-                 * Reader stays active (continuous) — cb is still set.
-                 * Go to re-entrancy check. */
-            } else {
-                _reader_dispatch(rd, consumed, status);
-                /* After dispatch, the user callback may have called ccev_stream_readline
-                 * re-entrantly, setting up a new reader with more buffered data.
-                 * Loop back to process it immediately instead of unwinding the stack
-                 * and recursing through _reader_start → _reader_dispatch again.
-                 *
-                 * If the callback did NOT start a new read, rd->cb was set to NULL
-                 * by _reader_dispatch and there is nothing left to deliver.
-                 * The reader may also have been freed (remain==0 + no re-entrant
-                 * read), making the local `rd` a dangling pointer — re-fetch
-                 * st->reader to check. */
-            }
-
-            if (st->reader && st->reader->cb)
-                goto retry;
-            goto done;
-        }
-
-        /* ── Phase 2: no match in buffer — recv more data ── */
-        int nread = 0;
-        ccsocket_stcode_t rc = ccsocket_recv(sock->fd,
-                                              rd->buf + rd->pos + rd->len,
-                                              rd->cap - rd->pos - rd->len,
-                                              &nread);
-
-        /* EAGAIN — re-arm and return */
-        if (rc == CC_OPCODE_WAIT) {
-            ccev__sock_rearm(sock->loop, sock);
-            goto done;
-        }
-
-        /* Error or EOF */
-        if (rc != CC_OPCODE_OK || nread <= 0) {
-            ccev_stream_cb cb = rd->cb;
-            void *cb_udata    = rd->udata;
-            if (rd->timer) {
-                ccev_timer_del(sock->loop, rd->timer);
-                rd->timer = NULL;
-            }
-            sock->rcb = rd->old_rcb;
-            ccev__free_fn(rd->buf);
-            ccev__free_fn(rd);
-            st->reader = NULL;
-            if (cb) cb(cb_udata, NULL, 0, CCEV_ERR);
-            goto done;
-        }
-
-        rd->len += (size_t)nread;
-        goto retry;  /* recheck condition with new data */
     }
 
-done:
-    st->reading = false;
+    /* ── Readline mode (delim != 0) ── */
+    if (st->delim != 0) {
+        char   saved_delim = st->delim;
+        size_t saved_want  = st->want;
+
+        /* Partial heap continuation */
+        if (st->rn_heap) {
+            /* Check existing heap data first (may have been populated
+             * by mode-switch guard without a new recv). */
+            {
+                char *found = (char *)memchr(st->rn_heap, saved_delim,
+                                              st->rn_total);
+                if (found) {
+                    _readline_done(st, st->rn_heap,
+                                    (size_t)(found - st->rn_heap) + 1,
+                                    st->rn_total);
+                    /* Fall through — retry_heap will process any
+                     * preserved tail bytes without a new recv. */
+                    goto retry_heap;
+                }
+                if (st->rn_total >= saved_want) {
+                    st->read_cb(st->read_udata, st->rn_heap,
+                                 saved_want, CCEV_ERR);
+                    _read_drop(st);
+                    ccev__sock_schedule_close(sock->loop, sock);
+                    return;
+                }
+            }
+            int nread = 0;
+            size_t remain = st->want - st->rn_total;
+            ccsocket_stcode_t rc = ccsocket_recv(sock->fd,
+                                                  st->rn_heap + st->rn_total,
+                                                  remain, &nread);
+            if (rc == CC_OPCODE_OK && nread > 0) {
+                size_t prev = st->rn_total;
+                st->rn_total += (size_t)nread;
+                char *found = (char *)memchr(st->rn_heap + prev,
+                                              saved_delim,
+                                              st->rn_total - prev);
+                if (found) {
+                    _readline_done(st, st->rn_heap,
+                                    (size_t)(found - st->rn_heap) + 1,
+                                    st->rn_total);
+                    ccev__sock_rearm(sock->loop, sock);
+                    return;
+                }
+                if (st->rn_total >= saved_want) {
+                    st->read_cb(st->read_udata, st->rn_heap,
+                                 saved_want, CCEV_ERR);
+                    _read_drop(st);
+                    ccev__sock_schedule_close(sock->loop, sock);
+                    return;
+                }
+            }
+            if (rc == CC_OPCODE_WAIT) { ccev__sock_rearm(sock->loop, sock); return; }
+            st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+            _read_drop(st);
+            ccev__sock_schedule_close(sock->loop, sock);
+            return;
+        }
+
+        /* First recv: dispatch complete lines from stack */
+        {
+            int nread = 0;
+            int to_read = (saved_want < sizeof(stack)) ? (int)saved_want
+                                                         : (int)sizeof(stack);
+            ccsocket_stcode_t rc = ccsocket_recv(sock->fd, stack, to_read, &nread);
+            if (rc == CC_OPCODE_OK && nread > 0) {
+                char *p   = stack;
+                char *end = stack + nread;
+                while (p < end) {
+                    char *nl = (char *)memchr(p, saved_delim,
+                                               (size_t)(end - p));
+                    if (!nl) break;
+                    st->read_cb(st->read_udata, p,
+                                 (size_t)(nl - p + 1), CCEV_OK);
+                    _read_timer_bump(st);
+                    p = nl + 1;
+
+                    /* Check if callback changed the read mode */
+                    if (st->delim != saved_delim ||
+                        st->want  != saved_want  ||
+                        st->want  == 0) {
+                        if (p < end && st->want > 0) {
+                            size_t n = (size_t)(end - p);
+                            if (st->delim != 0) {
+                                /* Switched to readline: search tail */
+                                char *nl2 = (char *)memchr(p, st->delim, n);
+                                if (nl2) {
+                                    /* Dispatch one line, advance, keep tail */
+                                    size_t line_len = (size_t)(nl2 - p) + 1;
+                                    ccev_stream_cb cb2 = st->read_cb;
+                                    void *ud2 = st->read_udata;
+                                    char *old = st->rn_heap;
+                                    st->rn_heap = NULL; st->rn_total = 0;
+                                    st->want = 0; st->delim = 0;
+                                    cb2(ud2, p, line_len, CCEV_OK);
+                                    if (old) ccev__free_fn(old);
+                                    p = nl2 + 1;
+                                }
+                            } else if (n >= st->want) {
+                                /* Switched to readnum: dispatch, keep tail */
+                                size_t sw = st->want;
+                                ccev_stream_cb cb2 = st->read_cb;
+                                void *ud2 = st->read_udata;
+                                char *old = st->rn_heap;
+                                st->rn_heap = NULL; st->rn_total = 0;
+                                st->want = 0; st->delim = 0;
+                                cb2(ud2, p, sw, CCEV_OK);
+                                if (old) ccev__free_fn(old);
+                                p += sw;
+                            }
+                            /* Save any remaining bytes to new mode's heap */
+                            if (p < end && st->want > 0) {
+                                size_t rem = (size_t)(end - p);
+                                st->rn_heap = (char *)ccev__realloc_fn(
+                                    NULL, st->want);
+                                if (st->rn_heap) {
+                                    size_t cp = rem < st->want ? rem : st->want;
+                                    memcpy(st->rn_heap, p, cp);
+                                    st->rn_total = cp;
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    saved_delim = st->delim;
+                    saved_want  = st->want;
+                }
+
+                /* Residual tail (no delimiter found) */
+                if (p < end) {
+                    size_t tail = (size_t)(end - p);
+                    if (tail >= saved_want) {
+                        st->read_cb(st->read_udata, p, saved_want, CCEV_ERR);
+                        _read_drop(st);
+                        ccev__sock_schedule_close(sock->loop, sock);
+                        return;
+                    }
+                    st->rn_heap = (char *)ccev__realloc_fn(NULL, saved_want);
+                    if (!st->rn_heap) {
+                        st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+                        _read_drop(st);
+                        ccev__sock_schedule_close(sock->loop, sock);
+                        return;
+                    }
+                    memcpy(st->rn_heap, p, tail);
+                    st->rn_total = tail;
+                }
+                ccev__sock_rearm(sock->loop, sock);
+                return;
+            }
+            if (rc == CC_OPCODE_WAIT) { ccev__sock_rearm(sock->loop, sock); return; }
+            st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+            _read_drop(st);
+            ccev__sock_schedule_close(sock->loop, sock);
+        }
+        return;
+    }
+
+    /* ── Readnum mode (want > 0, delim == 0) ── */
+
+    /* Partial heap continuation */
+    if (st->rn_heap) {
+        /* Check existing heap data first */
+        if (st->rn_total >= st->want) {
+            _readnum_done(st, st->rn_heap, st->want);
+            goto retry_heap;
+        }
+        int nread = 0;
+        size_t remain = st->want - st->rn_total;
+        ccsocket_stcode_t rc = ccsocket_recv(sock->fd,
+                                              st->rn_heap + st->rn_total,
+                                              remain, &nread);
+        if (rc == CC_OPCODE_OK && nread > 0) {
+            st->rn_total += (size_t)nread;
+            if (st->rn_total >= st->want) {
+                _readnum_done(st, st->rn_heap, st->want);
+                ccev__sock_rearm(sock->loop, sock);
+                return;
+            }
+        }
+        if (rc == CC_OPCODE_WAIT) { ccev__sock_rearm(sock->loop, sock); return; }
+        st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+        _read_drop(st);
+        ccev__sock_schedule_close(sock->loop, sock);
+        return;
+    }
+
+    /* First recv: try stack */
+    {
+        int nread = 0;
+        int to_read = (st->want < sizeof(stack)) ? (int)st->want
+                                                  : (int)sizeof(stack);
+        ccsocket_stcode_t rc = ccsocket_recv(sock->fd, stack, to_read, &nread);
+        if (rc == CC_OPCODE_OK && nread > 0) {
+            if ((size_t)nread >= st->want) {
+                st->read_cb(st->read_udata, stack, st->want, CCEV_OK);
+                _read_drop(st);
+                ccev__sock_rearm(sock->loop, sock);
+                return;
+            }
+            char *heap = (char *)ccev__realloc_fn(NULL, st->want);
+            if (!heap) {
+                st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+                _read_drop(st);
+                ccev__sock_schedule_close(sock->loop, sock);
+                return;
+            }
+            memcpy(heap, stack, (size_t)nread);
+            st->rn_heap  = heap;
+            st->rn_total = (size_t)nread;
+            ccev__sock_rearm(sock->loop, sock);
+            return;
+        }
+        if (rc == CC_OPCODE_WAIT) { ccev__sock_rearm(sock->loop, sock); return; }
+        st->read_cb(st->read_udata, NULL, 0, CCEV_ERR);
+        _read_drop(st);
+        ccev__sock_schedule_close(sock->loop, sock);
+    }
+
+    /* Mode-switch guard may have populated rn_heap from stack data.
+     * If heap has pending bytes, loop back to process them immediately
+     * instead of waiting for the next epoll event. */
+    if (st->rn_heap && st->rn_total > 0)
+        goto retry_heap;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -558,12 +547,13 @@ ccev_stream_t *ccev_stream_open(ccev_sock_t *sock) {
     memset((char*)&st->sock + sizeof(ccev_sock_t), 0,
            sizeof(ccev_stream_t) - sizeof(ccev_sock_t));
 
+    st->sock.upgraded = true;
+
     cclink_init(&st->wlist);
     st->sendfile_fd = -1;
-    st->reader      = NULL;
 
-    /* Take over sock's event callbacks */
-    st->sock.rcb = _stream_on_readable;
+    /* Take over sock's write callback.  Read callback is set
+     * by ccev_stream_read() / ccev_stream_readnum(). */
     st->sock.wcb = _stream_on_writable;
 
     return st;
@@ -592,14 +582,8 @@ void ccev__stream_cleanup(ccev_stream_t *st) {
         st->sendfile_fd = -1;
     }
 
-    /* Free stream reader if active */
-    if (st->reader) {
-        if (st->reader->timer)
-            ccev_timer_del(st->sock.loop, st->reader->timer);
-        ccev__free_fn(st->reader->buf);
-        ccev__free_fn(st->reader);
-        st->reader = NULL;
-    }
+    /* Free read state */
+    _read_drop(st);
 }
 
 int ccev_stream_close(ccev_stream_t *st) {
@@ -623,6 +607,25 @@ int ccev_stream_write(ccev_stream_t *st, const void *data, size_t len,
                        ccev_send_cb cb, void *udata) {
     if (!st || st->sock.closed) return CCEV_ERR;
     if (!data || !len) return 0;
+
+    /* Fast path: wlist empty, no callback → try direct send.
+     * Avoids alloc+memcpy+sendv+free for the common small-response case. */
+    if (cclink_empty(&st->wlist) && !st->pending_write && !cb) {
+        int sent = 0;
+        ccsocket_stcode_t rc = ccsocket_send(st->sock.fd, data,
+                                              len, &sent);
+        if (rc == CC_OPCODE_OK && (size_t)sent == (size_t)len) {
+            _stream_invoke_send_cb(st);     /* fire global drain cb */
+            return (int)len;                /* zero allocation */
+        }
+        /* Partial or EAGAIN → fall through to normal buffered path.
+         * CC_OPCODE_WAIT with partial bytes: the already-sent portion
+         * is consumed; only the remainder needs buffering. */
+        if (rc == CC_OPCODE_OK && sent > 0) {
+            data = (const char *)data + sent;
+            len -= (size_t)sent;
+        }
+    }
 
     /* Buffer the data */
     ccev_buf_t *buf = _buf_alloc(data, len, cb, udata);
@@ -723,38 +726,99 @@ size_t ccev_stream_wbuf_len(const ccev_stream_t *st) {
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Read setup — cross-mode heap reuse
+ * ════════════════════════════════════════════════════════════════ */
+
+static int _read_setup(ccev_stream_t *st, size_t want, char delim,
+                        int timeout_ms, ccev_stream_cb cb, void *udata) {
+    /* Try to satisfy the new mode from an existing partial heap. */
+    if (st->rn_heap && st->rn_total > 0) {
+        if (delim != 0) {
+            /* Switching to readline — search existing data */
+            char *found = (char *)memchr(st->rn_heap, delim, st->rn_total);
+            if (found) {
+                _readline_done(st, st->rn_heap,
+                                (size_t)(found - st->rn_heap) + 1,
+                                st->rn_total);
+                return CCEV_OK;       /* synchronously satisfied */
+            }
+            if (st->rn_total >= want) {
+                /* Overflow: no delim, already at/past limit */
+                st->read_cb(st->read_udata, st->rn_heap, want, CCEV_ERR);
+                _read_drop(st);
+                return CCEV_OK;
+            }
+        } else {
+            /* Switching to readnum — check if already enough */
+            if (st->rn_total >= want) {
+                _readnum_done(st, st->rn_heap, want);
+                return CCEV_OK;       /* synchronously satisfied */
+            }
+        }
+        /* Not satisfied yet — grow heap if needed, continue accumulating */
+        if (st->want < want) {
+            char *nb = (char *)ccev__realloc_fn(st->rn_heap, want);
+            if (!nb) { _read_drop(st); return CCEV_ERR; }
+            st->rn_heap = nb;
+        }
+    } else {
+        _read_drop(st);
+    }
+
+    st->read_cb    = cb;
+    st->read_udata = udata;
+    st->want       = want;
+    st->delim      = delim;
+    st->timeout_ms = timeout_ms;
+    st->sock.rcb   = _stream_on_readable;
+
+    if (timeout_ms > 0 && !st->read_timer)
+        st->read_timer = ccev_timer_add(st->sock.loop, (uint64_t)timeout_ms,
+                                         CCEV_TIMER_ONCE, _read_timeout_cb, st);
+
+    /* Re-arm only when not already armed (re-entrant callbacks from
+     * _stream_on_readable already did the re-arm on completion). */
+    if (!(st->sock.events & CCEV_POLL_READ))
+        ccev__sock_rearm(st->sock.loop, &st->sock);
+    return CCEV_OK;
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  Public API — stream reader
  * ════════════════════════════════════════════════════════════════ */
 
-void ccev_stream_read_stop(ccev_stream_t *st) {
-    if (!st || !st->reader) return;
-    ccev_stream_reader_t *rd = st->reader;
+int ccev_stream_read(ccev_stream_t *st, size_t limit, int timeout_ms,
+                      ccev_stream_cb cb, void *udata) {
+    if (!st || !cb || st->sock.closed) return CCEV_ERR;
+    _read_drop(st);                          /* raw never accumulates */
+    st->read_cb    = cb;
+    st->read_udata = udata;
+    st->limit      = limit;
+    st->timeout_ms = timeout_ms;
+    if (timeout_ms > 0)
+        st->read_timer = ccev_timer_add(st->sock.loop, (uint64_t)timeout_ms,
+                                         CCEV_TIMER_ONCE, _read_timeout_cb, st);
+    st->sock.rcb = _stream_on_readable;
+    ccev__sock_rearm(st->sock.loop, &st->sock);
+    return CCEV_OK;
+}
 
-    /* Cancel timeout timer */
-    if (rd->timer) {
-        ccev_timer_del(st->sock.loop, rd->timer);
-        rd->timer = NULL;
-    }
-
-    st->sock.rcb = rd->old_rcb;
-    ccev__free_fn(rd->buf);
-    ccev__free_fn(rd);
-    st->reader = NULL;
+int ccev_stream_readnum(ccev_stream_t *st, size_t n, int timeout_ms,
+                         ccev_stream_cb cb, void *udata) {
+    if (!st || !cb || st->sock.closed || n == 0) return CCEV_ERR;
+    return _read_setup(st, n, 0, timeout_ms, cb, udata);
 }
 
 int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
                           int timeout_ms, ccev_stream_cb cb, void *udata) {
-    return _reader_start(st, maxlen, delim, false, false, timeout_ms, cb, udata);
+    if (!st || !cb || st->sock.closed || maxlen == 0) return CCEV_ERR;
+    return _read_setup(st, maxlen, delim, timeout_ms, cb, udata);
 }
 
-int ccev_stream_readnum(ccev_stream_t *st, size_t n,
-                         int timeout_ms, ccev_stream_cb cb, void *udata) {
-    return _reader_start(st, n, 0, true, false, timeout_ms, cb, udata);
-}
-
-int ccev_stream_read(ccev_stream_t *st, int timeout_ms,
-                      ccev_stream_cb cb, void *udata) {
-    return _reader_start(st, 0, 0, false, true, timeout_ms, cb, udata);
+void ccev_stream_read_stop(ccev_stream_t *st) {
+    if (!st) return;
+    _read_drop(st);
+    st->read_cb = NULL;
 }
 
 void ccev_stream_set_close_cb(ccev_stream_t *st, ccev_close_cb cb, void *udata) {

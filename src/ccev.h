@@ -509,59 +509,64 @@ size_t ccev_stream_wbuf_len(const ccev_stream_t *st);
 
 /* ── Read operations ── */
 
+/** @brief Read continuously — dispatches data as it arrives.
+ *
+ *  Raw dispatch mode: the callback fires on every chunk of received
+ *  data, at most @p limit bytes per call (0 = unlimited).  Zero heap
+ *  allocation — data is delivered directly from a stack buffer.
+ *  Stays active until ccev_stream_read_stop(), timeout, or close.
+ *
+ *  Only one read mode may be active at a time.
+ *
+ *  @param st         Stream handle.
+ *  @param limit      Max bytes per callback (0 = unlimited).
+ *  @param timeout_ms Idle timeout in ms (0 = no timeout).
+ *  @param cb         Dispatch callback.
+ *  @param udata      User pointer for @p cb.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_read(ccev_stream_t *st, size_t limit, int timeout_ms,
+                      ccev_stream_cb cb, void *udata);
+
+/** @brief Read exactly @p n bytes, then fire the callback once.
+ *
+ *  Common case (data already in kernel buffer): zero allocation —
+ *  delivered directly from a stack buffer.  Rare case (partial
+ *  read across epoll cycles): one heap allocation for @p n bytes,
+ *  freed immediately after the callback fires.
+ *
+ *  Only one read mode may be active at a time.
+ *
+ *  @param st         Stream handle.
+ *  @param n          Exact number of bytes to read (> 0).
+ *  @param timeout_ms Total timeout in ms (0 = no timeout).
+ *  @param cb         Completion callback.
+ *  @param udata      User pointer for @p cb.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_stream_readnum(ccev_stream_t *st, size_t n, int timeout_ms,
+                         ccev_stream_cb cb, void *udata);
+
 /** @brief Read until @p delim is found (delimiter inclusive).
  *
- *  When the delimiter (or @p maxlen bytes) is received, the callback
- *  fires exactly once.  Call again for subsequent reads.
+ *  Dispatches all complete lines from one recv in a tight loop.
+ *  Incomplete tails are accumulated on heap and completed on
+ *  subsequent epoll callbacks.  Zero allocation when data arrives
+ *  in a single kernel-buffer chunk.
  *
- *  Only one stream reader may be active at a time — calling this
- *  while another reader is active cancels the previous one.
+ *  Only one read mode may be active at a time.
  *
  *  @param st         Stream handle.
  *  @param delim      Delimiter byte to search for (e.g. '\\n').
  *  @param maxlen     Maximum bytes before yielding CCEV_ERR.
- *  @param timeout_ms Read timeout in ms (0 = no timeout).
- *  @param cb         Completion callback.
+ *  @param timeout_ms Total timeout in ms (0 = no timeout).
+ *  @param cb         Completion callback (fires once per line).
  *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR on invalid params. */
+ *  @return CCEV_OK or CCEV_ERR. */
 int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
                           int timeout_ms, ccev_stream_cb cb, void *udata);
 
-/** @brief Read exactly @p n bytes.
+/** @brief Cancel the active read (raw, readnum, or readline).
  *
- *  Once @p n bytes have been accumulated the callback fires once.
- *  Same single-reader semantics as ccev_stream_readline().
- *
- *  @param st         Stream handle.
- *  @param n          Exact number of bytes to read (> 0).
- *  @param timeout_ms Read timeout in ms (0 = no timeout).
- *  @param cb         Completion callback.
- *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
-int ccev_stream_readnum(ccev_stream_t *st, size_t n,
-                          int timeout_ms, ccev_stream_cb cb, void *udata);
-
-/** @brief Read continuously — dispatch accumulated data as it arrives.
- *
- *  Unlike ccev_stream_readline/readnum (one-shot), this mode keeps the
- *  reader active after each dispatch.  The callback fires every time
- *  new data is available, until ccev_stream_read_stop() is called,
- *  the timeout fires, or the connection closes.
- *
- *  Only one stream reader may be active at a time — calling this
- *  while another reader is active cancels the previous one.
- *
- *  @param st         Stream handle.
- *  @param timeout_ms Read idle timeout in ms (0 = no timeout).
- *  @param cb         Dispatch callback.
- *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
-int ccev_stream_read(ccev_stream_t *st, int timeout_ms,
-                      ccev_stream_cb cb, void *udata);
-
-/** @brief Cancel the active stream reader (if any).
- *  Restores the underlying sock's read callback.
- *  Safe to call when no reader is active.
+ *  Frees any partial readnum heap.  Safe to call when idle.
  *  @param st  Stream handle. */
 void ccev_stream_read_stop(ccev_stream_t *st);
 

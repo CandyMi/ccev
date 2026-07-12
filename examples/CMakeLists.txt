@@ -9,3 +9,12 @@ target_link_libraries(http_bench PRIVATE ccev)
 
 add_executable(http1_bench http1_bench.c)
 target_link_libraries(http1_bench PRIVATE ccev)
+
+add_executable(example_readline example_readline.c)
+target_link_libraries(example_readline PRIVATE ccev)
+
+add_executable(example_readnum example_readnum.c)
+target_link_libraries(example_readnum PRIVATE ccev)
+
+add_executable(example_raw example_raw.c)
+target_link_libraries(example_raw PRIVATE ccev)

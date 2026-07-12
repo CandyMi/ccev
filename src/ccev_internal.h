@@ -178,12 +178,6 @@ typedef enum {
 } ccev_sock_mode_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  Stream reader (forward declaration for sock/stream structs)
- * ════════════════════════════════════════════════════════════════ */
-
-typedef struct ccev_stream_reader_s ccev_stream_reader_t;
-
-/* ════════════════════════════════════════════════════════════════
  *  Base socket — reactor primitive, no variant-specific fields
  * ════════════════════════════════════════════════════════════════ */
 
@@ -203,7 +197,8 @@ struct ccev_sock_s {
     uint32_t           events;     /**< CCEV_POLL flags currently armed*/
     uint32_t           mode;       /**< ccev_sock_mode_t                 */
 
-    /* ── Flags (pack as 1+1 with 2-byte padding) ── */
+    /* ── Flags (packed, 2+ byte padding) ── */
+    bool               upgraded;   /**< true if upgraded to ccev_stream_t */
     bool               closed;     /**< true once close initiated        */
     bool               in_closing; /**< true if in the closing list      */
 };
@@ -272,28 +267,6 @@ typedef struct ccev_buf_s {
 } ccev_buf_t;
 
 /* ════════════════════════════════════════════════════════════════
- *  Stream reader (read-until / read-n)
- * ════════════════════════════════════════════════════════════════ */
-
-struct ccev_stream_reader_s {
-    char            *buf;           /**< Dynamic accumulation buffer.     */
-    size_t           cap;           /**< Allocated capacity.              */
-    size_t           pos;           /**< Consumed bytes offset in @p buf.*/
-    size_t           len;           /**< Valid pending bytes in @p buf.  */
-    size_t           want;          /**< maxlen (readline) or n (readnum)*/
-    ccev_stream_cb   cb;            /**< User completion callback.       */
-    void            *udata;         /**< User data for @p cb.            */
-    ccev_event_cb    old_rcb;       /**< Saved read callback while active*/
-    ccev_sock_t     *sock;          /**< Owning socket (back-pointer).   */
-    ccev_timer_t    *timer;         /**< Read timeout timer, or NULL.    */
-
-    /* ── Timeout / delim state ── */
-    char             delim;         /**< 0 = readnum, else delimiter.    */
-    bool             is_n;          /**< true = readnum, false = readline*/
-    bool             is_raw;        /**< true = raw read (continuous dispatch)*/
-};
-
-/* ════════════════════════════════════════════════════════════════
  *  Stream structure (high-level, embeds ccev_sock_t)
  * ════════════════════════════════════════════════════════════════ */
 
@@ -306,9 +279,18 @@ struct ccev_stream_s {
     ccev_send_cb       send_cb;     /**< Global flush-complete callback.*/
     void              *send_udata;
 
-    /* ── Stream reader (optional) ── */
-    ccev_stream_reader_t *reader;
-    bool               reading;     /**< 1 if inside _stream_on_readable */
+    /* ── Read path ── */
+    ccev_stream_cb     read_cb;     /**< Raw / readnum user callback.   */
+    void              *read_udata;  /**< User pointer for @p read_cb.   */
+    char              *rn_heap;     /**< Partial readnum buffer (or NULL). */
+    size_t             rn_total;    /**< Bytes accumulated on heap.     */
+    union {
+        size_t          want;       /**< >0 = readnum target.           */
+        size_t          limit;      /**< Raw dispatch cap (0 = unlimited). */
+    };
+    ccev_timer_t      *read_timer;  /**< Timeout timer (NULL = none).   */
+    int                timeout_ms;  /**< Timeout value (0 = no timeout). */
+    char               delim;       /**< Delimiter (0 = readnum/raw).   */
 
     /* ── Sendfile state ── */
     ccev_send_cb       sf_cb;      /**< Sendfile completion callback.   */
@@ -332,7 +314,6 @@ struct ssl_st;
 
 typedef enum {
     CCEV_TLS_READ     = 0,
-    CCEV_TLS_READLINE = 1,
     CCEV_TLS_READNUM  = 2,
 } ccev_tls_read_mode_t;
 
@@ -373,8 +354,6 @@ struct ccev_tls_s {
     size_t                read_want;
     ccev_stream_cb        read_cb;
     void                 *read_udata;
-    char                  read_delim;
-    bool                  read_is_n;
 };
 #endif
 

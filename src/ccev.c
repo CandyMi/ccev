@@ -103,12 +103,29 @@ void ccev_loop_destroy(ccev_loop_t *loop) {
     if (loop->signal_pipe[1] != (ccsocket_t)-1) ccsocket_close(loop->signal_pipe[1]);
 
     /* Free remaining socks (not in closing list).
-     * Fire close_cb so any udata-backed resources (e.g. DNS query) are freed. */
+     *
+     * Fire close_cb first WITHOUT unlinking — close_cb may call
+     * ccev_stream_close → ccev__sock_schedule_close which moves the
+     * sock from all_socks to the closing list.  Save next before
+     * the callback so iteration is unaffected by list mutation.
+     *
+     * After all callbacks have fired, drain the closing list (which
+     * now holds socks that close_cb moved there) and then free any
+     * remaining socks still in all_socks. */
+    {
+        cclist_node_t *n = loop->all_socks.head;
+        while (n) {
+            cclist_node_t *next = n->next;
+            ccev_sock_t *sock = (ccev_sock_t *)((char*)n - offsetof(ccev_sock_t, lnode));
+            if (sock->close_cb) sock->close_cb(sock->close_udata);
+            n = next;
+        }
+    }
+    ccev__process_closing(loop);
     while (!cclist_empty(&loop->all_socks)) {
         cclist_node_t *n = cclist_pop_front(&loop->all_socks);
         if (n) {
             ccev_sock_t *sock = (ccev_sock_t *)((char*)n - offsetof(ccev_sock_t, lnode));
-            if (sock->close_cb) sock->close_cb(sock->close_udata);
             ccev__sock_free(sock);
         }
     }

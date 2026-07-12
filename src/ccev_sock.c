@@ -71,6 +71,9 @@ void ccev__sock_free(ccev_sock_t *sock) {
             unlink(any->listener.uds_path);
     }
 
+    if (sock->upgraded)
+        ccev__stream_cleanup((ccev_stream_t *)sock);
+
     if (sock->loop) sock->loop->sock_count--;
     if (sock->fd != (ccsocket_t)-1) ccsocket_close(sock->fd);
     sock->fd = (ccsocket_t)-1;
