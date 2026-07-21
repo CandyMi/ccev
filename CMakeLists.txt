@@ -95,7 +95,7 @@ set(CCEV_SOURCES
 )
 
 if(CCEV_TLS)
-    find_package(OpenSSL QUIET)
+    find_package(OpenSSL 1.1.1 QUIET)
     if(OpenSSL_FOUND)
         list(APPEND CCEV_SOURCES src/ccev_tls.c src/ccev_tls_ctx.c)
     else()

@@ -140,7 +140,7 @@ TEST(null_args) {
     ASSERT(ccev_tls_ctx_server(NULL, "file.pem") == NULL);
 
     ccev_tls_ctx_t *ctx = ccev_tls_ctx_client();
-    ASSERT(ccev_tls_open(NULL, ctx, CCEV_TLS_CLIENT) == NULL);
+    ASSERT(ccev_tls_open(NULL, ctx) == NULL);
     ccev_tls_ctx_free(ctx);
 
     ccev_tls_ctx_free(NULL);
@@ -194,9 +194,9 @@ TEST(handshake_and_data_transfer) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, NULL, 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, NULL, 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
@@ -262,9 +262,9 @@ TEST(readline_and_readnum) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, NULL, 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, NULL, 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
@@ -339,10 +339,10 @@ TEST(cert_verify_trusted) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     /* servername matches CN="ccev-test" in the self-signed cert. */
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, "ccev-test", 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, "ccev-test", 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
@@ -391,9 +391,9 @@ TEST(cert_verify_untrusted) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, "ccev-test", 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, "ccev-test", 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     /* Handshake must fail — client doesn't trust the server's cert. */
@@ -440,10 +440,10 @@ TEST(hostname_mismatch_rejected) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     /* servername "wrong-host.com" does NOT match CN="ccev-test". */
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, "wrong-host.com", 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, "wrong-host.com", 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     /* Hostname mismatch must cause handshake failure. */
@@ -488,7 +488,7 @@ TEST(handshake_timeout) {
 
     struct hs_state hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 100, hs_cb, &hs);
+        srv_sock, srv_ctx, NULL, 100, hs_cb, &hs);
     ASSERT(srv_tls != NULL);
 
     /* Use RUN_FOREVER: epoll_wait blocks up to the timer deadline.
@@ -533,9 +533,9 @@ TEST(read_timeout) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, NULL, 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, NULL, 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
 
@@ -617,9 +617,9 @@ TEST(alpn_negotiation) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, NULL, 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, NULL, 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
@@ -676,9 +676,9 @@ TEST(large_data_transfer) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, NULL, 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, NULL, 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
@@ -771,9 +771,9 @@ TEST(server_cert_verify) {
 
     struct hs_state srv_hs = {0, 0}, cli_hs = {0, 0};
     ccev_tls_t *srv_tls = ccev_tls_wrap_stream(
-        srv_sock, srv_ctx, CCEV_TLS_SERVER, NULL, 5000, hs_cb, &srv_hs);
+        srv_sock, srv_ctx, NULL, 5000, hs_cb, &srv_hs);
     ccev_tls_t *cli_tls = ccev_tls_wrap_stream(
-        cli_sock, cli_ctx, CCEV_TLS_CLIENT, "ccev-test", 5000, hs_cb, &cli_hs);
+        cli_sock, cli_ctx, "ccev-test", 5000, hs_cb, &cli_hs);
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);

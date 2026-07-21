@@ -89,11 +89,6 @@ typedef struct ccev_tls_ctx_s ccev_tls_ctx_t;
 typedef struct ccev_tls_s     ccev_tls_t;
 
 typedef enum {
-    CCEV_TLS_CLIENT = 0,
-    CCEV_TLS_SERVER,
-} ccev_tls_mode_t;
-
-typedef enum {
     CCEV_TLS_VERIFY_NONE = 0,
     CCEV_TLS_VERIFY_PEER,               // 默认
 } ccev_tls_verify_t;
@@ -146,12 +141,10 @@ void ccev_tls_ctx_free(ccev_tls_ctx_t *ctx);
  * 内部初始化 SSL/BIO，不接管 sock->rcb，不启动握手。
  * 返回 sock 地址转型（和 ccev_stream_open 一致）。
  * @param sock  从 ccev_connect / ccev_listen 回调获得的 sock
- * @param ctx   TLS 上下文
- * @param mode  CCEV_TLS_CLIENT 或 CCEV_TLS_SERVER
+ * @param ctx   TLS 上下文（角色已在 ctx 中编码）
  */
 ccev_tls_t *ccev_tls_open(ccev_sock_t *sock,
-                            ccev_tls_ctx_t *ctx,
-                            ccev_tls_mode_t mode);
+                            ccev_tls_ctx_t *ctx);
 ```
 
 **步骤 2：配置（可选，必须在 handshake 之前调用）**
@@ -190,7 +183,6 @@ int ccev_tls_handshake(ccev_tls_t *tls,
 ccev_tls_t *ccev_tls_wrap_stream(
     ccev_sock_t            *sock,
     ccev_tls_ctx_t         *ctx,
-    ccev_tls_mode_t         mode,
     const char             *servername,     // NULL = 不设 SNI
     int                     timeout_ms,
     ccev_tls_handshake_cb   cb,
@@ -243,6 +235,7 @@ size_t ccev_tls_wbuf_len(const ccev_tls_t *tls);
 
 struct ccev_tls_ctx_s {
     SSL_CTX *ssl_ctx;
+    bool     is_server;      /**< true=server(accept), false=client(connect). */
 };
 
 struct ccev_tls_s {
@@ -255,7 +248,7 @@ struct ccev_tls_s {
 
     /* ── OpenSSL（BIO 通过 SSL_get_*bio 获取，不独立存储）── */
     SSL                 *ssl;
-    ccev_tls_mode_t      mode;
+    bool                 is_server;
     bool                 handshake_done;
 
     /* ── 握手（读路径的超时与此字段互斥，共用 timer）── */
@@ -291,11 +284,11 @@ struct ccev_tls_s {
   read_pos (size_t)                     8  (232-239)
   read_len (size_t)                     8  (240-247)
   read_want (size_t)                    8  (248-255)
-  mode (ccev_tls_mode_t)                4  (256-259)
-  read_mode (ccev_tls_read_mode_t)      4  (260-263)
-  handshake_done + read_delim +         2  (264-265)
+  is_server (bool)                      1  (256-256)
+  read_mode (ccev_tls_read_mode_t)      4  (257-260)
+  handshake_done + read_delim +         2  (261-262)
     read_is_n
-  padding                               6  (266-271)
+  padding                               9  (263-271)
   ──────────────────────────────────
   总计                                272
 ```
@@ -309,7 +302,7 @@ struct ccev_tls_s {
 ### 6.1 三步流程
 
 ```
-ccev_tls_open(sock, ctx, mode)     → 分配 SSL/BIO，不接管回调
+ccev_tls_open(sock, ctx)          → 分配 SSL/BIO，不接管回调
 ccev_tls_set_servername(tls, ...)   → 配置 SNI（握手前）
 ccev_tls_handshake(tls, 5000, cb)  → 接管 sock->rcb，启动握手
 ```
@@ -318,7 +311,7 @@ ccev_tls_handshake(tls, 5000, cb)  → 接管 sock->rcb，启动握手
 
 ```c
 static int _tls_handshake_pump(ccev_tls_t *tls) {
-    int ret = (tls->mode == CCEV_TLS_SERVER)
+    int ret = tls->is_server
               ? SSL_accept(tls->ssl)
               : SSL_connect(tls->ssl);
 
@@ -736,7 +729,7 @@ static void on_connect(void *udata, ccev_sock_t *sock, int status) {
     if (status != CCEV_OK) return;
     ccev_tls_ctx_t *ctx = (ccev_tls_ctx_t *)udata;
 
-    ccev_tls_wrap_stream(sock, ctx, CCEV_TLS_CLIENT,
+    ccev_tls_wrap_stream(sock, ctx,
                           "example.com", 5000, on_hs, ctx);
 }
 
@@ -767,7 +760,7 @@ static void on_accept(void *udata, ccev_sock_t *client,
     ccev_tls_ctx_t *ctx = (ccev_tls_ctx_t *)udata;
     struct conn *c = malloc(sizeof(struct conn));
 
-    ccev_tls_t *tls = ccev_tls_open(client, ctx, CCEV_TLS_SERVER);
+    ccev_tls_t *tls = ccev_tls_open(client, ctx);
     if (!tls) { free(c); ccev_sock_close(client); return; }
 
     ccev_tls_set_alpn(tls, "\x08http/1.1");
@@ -781,7 +774,7 @@ static void on_accept(void *udata, ccev_sock_t *client,
 static void on_connect(void *udata, ccev_sock_t *sock, int status) {
     if (status != CCEV_OK) return;
 
-    ccev_tls_t *tls = ccev_tls_open(sock, ctx, CCEV_TLS_CLIENT);
+    ccev_tls_t *tls = ccev_tls_open(sock, ctx);
     ccev_tls_set_servername(tls, "api.internal.example.com");
     ccev_tls_set_alpn(tls, "\x0bgrpc-exp");
     ccev_tls_handshake(tls, 5000, on_hs, my_app);
@@ -850,39 +843,18 @@ long cipher_len = BIO_get_mem_data(SSL_get_wbio(tls->ssl), &cipher);
 ### 16.4 CMake 版本声明
 
 ```cmake
-find_package(OpenSSL 1.0.2 QUIET)
+find_package(OpenSSL 1.1.1 QUIET)
 ```
 
-若系统 OpenSSL < 1.0.2，`find_package` 失败 → 自动降级（CCEV_TLS=OFF + 输出 WARNING），核心库不受影响。
+若系统 OpenSSL < 1.1.1，`find_package` 失败 → 自动降级（CCEV_TLS=OFF + 输出 WARNING），核心库不受影响。
 
 ### 16.5 版本敏感代码三处
 
-已在设计文档中标记，实现时需补充：
+已实现：
 
-```c
-// ① 初始化路径（已有 guard）
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L       // ≥ 1.1.0
-    OPENSSL_init_ssl(...);
-#else
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
-#endif
-
-// ② ALPN（需新增 guard）
-#if OPENSSL_VERSION_NUMBER >= 0x10002000L        // ≥ 1.0.2
-int ccev_tls_ctx_set_alpn(ccev_tls_ctx_t *ctx, const char *protos);
-int ccev_tls_set_alpn(ccev_tls_t *tls, const char *protos);
-#else
-#define ccev_tls_ctx_set_alpn(ctx, p)  (CCEV_ERR)
-#define ccev_tls_set_alpn(tls, p)      (CCEV_ERR)
-#endif
-
-// ③ CRYPTO_set_mem_functions 在 3.0+ 弃用但仍生效（非 FIPS 模式下）
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-    // 可加 pragma 抑制弃用警告，或直接使用（函数仍工作）
-#endif
-```
+- ① 初始化路径 — 已移除 `#else` 分支（最低要求 1.1.1）
+- ② ALPN — 无 guards，1.1.1+ 始终可用
+- ③ `CRYPTO_set_mem_functions` — 保留 3.x guard（两套回调签名均活跃）
 
 ---
 

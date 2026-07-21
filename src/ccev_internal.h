@@ -304,7 +304,7 @@ struct ccev_stream_s {
  * ════════════════════════════════════════════════════════════════ */
 
 #ifdef CCEV_HAVE_TLS
-/* Include public TLS header for ccev_tls_mode_t, ccev_tls_handshake_cb, etc.
+/* Include public TLS header for ccev_tls_handshake_cb, etc.
  * This is safe: ccev.h is already included above, and ccev_tls.h's include
  * guard prevents double inclusion by ccev_tls_internal.h later. */
 #  include "ccev_tls.h"
@@ -333,7 +333,7 @@ struct ccev_tls_s {
 
     /* ── OpenSSL ── */
     struct ssl_st       *ssl;
-    ccev_tls_mode_t      mode;
+    bool                 is_server;
     ccev_tls_read_mode_t read_mode;
 
     /* ── Handshake state ── */

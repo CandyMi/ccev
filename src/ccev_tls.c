@@ -383,7 +383,7 @@ int ccev_tls_readnum(ccev_tls_t *tls, size_t n, int timeout_ms,
  * ════════════════════════════════════════════════════════════════ */
 
 static int _tls_handshake_pump(ccev_tls_t *tls) {
-    int ret = (tls->mode == CCEV_TLS_SERVER)
+    int ret = tls->is_server
               ? SSL_accept(tls->ssl)
               : SSL_connect(tls->ssl);
 
@@ -418,10 +418,10 @@ static int _tls_handshake_pump(ccev_tls_t *tls) {
  * ════════════════════════════════════════════════════════════════ */
 
 ccev_tls_t *ccev_tls_open(ccev_sock_t *sock,
-                            ccev_tls_ctx_t *ctx,
-                            ccev_tls_mode_t mode) {
+                            ccev_tls_ctx_t *ctx) {
     if (!sock || sock->closed || sock->in_closing) return NULL;
     if (sock->mode != CCEV_SOCK_INIT) return NULL;
+    if (!ctx || !ctx->ssl_ctx) return NULL;
 
     ccev__tls_init();
 
@@ -441,27 +441,14 @@ ccev_tls_t *ccev_tls_open(ccev_sock_t *sock,
     cclink_init(&tls->st.wlist);
     tls->st.sendfile_fd = -1;
 
-    /* Create SSL object. */
-    SSL *ssl = NULL;
-    if (ctx && ctx->ssl_ctx) {
-        ssl = SSL_new(ctx->ssl_ctx);
-    } else {
-        const SSL_METHOD *method = (mode == CCEV_TLS_CLIENT)
-                                   ? TLS_client_method() : TLS_server_method();
-        SSL_CTX *auto_ctx = SSL_CTX_new(method);
-        if (auto_ctx) {
-            SSL_CTX_set_options(auto_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
-                                           SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
-            ssl = SSL_new(auto_ctx);
-            SSL_CTX_free(auto_ctx);
-        }
-    }
+    /* Create SSL object from the context. */
+    SSL *ssl = SSL_new(ctx->ssl_ctx);
     if (!ssl) return NULL;
 
-    if (mode == CCEV_TLS_CLIENT)
-        SSL_set_connect_state(ssl);
-    else
+    if (ctx->is_server)
         SSL_set_accept_state(ssl);
+    else
+        SSL_set_connect_state(ssl);
 
     BIO *rbio = BIO_new(BIO_s_mem());
     BIO *wbio = BIO_new(BIO_s_mem());
@@ -473,8 +460,8 @@ ccev_tls_t *ccev_tls_open(ccev_sock_t *sock,
     }
     SSL_set_bio(ssl, rbio, wbio);
 
-    tls->ssl  = ssl;
-    tls->mode = mode;
+    tls->ssl       = ssl;
+    tls->is_server = ctx->is_server;
 
     /* Take over sock's read callback.  Stream's write callback handles
      * EPOLLOUT automatically via the stream flush path. */
@@ -568,12 +555,11 @@ int ccev_tls_set_alpn(ccev_tls_t *tls, const char *protos) {
 
 ccev_tls_t *ccev_tls_wrap_stream(ccev_sock_t *sock,
                                    ccev_tls_ctx_t *ctx,
-                                   ccev_tls_mode_t mode,
                                    const char *servername,
                                    int timeout_ms,
                                    ccev_tls_handshake_cb cb,
                                    void *udata) {
-    ccev_tls_t *tls = ccev_tls_open(sock, ctx, mode);
+    ccev_tls_t *tls = ccev_tls_open(sock, ctx);
     if (!tls) return NULL;
     if (servername)
         ccev_tls_set_servername(tls, servername);

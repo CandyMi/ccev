@@ -66,14 +66,8 @@ static void _tls_do_init(void) {
         );
     }
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
                      OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
-#else
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
-#endif
 }
 
 void ccev__tls_init(void) {
@@ -152,7 +146,8 @@ ccev_tls_ctx_t *ccev_tls_ctx_server(const char *cert_file,
         SSL_CTX_free(ssl_ctx);
         return NULL;
     }
-    tls_ctx->ssl_ctx = ssl_ctx;
+    tls_ctx->ssl_ctx   = ssl_ctx;
+    tls_ctx->is_server = true;
 
     if (ccev_tls_ctx_use_certificate(tls_ctx, cert_file, key_file)
         != CCEV_TLS_OK) {
@@ -193,7 +188,8 @@ ccev_tls_ctx_t *ccev_tls_ctx_client(void) {
         SSL_CTX_free(ctx);
         return NULL;
     }
-    tls_ctx->ssl_ctx = ctx;
+    tls_ctx->ssl_ctx   = ctx;
+    tls_ctx->is_server = false;
     return tls_ctx;
 }
 

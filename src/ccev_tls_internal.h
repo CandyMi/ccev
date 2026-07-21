@@ -27,6 +27,7 @@ extern "C" {
 
 struct ccev_tls_ctx_s {
     SSL_CTX *ssl_ctx;
+    bool     is_server;      /**< true = server (accept), false = client (connect). */
 };
 
 /* ════════════════════════════════════════════════════════════════

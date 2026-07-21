@@ -19,7 +19,7 @@
  *
  * Usage:
  *   ccev_tls_ctx_t *ctx = ccev_tls_ctx_client();
- *   ccev_tls_t *tls = ccev_tls_wrap_stream(sock, ctx, CCEV_TLS_CLIENT,
+ *   ccev_tls_t *tls = ccev_tls_wrap_stream(sock, ctx,
  *                                            "example.com", 5000,
  *                                            handshake_cb, my_data);
  *   // handshake_cb fires with CCEV_TLS_OK when ready
@@ -57,11 +57,6 @@ typedef struct ccev_tls_s     ccev_tls_t;
  * ════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    CCEV_TLS_CLIENT = 0,  /**< Client-side TLS (connects to server). */
-    CCEV_TLS_SERVER,       /**< Server-side TLS (accepts connections). */
-} ccev_tls_mode_t;
-
-typedef enum {
     CCEV_TLS_VERIFY_NONE = 0, /**< Do not verify peer certificate. */
     CCEV_TLS_VERIFY_PEER,      /**< Verify peer certificate (default). */
 } ccev_tls_verify_t;
@@ -96,7 +91,7 @@ typedef void (*ccev_tls_handshake_cb)(void *udata,
 /** @brief Create a server TLS context.
  *
  *  Loads the specified certificate and private key files.
- *  The context is configured for CCEV_TLS_SERVER mode.
+ *  The context is configured for server mode.
  *
  *  @note Peer certificate verification is DISABLED by default
  *  (CCEV_TLS_VERIFY_NONE).  Most servers do not require client
@@ -124,7 +119,7 @@ ccev_tls_ctx_t *ccev_tls_ctx_server(const char *cert_file,
 /** @brief Create a client TLS context.
  *
  *  Loads the system default CA certificates.
- *  The context is configured for CCEV_TLS_CLIENT mode.
+ *  The context is configured for client mode.
  *
  *  Peer certificate verification is enabled by default
  *  (CCEV_TLS_VERIFY_PEER).  Call ccev_tls_ctx_set_verify() with
@@ -215,12 +210,10 @@ void ccev_tls_ctx_free(ccev_tls_ctx_t *ctx);
  *
  *  @param sock  A live socket (from ccev_connect/CONNECT or ccev_listen/ACCEPT).
  *               The sock must be in INIT mode (connected, not listening).
- *  @param ctx   TLS context (may be NULL — set via ccev_tls_set_* before handshake).
- *  @param mode  CCEV_TLS_CLIENT or CCEV_TLS_SERVER.
+ *  @param ctx   TLS context (the role — client or server — is encoded in ctx).
  *  @return TLS handle, or NULL on failure (OOM / invalid sock). */
 ccev_tls_t *ccev_tls_open(ccev_sock_t *sock,
-                            ccev_tls_ctx_t *ctx,
-                            ccev_tls_mode_t mode);
+                            ccev_tls_ctx_t *ctx);
 
 /** @brief Step 2 (optional): Set SNI servername (must be before handshake).
  *  @param tls      TLS handle.
@@ -258,8 +251,7 @@ int ccev_tls_handshake(ccev_tls_t *tls,
  *  ALPN / cipher configuration.
  *
  *  @param sock        A live socket.
- *  @param ctx         TLS context.
- *  @param mode        CCEV_TLS_CLIENT or CCEV_TLS_SERVER.
+ *  @param ctx         TLS context (the role is encoded in ctx).
  *  @param servername  SNI hostname (NULL = no SNI).
  *  @param timeout_ms  Handshake timeout in ms.
  *  @param cb          Handshake completion callback.
@@ -267,7 +259,6 @@ int ccev_tls_handshake(ccev_tls_t *tls,
  *  @return TLS handle, or NULL on failure. */
 ccev_tls_t *ccev_tls_wrap_stream(ccev_sock_t *sock,
                                    ccev_tls_ctx_t *ctx,
-                                   ccev_tls_mode_t mode,
                                    const char *servername,
                                    int timeout_ms,
                                    ccev_tls_handshake_cb cb,
