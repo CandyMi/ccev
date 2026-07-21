@@ -270,12 +270,11 @@ TEST(readline_and_readnum) {
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
 
     /* Write two lines from client, readline on server */
+    /* Write and read first line */
     ccev_tls_write(cli_tls, "line1\n", 6, NULL, NULL);
-    ccev_tls_write(cli_tls, "line2\n", 6, NULL, NULL);
 
     struct rd_state rd1 = {0};
-    /* readline removed — use raw read instead */
-    ASSERT(ccev_tls_read(srv_tls, 0, 0, rd_cb, &rd1) == CCEV_OK);
+    ASSERT(ccev_tls_readnum(srv_tls, 6, 2000, rd_cb, &rd1) == CCEV_OK);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -283,7 +282,9 @@ TEST(readline_and_readnum) {
     ASSERT(rd1.got == 6);
     ASSERT(memcmp(rd1.buf, "line1\n", 6) == 0);
 
-    /* Readnum the second line */
+    /* Write and readnum the second line */
+    ccev_tls_write(cli_tls, "line2\n", 6, NULL, NULL);
+
     struct rd_state rd2 = {0};
     ASSERT(ccev_tls_readnum(srv_tls, 6, 2000, rd_cb, &rd2) == CCEV_OK);
 
