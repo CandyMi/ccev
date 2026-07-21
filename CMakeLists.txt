@@ -113,6 +113,14 @@ if(CCEV_TLS AND OpenSSL_FOUND)
     target_compile_definitions(ccev PRIVATE CCEV_HAVE_TLS=1)
 endif()
 
+# Export all symbols to dynamic symbol table, so dlsym(RTLD_DEFAULT, …)
+# works without consumers passing -rdynamic manually.
+if(APPLE)
+    target_link_options(ccev INTERFACE -Wl,-export_dynamic)
+elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(ccev INTERFACE -rdynamic)
+endif()
+
 set_target_properties(ccev PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(ccev PUBLIC
