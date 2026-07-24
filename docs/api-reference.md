@@ -420,52 +420,27 @@ typedef void (*ccev_stream_cb)(void *udata, const char *data,
                                 size_t len, int status);
 ```
 
-Completion callback for `ccev_stream_read()`, `ccev_stream_readline()`,
-and `ccev_stream_readnum()`. `data` is valid only during the callback
-— do NOT free or store the pointer.
+Completion callback for `ccev_stream_read()`.
+`data` is valid only during the callback — do NOT free or store the pointer.
 
 | `status` | Meaning |
 |---|---|
-| `CCEV_OK` | Data available (read), delimiter found (readline), or N bytes collected (readnum). |
-| `CCEV_ERR` | Connection closed, timeout, or maxlen exceeded (readline). |
-
-#### `ccev_stream_readline`
-
-```c
-int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
-                          int timeout_ms, ccev_stream_cb cb, void *udata);
-```
-
-Read until `delim` is found (delimiter inclusive). Fires exactly once,
-then deactivates — call again for subsequent reads.
-
-If `timeout_ms > 0`, the callback fires with `CCEV_ERR` if no data
-arrives within the deadline. Only one stream reader may be active at
-a time — calling this while another reader is active cancels the
-previous one.
-
-#### `ccev_stream_readnum`
-
-```c
-int ccev_stream_readnum(ccev_stream_t *st, size_t n,
-                          int timeout_ms, ccev_stream_cb cb, void *udata);
-```
-
-Read exactly `n` bytes. Same semantics as `ccev_stream_readline()`.
+| `CCEV_OK` | Data available. |
+| `CCEV_ERR` | Connection closed or timeout. |
 
 #### `ccev_stream_read`
 
 ```c
-int ccev_stream_read(ccev_stream_t *st, int timeout_ms,
+int ccev_stream_read(ccev_stream_t *st, size_t limit, int timeout_ms,
                       ccev_stream_cb cb, void *udata);
 ```
 
-Read continuously — dispatch accumulated data as it arrives.
+Read continuously — dispatch data as it arrives (raw dispatch mode).
 
-Unlike `ccev_stream_readline/readnum` (one-shot), this mode keeps the
-reader active after each dispatch. The callback fires every time new
-data is available, until `ccev_stream_read_stop()` is called, the
-timeout fires, or the connection closes.
+The callback fires on every chunk of received data, at most `limit`
+bytes per call (0 = unlimited). Zero heap allocation — data is delivered
+directly from a stack buffer. Stays active until `ccev_stream_read_stop()`,
+the timeout fires, or the connection closes.
 
 If `timeout_ms > 0`, the callback fires with `CCEV_ERR` if no data
 arrives within the idle deadline.

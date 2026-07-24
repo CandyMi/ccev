@@ -198,15 +198,9 @@ int  ccev_tls_write_batch(ccev_tls_t *tls, const void *data, size_t len,
                            bool done, ccev_send_cb cb, void *udata);
 int  ccev_tls_flush(ccev_tls_t *tls);
 
-/** 不定量读 — 有明文就回调，不限长度。 */
-int  ccev_tls_read(ccev_tls_t *tls,
+/** 不定量读 — 有明文就回调，每次至多 limit 字节（0 = 不限）。 */
+int  ccev_tls_read(ccev_tls_t *tls, size_t limit, int timeout_ms,
                     ccev_stream_cb cb, void *udata);
-/** 读至 delim。 */
-int  ccev_tls_readline(ccev_tls_t *tls, char delim, size_t maxlen,
-                        int timeout_ms, ccev_stream_cb cb, void *udata);
-/** 读恰好 n 字节。 */
-int  ccev_tls_readnum(ccev_tls_t *tls, size_t n,
-                       int timeout_ms, ccev_stream_cb cb, void *udata);
 ```
 
 ### 4.5 生命周期
@@ -241,31 +235,29 @@ struct ccev_tls_ctx_s {
 struct ccev_tls_s {
     /*
      * ── 第一字段：ccev_stream_t（也包含 ccev_sock_t）
-     *  实现：写缓冲复用 stream 的 wlist/sendv/EPOLLOUT 驱动
-     *  对齐：ccev_stream_t(168) + 附加字段(104) = 272 字节
+     *  写缓冲复用 stream 的 wlist/sendv/EPOLLOUT 驱动。
      */
     ccev_stream_t        st;
 
     /* ── OpenSSL（BIO 通过 SSL_get_*bio 获取，不独立存储）── */
-    SSL                 *ssl;
+    struct ssl_st       *ssl;
     bool                 is_server;
+
+    /* ── 握手状态 ── */
     bool                 handshake_done;
 
-    /* ── 握手（读路径的超时与此字段互斥，共用 timer）── */
+    /* ── 握手回调 + 用户数据 ── */
     ccev_tls_handshake_cb handshake_cb;
     void                 *handshake_udata;
-    ccev_timer_t         *timer;       // 握手/读超时共用
 
-    /* ── 读路径：独立 reader（TLS 层积累-匹配，数据源为 SSL_read）── */
-    char                *read_buf;     // 累积缓冲区
-    size_t               read_cap;     // 分配容量
-    size_t               read_pos;     // 已消费偏移
-    size_t               read_len;     // 有效待处理长度
-    size_t               read_want;    // readline 的 maxlen 或 readnum 的 n
-    ccev_stream_cb       read_cb;      // 用户回调
-    void                *read_udata;
-    char                 read_delim;   // readline 分隔符
-    bool                 read_is_n;    // true = readnum，false = readline
+    /* ── 定时器（握手和读超时共用）── */
+    ccev_timer_t         *timer;
+
+    /* ── 读路径：raw dispatch，零堆分配 ── */
+    size_t                limit;        /**< per-callback cap (0 = unlimited) */
+    int                   timeout_ms;
+    ccev_stream_cb        read_cb;
+    void                 *read_udata;
 };
 ```
 
@@ -274,26 +266,22 @@ struct ccev_tls_s {
 ```
   st (ccev_stream_t)                  168  (0-167)
   ssl *                                8  (168-175)
-  handshake_cb                          8  (176-183)
-  handshake_udata                       8  (184-191)
-  timer *                               8  (192-199)
-  read_cb                               8  (200-207)
-  read_udata                            8  (208-215)
-  read_buf *                            8  (216-223)
-  read_cap (size_t)                     8  (224-231)
-  read_pos (size_t)                     8  (232-239)
-  read_len (size_t)                     8  (240-247)
-  read_want (size_t)                    8  (248-255)
-  is_server (bool)                      1  (256-256)
-  read_mode (ccev_tls_read_mode_t)      4  (257-260)
-  handshake_done + read_delim +         2  (261-262)
-    read_is_n
-  padding                               9  (263-271)
+  is_server (bool)                     1  (176-176)
+  handshake_done (bool)                1  (177-177)
+  padding                              6  (178-183)
+  handshake_cb                          8  (184-191)
+  handshake_udata                       8  (192-199)
+  timer *                               8  (200-207)
+  limit (size_t)                        8  (208-215)
+  timeout_ms (int)                      4  (216-219)
+  padding                              4  (220-223)
+  read_cb                               8  (224-231)
+  read_udata                            8  (232-239)
   ──────────────────────────────────
-  总计                                272
+  总计                                240
 ```
 
-**仅 4 字节 padding**（struct 尾对齐），无内部空隙浪费。
+**26 字节 padding**（因 `is_server` 和 `handshake_done` 两个 bool 后的对齐填充），整体仍紧凑。
 
 ---
 
@@ -315,15 +303,9 @@ static int _tls_handshake_pump(ccev_tls_t *tls) {
               ? SSL_accept(tls->ssl)
               : SSL_connect(tls->ssl);
 
-    // 不管 SSL_accept/connect 返回什么，先检查 wbio 是否有要发的握手密文
-    char *cipher;
-    long cipher_len = BIO_get_mem_data(SSL_get_wbio(tls->ssl), &cipher);
-    if (cipher_len > 0) {
-        ccev_stream_write(&tls->st, cipher, (size_t)cipher_len,
-                           NULL, NULL);
-        // 消费 wbio（数据已被 stream_write memcpy 走）
-        BIO_read(SSL_get_wbio(tls->ssl), cipher, cipher_len);
-    }
+    // 不管 SSL_accept/connect 返回什么，先 flush wbio
+    // ——可能含有握手消息或警报（error 时也有 fatal alert 需要发出）
+    _tls_flush_wbio(tls);
 
     if (ret == 1) {
         tls->handshake_done = true;
@@ -340,8 +322,8 @@ static int _tls_handshake_pump(ccev_tls_t *tls) {
 }
 ```
 
-- **BIO_get_mem_data 零拷贝取密文**，不经过中间缓冲区
-- **同步消费 wbio**，无残留
+- **`_tls_flush_wbio` 统一封装**：`BIO_get_mem_data` 零拷贝取密文 → `ccev_stream_write` → `BIO_read` 消费
+- **error 路径也 flush**：保证 fatal alert 被发出去，避免对端只看到 TCP RST
 
 ### 6.3 写路径
 
@@ -375,8 +357,8 @@ int ccev_tls_write(ccev_tls_t *tls, const void *data, size_t len,
 
 - **一次 `SSL_write` → 一次 `BIO_get_mem_data` → 一次 `stream_write`**，没有 while 循环
 - **一个 wlist 条目 → 一次回调**，语义清晰
-- **wbio 不留残留**，不需要 `_tls_flush_wbio` 异步兜底
-- Renegotiation 产生的握手密文自动通过 wbio 发出，对写路径完全透明
+- **`_tls_flush_wbio` 在关键路径统一封装**：`_tls_on_readable` 末尾、`_tls_handshake_pump`、`ccev_tls_write` 错误路径、`ccev_tls_close` 均调用它刷出 wbio 中的密文
+- Renegotiation / KeyUpdate 产生的握手密文自动通过 `_tls_flush_wbio` 发出，对写路径完全透明
 
 ### 6.4 读路径
 
@@ -384,67 +366,50 @@ int ccev_tls_write(ccev_tls_t *tls, const void *data, size_t len,
 EPOLLIN → _tls_on_readable
   → recv(fd, net_buf)
   → BIO_write(rbio, net_buf, n)
-  → while (SSL_read(ssl, plain) > 0)
-       → _tls_reader_accumulate(tls, plain, n)
-       → 检查当前 read_mode 的 dispatch 条件
-         READ:      有数据 → dispatch
-         READLINE:  找到 delim → dispatch
-         READNUM:   len >= want → dispatch
-       → 条件满足 → _tls_reader_dispatch(cb, data, consumed)
-  → re-arm EPOLLIN / EPOLLOUT
+  → 一次 SSL_read(ssl, plain, to_read)
+     ├ ret > 0:   cb(ud, plain, ret, CCEV_OK)   // 直接分发
+     ├ ZERO_RETURN: cb(ud, NULL, 0, CCEV_ERR)    // 对端关闭
+     └ WANT_READ:  等待下次 EPOLLIN
+  → _tls_flush_wbio(tls)                          // renegotiation 密文
 ```
 
-```c
-static void _tls_reader_accumulate(ccev_tls_t *tls, const char *data, size_t len) {
-    // 追加到 read_buf
-    // 根据 read_mode 检查 dispatch 条件
-    // 满足则调用 _tls_reader_dispatch
-}
-
-static int _tls_reader_dispatch(ccev_tls_t *tls, size_t consumed, int status) {
-    // 取消定时器
-    // 恢复 sock->rcb = read_old_rcb
-    // 回调用户
-    // 压缩缓冲区
-}
-```
-
-读路径的 `while (SSL_read)` 循环是必要的——`SSL_read` 在输入充足时可能连续解出多个明文记录。这和写路径不同，不能简化。
+**"one call, one read"** — 每次 `_tls_on_readable` 至多调用一次 `SSL_read`，数据直接从栈上 plain 缓冲区 dispatch 给用户回调，零堆分配。不需要积累循环，简化了状态管理。
 
 ### 6.5 关闭路径
 
 ```
 用户调 ccev_tls_close(tls)
-  → flush wlist（残留写缓冲）
-  → SSL_shutdown(ssl)
-     ├ 返回 1 → 直接进 _tls_complete_cleanup
-     └ 返回 0 → stream_write(close_notify) → arm EPOLLIN → 返回
-
-↓ 对端 close_notify 到达 → _tls_on_readable
-
-  _tls_on_readable:
-    → recv(fd) → BIO_write(rbio, 对端 close_notify)
-    → SSL_read(ssl) → 0 (SSL_ERROR_ZERO_RETURN)
-    → SSL_shutdown(ssl) → 1
-    → _tls_complete_cleanup(tls)
+  → ccev_stream_flush(&tls->st)       // 刷出残留写缓冲
+  → SSL_shutdown(ssl) (best-effort)   // 发送 close_notify
+  → _tls_flush_wbio(tls)              // 刷出 close_notify 密文
+  → _tls_complete_cleanup(tls):       // 释放 SSL + 定时器
+      if (timer) ccev_timer_del
+      SSL_free(ssl)
+  → ccev_stream_close(&tls->st)       // stream 清理 + schedule_close
+  → [下次 loop 迭代] ccev__process_closing:
+      close_cb fires → ccev__sock_free(union)
 ```
+
+**不做双向 shutdown**：只发 close_notify，不等对端回复。TCP TIME_WAIT 保证线路上延迟的包被正确处理。
 
 ```c
 static void _tls_complete_cleanup(ccev_tls_t *tls) {
-    SSL_free(tls->ssl);
+    /* 在释放 SSL 前，先 fire 未完成的握手回调
+     * ——如果用户在中途 close，防止回调永远不来 */
+    if (!tls->handshake_done && tls->handshake_cb) {
+        ccev_tls_handshake_cb cb = tls->handshake_cb;
+        void *ud = tls->handshake_udata;
+        tls->handshake_cb = NULL;
+        cb(ud, tls, CCEV_TLS_ERR_IO);
+    }
 
     if (tls->timer)
         ccev_timer_del(tls->st.sock.loop, tls->timer);
-
-    ccev__free_fn(tls->read_buf);
-
-    /* 不在此触发 close_cb — 让 ccev__process_closing 统一处理，
-     * 与所有其他 socket 类型采用相同的生命周期点。
-     *
-     * ccev_stream_close → schedule_close → _process_closing:
-     *   close_cb fires once → ccev__sock_free(union) 自动释放 tls 内存
-     */
-    ccev_stream_close(&tls->st);
+    if (tls->ssl) {
+        SSL_free(tls->ssl);
+        tls->ssl = NULL;
+    }
+    /* stream 清理 + schedule_close 由 ccev_stream_close 完成 */
 }
 ```
 
@@ -458,19 +423,20 @@ static void _tls_complete_cleanup(ccev_tls_t *tls) {
 
 ---
 
-## 7. 读路径的三种模式
+## 7. 读路径：raw dispatch
 
-`ccev_tls_read` / `ccev_tls_readline` / `ccev_tls_readnum` 共享同一个积累-分发引擎，差异仅在于 dispatch 条件：
+`ccev_tls_read` 只有 raw dispatch 模式（无积累、零堆分配）：
 
-| 函数 | read_mode | dispatch 条件 |
-|---|---|---|
-| `ccev_tls_read` | `CCEV_TLS_READ` | 每次 SSL_read 解出明文就 dispatch |
-| `ccev_tls_readline` | `CCEV_TLS_READLINE` | 在 read_buf 中找到 delim |
-| `ccev_tls_readnum` | `CCEV_TLS_READNUM` | read_len >= read_want |
+```
+ccev_tls_read(tls, limit, timeout_ms, cb, udata)
+  → arm epoll + 设置 sock->rcb = _tls_on_readable
+  → 尝试一次 SSL_read(stack, min(limit, 16384))
+     ├─ 有明文 → cb(udata, stack, n, CCEV_OK)  // 一次性回调，然后 reader 继续活跃
+     ├─ ZERO_RETURN → cb(udata, NULL, 0, CCEV_ERR)
+     └─ WANT_READ → 等 EPOLLIN 触发后再试
+```
 
-这是独立实现的 reader（不是 `ccev_stream_readline/readnum` 的封装），因为 stream reader 的数据源是硬编码的 `ccsocket_recv(sock->fd)`，无法替换为 `SSL_read`。
-
-代码量约 80 行（积累-检查-dispatch 核心），加上三种入口各 ~20 行。
+**持续活跃**：不像 readline/readnum（已移除），raw dispatch 模式在每次回调后保持活跃，直到调用 `ccev_tls_read_stop()`、超时或连接断开。每次 `_tls_on_readable` 至多 dispatch 一次，不会 while 循环消耗完所有 rbio 数据。
 
 ---
 
@@ -482,7 +448,7 @@ static void _tls_complete_cleanup(ccev_tls_t *tls) {
 SSL_read(ssl) 返回 SSL_ERROR_WANT_WRITE
   → OpenSSL 需要发握手密文（HelloRequest 等）
   → 已在 wbio 中
-  → _tls_reader_accumulate 末尾检查 wbio → stream_write(握手密文)
+  → _tls_on_readable 末尾的 _tls_flush_wbio(tls) 刷出 wbio
   → arm EPOLLIN + EPOLLOUT
   → 对端响应 → EPOLLIN → 继续 SSL_read
 ```
@@ -505,11 +471,11 @@ KeyUpdate 由 OpenSSL 内部自动触发
 ```
 ccev_tls_handshake:                    TLS 读操作:
   timer = ccev_timer_add(ms, hscb)       timer = ccev_timer_add(ms, rdcb)
-  握手成功:                                读完成:
+  握手成功:                                读回调触发:
     timer_del→NULL                          timer_del→NULL
   超时:                                    超时:
     → hscb(CCEV_TLS_ERR_IO)                → rdcb(data, 0, CCEV_ERR)
-    → schedule_close                        → _tls_reader_cleanup
+    → schedule_close                        → (无额外 cleanup)
 
 cleanup 统一路径:
   if (timer) ccev_timer_del→timer=NULL;
@@ -575,43 +541,40 @@ flowchart LR
 ```c
 // ccev_tls.c — 单次初始化，无 pthread 依赖
 
-static volatile int ccev_tls__initialized = 0;
+static int ccev_tls__initialized = 0;
 
-/* ── CRYPTO_set_mem_functions — C99 兼容包装（非 lambda）── */
-static void *_tls_ossl_malloc(size_t sz) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static void *_tls_ossl_malloc(size_t sz, const char *file, int line) {
+    (void)file; (void)line;
     return ccev__realloc_fn(NULL, sz);
 }
-static void *_tls_ossl_realloc(void *p, size_t sz) {
+static void *_tls_ossl_realloc(void *p, size_t sz, const char *file, int line) {
+    (void)file; (void)line;
     return ccev__realloc_fn(p, sz);
 }
-static void _tls_ossl_free(void *p) {
+static void _tls_ossl_free(void *p, const char *file, int line) {
+    (void)file; (void)line;
     ccev__free_fn(p);
 }
-
-static void _tls_do_init(void) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
-                     OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
 #else
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
+static void *_tls_ossl_malloc(size_t sz) { return ccev__realloc_fn(NULL, sz); }
+static void *_tls_ossl_realloc(void *p, size_t sz) { return ccev__realloc_fn(p, sz); }
+static void _tls_ossl_free(void *p) { ccev__free_fn(p); }
 #endif
 
-    /* 如果用户通过 ccev_set_allocator 指定了自定义分配器，同步到 OpenSSL */
-    if (ccev__realloc_fn && ccev__free_fn) {
-        CRYPTO_set_mem_functions(
-            _tls_ossl_malloc,
-            _tls_ossl_realloc,
-            _tls_ossl_free
-        );
-    }
+static void _tls_do_init(void) {
+    /* CAS 确保单线程进入，无 pthread 依赖 */
+    if (ccev__realloc_fn && ccev__free_fn)
+        CRYPTO_set_mem_functions(_tls_ossl_malloc, _tls_ossl_realloc, _tls_ossl_free);
+
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
+                     OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
 }
 
-void _tls_init(void) {
+void ccev__tls_init(void) {
     if (ccev_tls__initialized) return;
+    if (!__sync_bool_compare_and_swap(&ccev_tls__initialized, 0, 1)) return;
     _tls_do_init();
-    ccev_tls__initialized = 1;
 }
 ```
 
@@ -627,47 +590,36 @@ void _tls_init(void) {
 
 ```cmake
 # Options
-option(CCEV_TLS "Build TLS support (requires OpenSSL)" ON)
+option(CCEV_TLS "Build TLS support (requires OpenSSL)" OFF)
 
-# Static library
-add_library(ccev STATIC
-    src/ccev.c
-    src/ccev_mem.c
-    src/ccev_timer.c
-    src/ccev_sock.c
-    src/ccev_stream.c
-    src/ccev_dns.c
-    src/ccev_icmp.c
-    src/ccev_signal.c
-    src/ccev_poll.c
-    $<TARGET_OBJECTS:ccev_epoll>
-    $<TARGET_OBJECTS:ccev_ccsocket>
-)
-
+# Source list — TLS 文件仅在 CCEV_TLS=ON 且找到 OpenSSL 时加入
 if(CCEV_TLS)
-    find_package(OpenSSL QUIET)
+    find_package(OpenSSL 1.1.1 QUIET)
     if(OpenSSL_FOUND)
-        if(TARGET OpenSSL::SSL_Static)
-            target_link_libraries(ccev PUBLIC OpenSSL::SSL_Static OpenSSL::Crypto_Static)
-        else()
-            target_link_libraries(ccev PUBLIC OpenSSL::SSL OpenSSL::Crypto)
-        endif()
-        target_sources(ccev PRIVATE src/ccev_tls.c src/ccev_tls_ctx.c)
-        target_compile_definitions(ccev PUBLIC CCEV_HAVE_TLS=1)
-        message(STATUS "TLS: building with ${OPENSSL_VERSION}")
+        list(APPEND CCEV_SOURCES src/ccev_tls.c src/ccev_tls_ctx.c)
     else()
-        message(WARNING "TLS: CCEV_TLS=ON but OpenSSL not found — TLS disabled")
+        message(STATUS "OpenSSL not found — TLS support disabled (CCEV_TLS=ON ignored)")
     endif()
 endif()
-```
 
-```cmake
+add_library(ccev STATIC ${CCEV_SOURCES} ...)
+
+# Compile definitions — 必须 OpenSSL 实际可用
+if(CCEV_TLS AND OpenSSL_FOUND)
+    target_compile_definitions(ccev PRIVATE CCEV_HAVE_TLS=1)
+endif()
+
+# Link libraries
+if(CCEV_TLS AND OpenSSL_FOUND)
+    if(TARGET OpenSSL::SSL_Static)
+        target_link_libraries(ccev PUBLIC OpenSSL::SSL_Static OpenSSL::Crypto_Static)
+    else()
+        target_link_libraries(ccev PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+endif()
+
 # Install — 仅在有 TLS 时安装头文件
-install(FILES
-    src/ccev.h
-    deps/ccsocket/include/ccsocket.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
+install(FILES src/ccev.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 if(CCEV_TLS AND OpenSSL_FOUND)
     install(FILES src/ccev_tls.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endif()
@@ -697,8 +649,8 @@ endif()
 |---|---|
 | `ccev_stream_open(sock)` → 劫持 `sock->rcb` | `ccev_tls_open(sock, ctx, mode)` → 劫持 `sock->rcb` 在 handshake 阶段 |
 | `ccev_stream_write(明文)` → buf_alloc → wlist → sendv | `ccev_tls_write(明文)` → SSL_write → wbio → `st.stream_write(密文)` |
-| `_stream_on_readable` → recv → reader 积累 | `_tls_on_readable` → recv → rbio → SSL_read → 积累 |
-| `ccev_stream_readline/readnum` | `ccev_tls_readline/readnum`（独立 reader，数据源为 SSL_read） |
+| `_stream_on_readable` → recv → 直接回调 | `_tls_on_readable` → recv → rbio → SSL_read → 直接回调 |
+| `ccev_stream_read` — raw dispatch | `ccev_tls_read` — raw dispatch |
 | `ccev_stream_close` → cleanup → schedule_close | `ccev_tls_close` → SSL_shutdown + cleanup → stream_close |
 | `ccev_sock_set_close_cb` | `ccev_tls_set_close_cb`（透传至 sock） |
 | `ccev_stream_flush` | `ccev_tls_flush`（3 行 wrapper） |
@@ -718,7 +670,7 @@ endif()
 static void on_hs(void *udata, ccev_tls_t *tls, int status) {
     if (status == CCEV_TLS_OK) {
         printf("TLS handshake OK\n");
-        ccev_tls_readline(tls, '\n', 4096, 5000, on_line, udata);
+        ccev_tls_read(tls, 4096, 5000, on_read, udata);
         return;
     }
     fprintf(stderr, "TLS handshake failed: %d\n", status);
@@ -789,7 +741,7 @@ static void on_connect(void *udata, ccev_sock_t *sock, int status) {
 |---|---|---|
 | `ccev_tls_wrap_stream(st, ...)` 参数 `ccev_stream_t*` | 参数改为 `ccev_sock_t*` | stream 是内部实现，用户不感知 |
 | 构造函数式单步 | 三步流程 + 快捷入口 | 精确控制配置时机 |
-| `ccev_tls_readline/readnum` 仅两种模式 | 增加 `ccev_tls_read` 不定量模式 | 覆盖 WS/协议自解析场景 |
+| —（积累引擎不存在） | 只有 `ccev_tls_read` raw dispatch | 零堆分配，简化框架 |
 | `while (BIO_read(wbio))` 写路径 | `BIO_get_mem_data` 一次取全量 | 零循环，1:1 回调 |
 | `tls->rbio / tls->wbio` 独立字段 | 通过 `SSL_get_*bio` 获取 | 省 16 字节，消除同步风险 |
 | `handshake_timer + read_timer` | 合并为 `timer` | 省 8 字节，互斥时序 |

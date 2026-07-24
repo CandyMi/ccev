@@ -183,6 +183,16 @@ int main(void) {
 ```c
 #include "ccev.h"
 #include <stdio.h>
+#include <string.h>
+
+static void on_data(void *udata, const char *data, size_t len, int status) {
+    if (status == CCEV_OK && data) {
+        printf("%.*s", (int)len, data);
+    } else {
+        printf("connection closed\n");
+        ccev_loop_stop((ccev_loop_t *)udata);
+    }
+}
 
 static void on_connect(void *udata, ccev_sock_t *sock, int status) {
     if (status == CCEV_OK) {
@@ -190,12 +200,11 @@ static void on_connect(void *udata, ccev_sock_t *sock, int status) {
         ccev_stream_t *st = ccev_stream_open(sock);
         ccev_stream_write(st, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
                           43, NULL, NULL);
-        ccev_stream_readline(st, '\n', 4096, 5000,
-                             (ccev_stream_cb)(void(*)(void))printf, NULL);
+        ccev_stream_read(st, 4096, 5000, on_data, udata);
     } else {
         printf("connection failed\n");
+        ccev_loop_stop((ccev_loop_t *)udata);
     }
-    ccev_loop_stop((ccev_loop_t *)udata);
 }
 
 int main(void) {

@@ -15,7 +15,6 @@ static void _tls_read_timeout_cb(ccev_timer_t *timer, void *udata);
 static int  _tls_handshake_pump(ccev_tls_t *tls);
 static void _tls_flush_wbio(ccev_tls_t *tls);
 static void _tls_complete_cleanup(ccev_tls_t *tls);
-static void _tls_reader_accumulate(ccev_tls_t *tls, const char *data, size_t len);
 
 /* ════════════════════════════════════════════════════════════════
  *  Flush pending ciphertext from wbio to stream write buffer
@@ -80,7 +79,7 @@ static void _tls_on_readable(ccev_sock_t *sock, int events) {
         return;
     }
 
-    /* ── Normal read: recv → BIO → SSL_read → reader dispatch ── */
+    /* ── Normal read: recv → BIO → SSL_read → direct dispatch ── */
     {
         char net_buf[65535];
         int nread = 0;
@@ -90,43 +89,43 @@ static void _tls_on_readable(ccev_sock_t *sock, int events) {
         if (rc == CC_OPCODE_WAIT || nread <= 0) {
             if (rc == CC_OPCODE_WAIT) {
                 ccev__sock_rearm(sock->loop, sock);
-            } else {
-                if (tls->read_cb) {
-                    ccev_stream_cb cb = tls->read_cb;
-                    void *ud = tls->read_udata;
-                    tls->read_cb = NULL;
-                    cb(ud, NULL, 0, CCEV_ERR);
-                }
-                ccev__sock_schedule_close(sock->loop, sock);
+            } else if (tls->read_cb) {
+                ccev_stream_cb cb = tls->read_cb;
+                void *ud = tls->read_udata;
+                tls->read_cb = NULL;
+                cb(ud, NULL, 0, CCEV_ERR);
             }
             return;
         }
 
         BIO_write(SSL_get_rbio(tls->ssl), net_buf, nread);
 
-        while (1) {
+        /* One SSL_read per _tls_on_readable call — "one call, one read" */
+        {
             char plain[16384];
-            int ret = SSL_read(tls->ssl, plain, (int)sizeof(plain));
-            if (ret <= 0) {
-                int err = SSL_get_error(tls->ssl, ret);
-                if (err == SSL_ERROR_WANT_READ)
-                    break;
-                if (err == SSL_ERROR_ZERO_RETURN) {
-                    if (tls->read_cb) {
-                        ccev_stream_cb cb = tls->read_cb;
-                        void *ud = tls->read_udata;
-                        tls->read_cb = NULL;
-                        cb(ud, NULL, 0, CCEV_ERR);
-                    }
-                    /* Peer sent close_notify — close immediately.
-                     * TCP TIME_WAIT covers any delayed packets. */
-                    _tls_complete_cleanup(tls);
-                    ccev_stream_close(&tls->st);
-                    return;
+            int to_read = (tls->limit == 0) ? (int)sizeof(plain)
+                         : (tls->limit < sizeof(plain) ? (int)tls->limit
+                                                        : (int)sizeof(plain));
+            int ret = SSL_read(tls->ssl, plain, to_read);
+            if (ret > 0) {
+                if (tls->read_cb) {
+                    ccev_stream_cb cb = tls->read_cb;
+                    void *ud = tls->read_udata;
+                    tls->read_cb = NULL;
+                    cb(ud, plain, (size_t)ret, CCEV_OK);
+                    if (sock->closed) return;
                 }
-                break;
+            } else {
+                int err = SSL_get_error(tls->ssl, ret);
+                if (err == SSL_ERROR_ZERO_RETURN && tls->read_cb) {
+                    ccev_stream_cb cb = tls->read_cb;
+                    void *ud = tls->read_udata;
+                    tls->read_cb = NULL;
+                    cb(ud, NULL, 0, CCEV_ERR);
+                    if (sock->closed) return;
+                }
+                /* WANT_READ: data exhausted for now, will retry on next epoll */
             }
-            _tls_reader_accumulate(tls, plain, (size_t)ret);
         }
     }
 
@@ -184,8 +183,13 @@ int ccev_tls_write(ccev_tls_t *tls, const void *data, size_t len,
     BIO *wbio = SSL_get_wbio(tls->ssl);
     char *cipher;
     long cipher_len = BIO_get_mem_data(wbio, &cipher);
-    if (cipher_len <= 0)
-        return (int)len; /* TLS 1.3 empty record */
+    if (cipher_len <= 0) {
+        /* TLS 1.3 empty record: data committed but no ciphertext to
+         * buffer.  Fire the callback immediately since the write is
+         * as complete as it can be — the stream has nothing to send. */
+        if (cb) cb(udata);
+        return (int)len;
+    }
 
     int ret = ccev_stream_write(&tls->st, cipher, (size_t)cipher_len, cb, udata);
     BIO_read(wbio, cipher, cipher_len);
@@ -204,13 +208,30 @@ int ccev_tls_write_batch(ccev_tls_t *tls, const void *data, size_t len,
             _tls_flush_wbio(tls);
             return CCEV_ERR;
         }
-        _tls_flush_wbio(tls);
+
+        /* Flush ciphertext from wbio to stream write buffer, passing
+         * the user's callback through so it fires only when the stream
+         * has actually sent the data to the kernel. */
+        BIO *wbio = SSL_get_wbio(tls->ssl);
+        char *cipher;
+        long cipher_len = BIO_get_mem_data(wbio, &cipher);
+        if (cipher_len > 0) {
+            /* Only associate callback when done=true — intermediate
+             * batch chunks should not fire per-chunk completion. */
+            int ret = ccev_stream_write(&tls->st, cipher, (size_t)cipher_len,
+                                         done ? cb : NULL, done ? udata : NULL);
+            BIO_read(wbio, cipher, cipher_len);
+            if (ret < 0) return CCEV_ERR;
+        } else {
+            /* TLS 1.3 empty record: no ciphertext to buffer.  If this
+             * is the final chunk, fire the callback directly. */
+            if (done && cb) cb(udata);
+        }
     }
 
     if (done)
         ccev_stream_flush(&tls->st);
 
-    if (cb) cb(udata);
     return (int)len;
 }
 
@@ -220,145 +241,25 @@ int ccev_tls_flush(ccev_tls_t *tls) {
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  Reader — accumulation and dispatch
+ *  Reader — raw dispatch (no accumulation, zero heap allocation)
  * ════════════════════════════════════════════════════════════════ */
 
-static void _tls_reader_dispatch(ccev_tls_t *tls, size_t consumed, int status) {
-    ccev_sock_t   *sock = &tls->st.sock;
-    ccev_stream_cb cb   = tls->read_cb;
-    void          *ud   = tls->read_udata;
-    size_t         remaining = tls->read_len - consumed;
-
-    if (tls->timer) {
-        ccev_timer_del(sock->loop, tls->timer);
-        tls->timer = NULL;
-    }
-
-    size_t data_off = tls->read_pos;
-    tls->read_pos += consumed;
-    tls->read_len  = remaining;
-    tls->read_cb   = NULL;
-
-    /* Save buffer before callback — cb may replace read_buf
-     * (re-entrant _tls_reader_start frees old + allocs new). */
-    char   *old_buf = tls->read_buf;
-    size_t  old_cap = tls->read_cap;
-
-    cb(ud, old_buf + data_off, consumed, status);
-
-    /* Compact if buffer wasn't replaced by callback. */
-    if (tls->read_buf == old_buf && tls->read_pos > tls->read_cap / 2
-        && tls->read_len > 0) {
-        memmove(tls->read_buf, tls->read_buf + tls->read_pos, tls->read_len);
-        tls->read_pos = 0;
-    }
-
-    if (remaining == 0 && tls->read_buf == old_buf) {
-        ccev__free_fn(tls->read_buf);
-        tls->read_buf = NULL;
-        tls->read_cap = 0;
-    }
-}
-
-static void _tls_reader_acc_dispatch(ccev_tls_t *tls) {
-    if (!tls->read_cb) return;
-
-    size_t consumed = 0;
-    int    status   = CCEV_OK;
-
-    if (tls->read_mode == CCEV_TLS_READ) {
-        if (tls->read_len > 0) {
-            consumed = tls->read_len;
-            ccev_stream_cb cb = tls->read_cb;
-            void *ud = tls->read_udata;
-            if (tls->timer) {
-                ccev_timer_del(tls->st.sock.loop, tls->timer);
-                tls->timer = NULL;
-            }
-            size_t data_off = tls->read_pos;
-            tls->read_pos += consumed;
-            tls->read_len = 0;
-            cb(ud, tls->read_buf + data_off, consumed, CCEV_OK);
-            tls->read_pos = 0;
-        }
-    } else { /* CCEV_TLS_READNUM */
-        if (tls->read_len >= tls->read_want)
-            consumed = tls->read_want;
-    }
-
-    if (consumed > 0) {
-        if (tls->read_mode == CCEV_TLS_READ) {
-            /* Already dispatched above. Reader stays active. */
-        } else {
-            _tls_reader_dispatch(tls, consumed, status);
-        }
-    }
-}
-
-static void _tls_reader_accumulate(ccev_tls_t *tls, const char *data, size_t len) {
-    size_t needed = tls->read_pos + tls->read_len + len;
-    if (needed > tls->read_cap) {
-        size_t new_cap = tls->read_cap ? tls->read_cap * 2 : 4096;
-        while (new_cap < needed) new_cap *= 2;
-        char *nb = (char *)ccev__realloc_fn(tls->read_buf, new_cap);
-        if (!nb) {
-            if (tls->read_cb) {
-                ccev_stream_cb cb = tls->read_cb;
-                void *ud = tls->read_udata;
-                tls->read_cb = NULL;
-                cb(ud, NULL, 0, CCEV_ERR);
-            }
-            /* OOM is unrecoverable — close the connection. */
-            ccev__sock_schedule_close(tls->st.sock.loop, &tls->st.sock);
-            return;
-        }
-        tls->read_buf = nb;
-        tls->read_cap = new_cap;
-    }
-
-    memcpy(tls->read_buf + tls->read_pos + tls->read_len, data, len);
-    tls->read_len += len;
-
-    _tls_reader_acc_dispatch(tls);
-}
-
-static int _tls_reader_start(ccev_tls_t *tls, size_t want,
-                              bool is_raw, int timeout_ms,
+static int _tls_reader_start(ccev_tls_t *tls, size_t limit, int timeout_ms,
                               ccev_stream_cb cb, void *udata) {
     if (!tls || !cb || !tls->handshake_done) return CCEV_ERR;
-    if (!is_raw && want == 0) return CCEV_ERR;
 
-    tls->read_cb = NULL;
+    /* Cancel previous timer if any */
     if (tls->timer) {
         ccev_timer_del(tls->st.sock.loop, tls->timer);
         tls->timer = NULL;
     }
 
-    /* Free old buffer from a previous read mode. */
-    if (tls->read_buf) {
-        ccev__free_fn(tls->read_buf);
-        tls->read_buf = NULL;
-        tls->read_cap = 0;
-    }
-
-    if (is_raw) {
-        tls->read_buf = (char *)ccev__realloc_fn(NULL, 16384);
-        if (!tls->read_buf) return CCEV_ERR;
-        tls->read_cap = 16384;
-    } else {
-        tls->read_buf = (char *)ccev__realloc_fn(NULL, want + 1);
-        if (!tls->read_buf) return CCEV_ERR;
-        tls->read_cap = want + 1;
-    }
-    tls->read_pos = 0;
-    tls->read_len = 0;
-
-    tls->read_want  = is_raw ? tls->read_cap : want;
-    tls->read_mode  = is_raw ? CCEV_TLS_READ : CCEV_TLS_READNUM;
+    tls->limit      = limit;
+    tls->timeout_ms = timeout_ms;
     tls->read_cb    = cb;
     tls->read_udata = udata;
 
-    if (timeout_ms > 0 && !tls->timer) {
+    if (timeout_ms > 0) {
         tls->timer = ccev_timer_add(tls->st.sock.loop, (uint64_t)timeout_ms,
                                      CCEV_TIMER_ONCE, _tls_read_timeout_cb, tls);
     }
@@ -366,16 +267,32 @@ static int _tls_reader_start(ccev_tls_t *tls, size_t want,
     tls->st.sock.rcb = _tls_on_readable;
     ccev__sock_rearm(tls->st.sock.loop, &tls->st.sock);
 
+    /* Try one SSL_read synchronously — data may already be in rbio. */
+    {
+        char plain[16384];
+        int to_read = (limit == 0) ? (int)sizeof(plain)
+                     : (limit < sizeof(plain) ? (int)limit : (int)sizeof(plain));
+        int ret = SSL_read(tls->ssl, plain, to_read);
+        if (ret > 0) {
+            tls->read_cb = NULL;
+            cb(tls->read_udata, plain, (size_t)ret, CCEV_OK);
+            return CCEV_OK;
+        }
+        int err = SSL_get_error(tls->ssl, ret);
+        if (err == SSL_ERROR_ZERO_RETURN) {
+            tls->read_cb = NULL;
+            cb(tls->read_udata, NULL, 0, CCEV_ERR);
+            return CCEV_OK;
+        }
+        /* WANT_READ: no data yet, will get it via epoll */
+    }
+
     return CCEV_OK;
 }
 
 int ccev_tls_read(ccev_tls_t *tls, size_t limit, int timeout_ms,
                    ccev_stream_cb cb, void *udata) {
-    return _tls_reader_start(tls, limit, true, timeout_ms, cb, udata);
-}
-int ccev_tls_readnum(ccev_tls_t *tls, size_t n, int timeout_ms,
-                      ccev_stream_cb cb, void *udata) {
-    return _tls_reader_start(tls, n, false, timeout_ms, cb, udata);
+    return _tls_reader_start(tls, limit, timeout_ms, cb, udata);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -592,10 +509,7 @@ static void _tls_complete_cleanup(ccev_tls_t *tls) {
         SSL_free(tls->ssl);
         tls->ssl = NULL;
     }
-    if (tls->read_buf) {
-        ccev__free_fn(tls->read_buf);
-        tls->read_buf = NULL;
-    }
+    /* No read buffer to free — raw dispatch uses stack only. */
     /* Stream cleanup + schedule_close handled by ccev_stream_close. */
 }
 

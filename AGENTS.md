@@ -68,7 +68,7 @@ primary responsibility:
 |--------|------|--------|
 | `ccev_loop_create/destroy/run/stop`, `ccev_listen`, `ccev_connect`, `ccev_default_loop` | `ccev.c` | Core reactor lifecycle |
 | `ccev_sock_create/close/read_start/stop/write_start/stop/set_close_cb/get_fd/get_udata/set_udata/count` | `ccev_sock.c` | Socket lifecycle + epoll management |
-| `ccev_stream_open/close/write/write_batch/flush/sendfile/readline/readnum/read_stop/set_send_cb/set_close_cb/wbuf_len` | `ccev_stream.c` | Buffered I/O + stream reader |
+| `ccev_stream_open/close/write/write_batch/flush/sendfile/read/read_stop/set_send_cb/set_close_cb/wbuf_len` | `ccev_stream.c` | Buffered I/O + stream reader |
 | `ccev_timer_add/del/reset` | `ccev_timer.c` | Timer subsystem |
 | `ccev_dns_*` | `ccev_dns.c` | DNS resolver |
 | `ccev_icmp_echo` | `ccev_icmp.c` | ICMP echo |
@@ -103,7 +103,7 @@ flowchart LR
         O["ccev_stream_open(sock)\n→ stream"]
         W["stream_write / write_batch / flush"]
         SF["stream_sendfile"]
-        RL["stream_readline / readnum\n/ read_stop"]
+        RL["stream_read\n/ read_stop"]
     end
     Public --> Low
     Public --> High
@@ -320,7 +320,7 @@ Scope is the affected module: `core`, `timer`, `sock`, `stream`, `dns`, `icmp`, 
 2. Every NULL-param guard MUST be tested (call with NULL, expect `CCEV_ERR`).
 3. Every "fd closed" path MUST be tested (call after close, expect `CCEV_ERR`).
 4. `ccev_stream_write` and `ccev_stream_write_batch` must test both with and without per-buffer callback.
-5. `ccev_stream_readline` and `ccev_stream_readnum` must test timeout expiration.
+5. `ccev_stream_read` must test timeout expiration (CCEV_ERR on idle timeout).
 6. `ccev_listen` + `ccev_connect` must have an end-to-end TCP test.
 7. Error-return paths (OOM, create failure) should have a test for each distinct error code.
 8. Tests MUST use the unified TEST/ASSERT/RUN macros (see test_timer.c).
