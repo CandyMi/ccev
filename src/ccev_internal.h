@@ -280,17 +280,11 @@ struct ccev_stream_s {
     void              *send_udata;
 
     /* ── Read path ── */
-    ccev_stream_cb     read_cb;     /**< Raw / readnum user callback.   */
+    ccev_stream_cb     read_cb;     /**< Read callback.                  */
     void              *read_udata;  /**< User pointer for @p read_cb.   */
-    char              *rn_heap;     /**< Partial readnum buffer (or NULL). */
-    size_t             rn_total;    /**< Bytes accumulated on heap.     */
-    union {
-        size_t          want;       /**< >0 = readnum target.           */
-        size_t          limit;      /**< Raw dispatch cap (0 = unlimited). */
-    };
+    size_t             limit;       /**< Per-callback cap (0 = unlimited). */
     ccev_timer_t      *read_timer;  /**< Timeout timer (NULL = none).   */
     int                timeout_ms;  /**< Timeout value (0 = no timeout). */
-    char               delim;       /**< Delimiter (0 = readnum/raw).   */
 
     /* ── Sendfile state ── */
     ccev_send_cb       sf_cb;      /**< Sendfile completion callback.   */
@@ -312,10 +306,7 @@ struct ccev_stream_s {
 /* Forward declare OpenSSL SSL type (pointer only — no header needed). */
 struct ssl_st;
 
-typedef enum {
-    CCEV_TLS_READ     = 0,
-    CCEV_TLS_READNUM  = 2,
-} ccev_tls_read_mode_t;
+/* readnum/readline removed — only raw dispatch mode remains */
 
 /**
  * @brief TLS connection — embeds ccev_stream_t as first field.
@@ -334,7 +325,6 @@ struct ccev_tls_s {
     /* ── OpenSSL ── */
     struct ssl_st       *ssl;
     bool                 is_server;
-    ccev_tls_read_mode_t read_mode;
 
     /* ── Handshake state ── */
     bool                 handshake_done;
@@ -346,12 +336,9 @@ struct ccev_tls_s {
     /* ── Timer (shared between handshake and read timeout) ── */
     ccev_timer_t         *timer;
 
-    /* ── Read path: independent accumulation buffer ── */
-    char                 *read_buf;
-    size_t                read_cap;
-    size_t                read_len;
-    size_t                read_pos;
-    size_t                read_want;
+    /* ── Read path ── */
+    size_t                limit;       /**< Per-callback cap (0 = unlimited). */
+    int                   timeout_ms;  /**< Timeout value (0 = no timeout). */
     ccev_stream_cb        read_cb;
     void                 *read_udata;
 };

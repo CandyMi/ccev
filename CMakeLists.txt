@@ -4,6 +4,13 @@ project(ccev LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+#  ccache Supported
+find_program(CCACHE_FOUND ccache)
+if(CCACHE_FOUND)
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
+endif()
+
 # ── C11 stdatomic.h detection — upgrade to C11 when available ──
 # Use check_include_file (compiles a test source) rather than find_file
 # (just checks disk) because MSVC ships a stub that #errors out.
@@ -111,14 +118,6 @@ add_library(ccev STATIC
 
 if(CCEV_TLS AND OpenSSL_FOUND)
     target_compile_definitions(ccev PRIVATE CCEV_HAVE_TLS=1)
-endif()
-
-# Export all symbols to dynamic symbol table, so dlsym(RTLD_DEFAULT, …)
-# works without consumers passing -rdynamic manually.
-if(APPLE)
-    target_link_options(ccev INTERFACE -Wl,-export_dynamic)
-elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_link_options(ccev INTERFACE -rdynamic)
 endif()
 
 set_target_properties(ccev PROPERTIES POSITION_INDEPENDENT_CODE ON)

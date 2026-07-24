@@ -102,75 +102,7 @@ static void stream_on_data(void *udata, const char *data, size_t len, int status
     ccev_loop_stop(ctx->loop);
 }
 
-TEST(stream_readline_smoke) {
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ASSERT(sock != NULL);
-    ccsocket_set_nonblock(sv[0], true);
-
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    stream_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-
-    ctx.loop = loop;
-
-    /* Safety timer (100ms — only fires if read never lands) */
-    ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
-                   timer_stop_loop, loop);
-
-    ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_on_data, &ctx) == CCEV_OK);
-
-    ccsocket_send(sv[1], "hello\n", 6, NULL);
-
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(ctx.called == 1);
-    ASSERT(ctx.status == CCEV_OK);
-    ASSERT(ctx.len == 6);
-    ASSERT(strcmp(ctx.data, "hello\n") == 0);
-
-    ccev_stream_close(st);
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-TEST(stream_readnum_smoke) {
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ASSERT(sock != NULL);
-    ccsocket_set_nonblock(sv[0], true);
-
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    stream_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-
-    ctx.loop = loop;
-
-    ccev_timer_add(loop, 100, CCEV_TIMER_ONCE,
-                   timer_stop_loop, loop);
-
-    ASSERT(ccev_stream_readnum(st, 5, 0, stream_on_data, &ctx) == CCEV_OK);
-    ccsocket_send(sv[1], "hello", 5, NULL);
-
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(ctx.called == 1);
-    ASSERT(ctx.status == CCEV_OK);
-    ASSERT(ctx.len == 5);
-    ASSERT(strcmp(ctx.data, "hello") == 0);
-
-    ccev_stream_close(st);
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
+/* readline/readnum tests removed — raw read only */
 
 /* ═══ Stream write batch tests ───────────────────── */
 
@@ -285,204 +217,7 @@ static void stream_on_timeout(void *udata, const char *data, size_t len, int sta
     if (ctx->loop) ccev_loop_stop(ctx->loop);
 }
 
-TEST(stream_readline_timeout) {
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ASSERT(sock != NULL);
-    ccsocket_set_nonblock(sv[0], true);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    stream_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.loop = loop;
-
-    /* Very short timeout — no data written, so it must timeout */
-    ASSERT(ccev_stream_readline(st, '\n', 1024, 10, stream_on_timeout, &ctx) == CCEV_OK);
-
-    /* Safety timer to prevent hang if readline timeout fails */
-    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
-                   timer_stop_loop, loop);
-
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(ctx.called == 1);
-    ASSERT(ctx.status == CCEV_ERR);  /* timeout = error */
-    ASSERT(ctx.len == 0);
-
-    ccev_stream_close(st);
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-TEST(stream_readnum_timeout) {
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ASSERT(sock != NULL);
-    ccsocket_set_nonblock(sv[0], true);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    stream_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.loop = loop;
-
-    /* Very short timeout — no data written, so it must timeout */
-    ASSERT(ccev_stream_readnum(st, 5, 10, stream_on_timeout, &ctx) == CCEV_OK);
-
-    ccev_timer_add(loop, 5000, CCEV_TIMER_ONCE,
-                   timer_stop_loop, loop);
-
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(ctx.called == 1);
-    ASSERT(ctx.status == CCEV_ERR);
-    ASSERT(ctx.len == 0);
-
-    ccev_stream_close(st);
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-/* ═══ Pipeline + mode-switch + overflow ─────────────── */
-
-static int  pline_count;
-static char pline_buf[256];
-static void on_pipeline_line(void *udata, const char *data,
-                              size_t len, int status) {
-    ccev_loop_t *loop = (ccev_loop_t *)udata;
-    if (status != CCEV_OK || len == 0) return;
-    size_t cp = len;
-    if (pline_count + (int)cp > 256) cp = (size_t)(256 - pline_count);
-    memcpy(pline_buf + pline_count, data, cp);
-    pline_count += (int)cp;
-    if (pline_count >= 6)
-        ccev_loop_stop(loop);
-}
-
-TEST(stream_readline_pipeline) {
-    /* 3 lines in one TCP segment → 3 callbacks, all dispatched */
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ccsocket_set_nonblock(sv[0], true);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    pline_count = 0;
-    memset(pline_buf, 0, sizeof(pline_buf));
-
-    ccev_timer_add(loop, 500, CCEV_TIMER_ONCE, timer_stop_loop, loop);
-    ASSERT(ccev_stream_readline(st, '\n', 1024, 0, on_pipeline_line, loop) == CCEV_OK);
-    ccsocket_send(sv[1], "a\nb\nc\n", 6, NULL);
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(pline_count == 6);
-    ASSERT(strcmp(pline_buf, "a\nb\nc\n") == 0);
-
-    ccev_stream_close(st);
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-static int  rl_rn_phase;        /* 0=header readline, 1=body readnum */
-static stream_ctx_t rl_rn_hdr;
-static stream_ctx_t rl_rn_body;
-
-static void on_rl_rn_readline(void *udata, const char *data,
-                               size_t len, int status) {
-    ccev_stream_t *st = (ccev_stream_t *)udata;
-    if (status != CCEV_OK || len == 0) return;
-
-    if (rl_rn_phase == 0) {
-        memcpy(rl_rn_hdr.data + rl_rn_hdr.len, data, len);
-        rl_rn_hdr.len += len;
-        rl_rn_hdr.called++;
-        if (len == 1 && data[0] == '\n') {
-            rl_rn_phase = 1;
-            ccev_stream_readnum(st, 4, 0, on_rl_rn_readline, st);
-        } else {
-            ccev_stream_readline(st, '\n', 1024, 0, on_rl_rn_readline, st);
-        }
-    } else {
-        memcpy(rl_rn_body.data + rl_rn_body.len, data, len);
-        rl_rn_body.len += len;
-        rl_rn_body.called++;
-        rl_rn_body.status = status;
-        ccev_loop_stop(rl_rn_hdr.loop);
-    }
-}
-
-TEST(stream_readline_to_readnum_switch) {
-    /* Read headers via readline, then switch to readnum for 4-byte body */
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ccsocket_set_nonblock(sv[0], true);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    memset(&rl_rn_hdr, 0, sizeof(rl_rn_hdr));
-    memset(&rl_rn_body, 0, sizeof(rl_rn_body));
-    rl_rn_hdr.loop = loop;
-    rl_rn_phase = 0;
-
-    ccev_timer_add(loop, 500, CCEV_TIMER_ONCE, timer_stop_loop, loop);
-    ASSERT(ccev_stream_readline(st, '\n', 1024, 0, on_rl_rn_readline, st) == CCEV_OK);
-
-    /* "H: v\r\n\r\nABCD" — header, empty line, then 4-byte body */
-    ccsocket_send(sv[1], "H: v\n\nABCD", 11, NULL);
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(rl_rn_hdr.called == 2);        /* "H: v\n" (5) + "\n" (1) */
-    ASSERT(rl_rn_hdr.len == 6);
-    ASSERT(rl_rn_body.called == 1);       /* "ABCD" */
-    ASSERT(rl_rn_body.len == 4);
-    ASSERT(rl_rn_body.status == CCEV_OK);
-
-    ccev_stream_close(st);
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-/* ── Pipelined: readline→readnum→readline→readnum in one recv ── */
-
-
-TEST(stream_readline_overflow) {
-    /* maxlen reached without delimiter → CCEV_ERR */
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { passed++; return; }
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ccsocket_set_nonblock(sv[0], true);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    stream_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.loop = loop;
-
-    ccev_timer_add(loop, 500, CCEV_TIMER_ONCE, timer_stop_loop, loop);
-    /* maxlen=4, send "hello" (5 bytes, no newline) → overflow */
-    ASSERT(ccev_stream_readline(st, '\n', 4, 0, stream_on_data, &ctx) == CCEV_OK);
-    ccsocket_send(sv[1], "hello", 5, NULL);
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(ctx.called == 1);
-    ASSERT(ctx.status == CCEV_ERR);
-    ASSERT(ctx.len == 4);
-    ASSERT(strncmp(ctx.data, "hell", 4) == 0);
-
-    /* sock freed by overflow path — don't close again */
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
+/* readline/readnum tests removed — raw read only */
 
 /* ═══ Stream write with per-buffer callback ─────────── */
 
@@ -642,7 +377,7 @@ TEST(stream_read_stop_cancels) {
     memset(&ctx, 0, sizeof(ctx));
     ctx.loop = loop;
 
-    ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_on_data, &ctx) == CCEV_OK);
+    ASSERT(ccev_stream_read(st, 1024, 0, stream_on_data, &ctx) == CCEV_OK);
 
     /* Cancel the reader mid-flight */
     ccev_stream_read_stop(st);
@@ -743,14 +478,7 @@ int main(void) {
     /* wbuf_len */
     RUN(wbuf_len_null_returns_zero);
 
-    /* stream reader */
-    RUN(stream_readline_smoke);
-    RUN(stream_readnum_smoke);
-    RUN(stream_readline_timeout);
-    RUN(stream_readnum_timeout);
-    RUN(stream_readline_pipeline);
-    RUN(stream_readline_to_readnum_switch);
-    RUN(stream_readline_overflow);
+    /* stream reader (readline/readnum tests removed) */
     /* stream write */
     RUN(stream_write_callback_fires);
     RUN(stream_write_null_data_returns_err);

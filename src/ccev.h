@@ -527,46 +527,9 @@ size_t ccev_stream_wbuf_len(const ccev_stream_t *st);
 int ccev_stream_read(ccev_stream_t *st, size_t limit, int timeout_ms,
                       ccev_stream_cb cb, void *udata);
 
-/** @brief Read exactly @p n bytes, then fire the callback once.
+/** @brief Cancel the active read.
  *
- *  Common case (data already in kernel buffer): zero allocation —
- *  delivered directly from a stack buffer.  Rare case (partial
- *  read across epoll cycles): one heap allocation for @p n bytes,
- *  freed immediately after the callback fires.
- *
- *  Only one read mode may be active at a time.
- *
- *  @param st         Stream handle.
- *  @param n          Exact number of bytes to read (> 0).
- *  @param timeout_ms Total timeout in ms (0 = no timeout).
- *  @param cb         Completion callback.
- *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
-int ccev_stream_readnum(ccev_stream_t *st, size_t n, int timeout_ms,
-                         ccev_stream_cb cb, void *udata);
-
-/** @brief Read until @p delim is found (delimiter inclusive).
- *
- *  Dispatches all complete lines from one recv in a tight loop.
- *  Incomplete tails are accumulated on heap and completed on
- *  subsequent epoll callbacks.  Zero allocation when data arrives
- *  in a single kernel-buffer chunk.
- *
- *  Only one read mode may be active at a time.
- *
- *  @param st         Stream handle.
- *  @param delim      Delimiter byte to search for (e.g. '\\n').
- *  @param maxlen     Maximum bytes before yielding CCEV_ERR.
- *  @param timeout_ms Total timeout in ms (0 = no timeout).
- *  @param cb         Completion callback (fires once per line).
- *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
-int ccev_stream_readline(ccev_stream_t *st, char delim, size_t maxlen,
-                          int timeout_ms, ccev_stream_cb cb, void *udata);
-
-/** @brief Cancel the active read (raw, readnum, or readline).
- *
- *  Frees any partial readnum heap.  Safe to call when idle.
+ *  Safe to call when idle.
  *  @param st  Stream handle. */
 void ccev_stream_read_stop(ccev_stream_t *st);
 

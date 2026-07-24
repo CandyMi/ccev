@@ -163,95 +163,6 @@ TEST(timer_add_oom) {
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  Stream readline / readnum OOM (partial-read heap allocation)
- * ════════════════════════════════════════════════════════════════ */
-
-static int stream_oom_called;
-static int stream_oom_status;
-
-static void stream_oom_cb(void *udata, const char *data, size_t len, int status) {
-    (void)udata; (void)data;
-    stream_oom_called  = 1;
-    stream_oom_status  = status;
-    stream_oom_called += (int)len;  /* also count len for verification */
-}
-
-/* Timer to stop loop in case readline never fires. */
-static void oom_safety_timer(ccev_timer_t *timer, void *udata) {
-    (void)timer;
-    ccev_loop_stop((ccev_loop_t *)udata);
-}
-
-TEST(stream_readline_oom) {
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ASSERT(loop != NULL);
-
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { ccev_loop_destroy(loop); passed++; return; }
-
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ASSERT(sock != NULL);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    /* readline returns immediately (no allocation at call site).
-     * Write partial data (no delimiter) to trigger heap allocation
-     * inside _stream_on_readable.  Set OOM to fail it. */
-    stream_oom_called = 0;
-    ccev_timer_add(loop, 500, CCEV_TIMER_ONCE, oom_safety_timer, loop);
-
-    ASSERT(ccev_stream_readline(st, '\n', 1024, 0, stream_oom_cb, NULL) == CCEV_OK);
-    oom_set_fail_at(0);
-    ccev_set_allocator(oom_realloc, oom_free);
-
-    ccsocket_send(sv[1], "no-delim", 8, NULL);
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(stream_oom_called >= 1);       /* callback fired */
-    ASSERT(stream_oom_called == 1);       /* len == 0 on error */
-
-    oom_reset();
-    ccev_set_allocator(NULL, NULL);
-    /* sock freed by ccev__sock_free during loop — don't touch st */
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-TEST(stream_readnum_oom) {
-    ccev_loop_t *loop = ccev_loop_create(64);
-    ASSERT(loop != NULL);
-
-    ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { ccev_loop_destroy(loop); passed++; return; }
-
-    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
-    ASSERT(sock != NULL);
-    ccev_stream_t *st = ccev_stream_open(sock);
-    ASSERT(st != NULL);
-
-    /* readnum: write fewer than N bytes → triggers heap allocation.
-     * Set OOM to fail it. */
-    stream_oom_called = 0;
-    ccev_timer_add(loop, 500, CCEV_TIMER_ONCE, oom_safety_timer, loop);
-
-    ASSERT(ccev_stream_readnum(st, 100, 0, stream_oom_cb, NULL) == CCEV_OK);
-    oom_set_fail_at(0);
-    ccev_set_allocator(oom_realloc, oom_free);
-
-    ccsocket_send(sv[1], "short", 5, NULL);
-    ccev_loop_run(loop, CCEV_RUN_FOREVER);
-
-    ASSERT(stream_oom_called >= 1);
-    ASSERT(stream_oom_called == 1);   /* len == 0 */
-
-    oom_reset();
-    ccev_set_allocator(NULL, NULL);
-    /* sock freed by ccev__sock_free during loop — don't touch st */
-    ccev_loop_destroy(loop);
-    ccsocket_close(sv[1]);
-}
-
-/* ════════════════════════════════════════════════════════════════
  *  DNS resolve OOM
  * ════════════════════════════════════════════════════════════════ */
 
@@ -391,10 +302,6 @@ int main(void) {
 
     printf("  timer:\n");
     RUN(timer_add_oom);
-
-    printf("  stream:\n");
-    RUN(stream_readline_oom);
-    RUN(stream_readnum_oom);
 
     printf("  dns:\n");
     RUN(dns_resolve_oom_pending);

@@ -316,16 +316,6 @@ int ccev_tls_flush(ccev_tls_t *tls);
 int ccev_tls_read(ccev_tls_t *tls, size_t limit, int timeout_ms,
                    ccev_stream_cb cb, void *udata);
 
-/** @brief Read exactly N bytes.
- *  @param tls        TLS handle.
- *  @param n          Number of bytes (> 0).
- *  @param timeout_ms Read timeout in ms (0 = no timeout).
- *  @param cb         Completion callback.
- *  @param udata      User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
-int ccev_tls_readnum(ccev_tls_t *tls, size_t n,
-                      int timeout_ms, ccev_stream_cb cb, void *udata);
-
 /* ════════════════════════════════════════════════════════════════
  *  TLS lifecycle
  * ════════════════════════════════════════════════════════════════ */

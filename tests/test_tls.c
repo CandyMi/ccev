@@ -236,7 +236,7 @@ TEST(handshake_and_data_transfer) {
     unlink(cert_path); unlink(key_path);
 }
 
-TEST(readline_and_readnum) {
+TEST(read_and_data_transfer) {
     ccsocket_t sv[2];
     if (pair_create(sv) != 0) { passed++; return; }
 
@@ -269,30 +269,29 @@ TEST(readline_and_readnum) {
 
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
 
-    /* Write two lines from client, readline on server */
-    /* Write and read first line */
-    ccev_tls_write(cli_tls, "line1\n", 6, NULL, NULL);
+    /* Write data from client, read on server using raw read */
+    ccev_tls_write(cli_tls, "data1\n", 6, NULL, NULL);
 
     struct rd_state rd1 = {0};
-    ASSERT(ccev_tls_readnum(srv_tls, 6, 2000, rd_cb, &rd1) == CCEV_OK);
+    ASSERT(ccev_tls_read(srv_tls, 16, 2000, rd_cb, &rd1) == CCEV_OK);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
     ASSERT(rd1.fired && rd1.status == CCEV_OK);
     ASSERT(rd1.got == 6);
-    ASSERT(memcmp(rd1.buf, "line1\n", 6) == 0);
+    ASSERT(memcmp(rd1.buf, "data1\n", 6) == 0);
 
-    /* Write and readnum the second line */
-    ccev_tls_write(cli_tls, "line2\n", 6, NULL, NULL);
+    /* Write and read second chunk */
+    ccev_tls_write(cli_tls, "data2", 5, NULL, NULL);
 
     struct rd_state rd2 = {0};
-    ASSERT(ccev_tls_readnum(srv_tls, 6, 2000, rd_cb, &rd2) == CCEV_OK);
+    ASSERT(ccev_tls_read(srv_tls, 16, 2000, rd_cb, &rd2) == CCEV_OK);
 
     ccev_timer_add(loop, 1000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
     ASSERT(rd2.fired && rd2.status == CCEV_OK);
-    ASSERT(rd2.got == 6);
-    ASSERT(memcmp(rd2.buf, "line2\n", 6) == 0);
+    ASSERT(rd2.got == 5);
+    ASSERT(memcmp(rd2.buf, "data2", 5) == 0);
 
     ccev_tls_close(srv_tls); ccev_tls_close(cli_tls);
     ccev_loop_destroy(loop);
@@ -540,11 +539,11 @@ TEST(read_timeout) {
     ASSERT(srv_tls != NULL); ASSERT(cli_tls != NULL);
     ASSERT(_do_handshake(loop, srv_tls, &srv_hs, cli_tls, &cli_hs) == 0);
 
-    /* Start readnum with short timeout — no data arrives from server.
+    /* Start read with short timeout — no data arrives from server.
      * Use RUN_ONCE with usleep between iterations to let wall clock pass
      * so that the 300ms read timeout timer can elapse. */
     struct rd_state rd = {0};
-    ASSERT(ccev_tls_readnum(cli_tls, 10, 300, rd_cb, &rd) == CCEV_OK);
+    ASSERT(ccev_tls_read(cli_tls, 10, 300, rd_cb, &rd) == CCEV_OK);
 
     ccev_timer_add(loop, 3000, CCEV_TIMER_ONCE, timer_stop_loop, loop);
     ccev_loop_run(loop, CCEV_RUN_ONCE);
@@ -571,11 +570,12 @@ TEST(read_timeout) {
 
 /* ── Large-data read state ── */
 struct big_rd_state {
-    volatile int fired;
+    ccev_tls_t    *tls;
+    volatile int   fired;
     volatile size_t got;
-    char *buf;
-    size_t cap;
-    volatile int status;
+    char          *buf;
+    size_t         cap;
+    volatile int   status;
 };
 
 static void big_rd_cb(void *udata, const char *data, size_t len, int status) {
@@ -586,6 +586,9 @@ static void big_rd_cb(void *udata, const char *data, size_t len, int status) {
         size_t cpy = len < rd->cap - rd->got ? len : rd->cap - rd->got - 1;
         memcpy(rd->buf + rd->got, data, cpy);
         rd->got += cpy;
+        rd->fired = 0;
+        /* Continue reading — raw dispatch is one-shot, call again */
+        ccev_tls_read(rd->tls, 0, 0, big_rd_cb, rd);
     }
 }
 
@@ -702,8 +705,9 @@ TEST(large_data_transfer) {
                               last ? wc_cb : NULL, last ? &wc : NULL);
     }
 
-    /* Read on server side — continuous mode. */
+    /* Read on server side — continuous re-read until all data arrives. */
     struct big_rd_state rd = {0};
+    rd.tls = srv_tls;
     rd.buf = (char *)malloc(LARGE_DATA_SIZE + 1);
     rd.cap = LARGE_DATA_SIZE + 1;
     ASSERT(rd.buf != NULL);
@@ -834,7 +838,7 @@ int main(void) {
     RUN(null_args);
     RUN(client_ctx_create_and_free);
     RUN(handshake_and_data_transfer);
-    RUN(readline_and_readnum);
+    RUN(read_and_data_transfer);
     RUN(cert_verify_trusted);
     RUN(cert_verify_untrusted);
     RUN(hostname_mismatch_rejected);
