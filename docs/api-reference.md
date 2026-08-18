@@ -383,13 +383,23 @@ Flush the write buffer — send all queued data. Equivalent to
 #### `ccev_stream_sendfile`
 
 ```c
+typedef void (*ccev_sendfile_cb)(void *udata, int status);
+
 int ccev_stream_sendfile(ccev_stream_t *st, const char *path,
-                          ccev_send_cb cb, void *udata);
+                          ccev_sendfile_cb cb, void *udata);
 ```
 
-Send a file using kernel sendfile (zero-copy on Linux/macOS/FreeBSD).
-Opens the file, sends its entire content, then closes it. Falls back
-to read+send on platforms without kernel sendfile.
+Send a file asynchronously (zero-copy on Linux/macOS/FreeBSD; falls
+back to read+send elsewhere). Fully event-driven: returns immediately
+after opening the file and arming EPOLLOUT — no bytes are sent from
+the caller's stack. The event loop pushes the file in the background;
+any data still in the write buffer is flushed first, so file bytes
+never overtake earlier writes.
+
+The `cb` fires exactly once with `CCEV_OK` when all bytes have been
+handed to the kernel, or `CCEV_ERR` when the transfer fails (the
+stream is closed afterwards). A user-initiated close cancels the
+transfer without firing `cb` — the close callback is used instead.
 
 #### `ccev_stream_set_send_cb`
 

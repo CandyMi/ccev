@@ -287,7 +287,7 @@ struct ccev_stream_s {
     int                timeout_ms;  /**< Timeout value (0 = no timeout). */
 
     /* ── Sendfile state ── */
-    ccev_send_cb       sf_cb;      /**< Sendfile completion callback.   */
+    ccev_sendfile_cb   sf_cb;      /**< Sendfile termination callback.  */
     void              *sf_udata;
     int                sendfile_fd; /**< File fd, -1 when idle.         */
     bool               pending_write;/**< EPOLLOUT currently armed.     */

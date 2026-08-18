@@ -280,19 +280,63 @@ TEST(stream_write_null_data_returns_err) {
 
 /* ═══ Stream sendfile ─────────────────────────────── */
 
+static int  sendfile_cb_called;
+static int  sendfile_cb_status;
+
+static void on_sendfile_done(void *udata, int status) {
+    sendfile_cb_called = 1;
+    sendfile_cb_status = status;
+    ccev_loop_stop((ccev_loop_t *)udata);
+}
+
+static void on_sendfile_mark(void *udata, int status) {
+    (void)udata;
+    sendfile_cb_called = 1;
+    sendfile_cb_status = status;
+}
+
+static void on_close_marker(void *udata) {
+    int *p = (int *)udata;
+    (*p)++;
+}
+
+/* (Re)create tmpname with the given payload. */
+static void sendfile_payload_file(const char *tmpname,
+                                  const char *payload, size_t plen) {
+    int tfd = open(tmpname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT(tfd >= 0);
+    ASSERT(write(tfd, payload, plen) == (ssize_t)plen);
+    close(tfd);
+}
+
+/* (Re)create tmpname as a file of `bytes` 'x' characters. */
+static void sendfile_big_file(const char *tmpname, size_t bytes) {
+    int tfd = open(tmpname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT(tfd >= 0);
+    char chunk[4096];
+    memset(chunk, 'x', sizeof(chunk));
+    size_t left = bytes;
+    while (left > 0) {
+        size_t n = left < sizeof(chunk) ? left : sizeof(chunk);
+        ASSERT(write(tfd, chunk, n) == (ssize_t)n);
+        left -= n;
+    }
+    close(tfd);
+}
+
 TEST(stream_sendfile_smoke) {
 #ifndef _WIN32
     char tmpname[] = "/tmp/ccev_sendfile_test_XXXXXX";
     int tfd = mkstemp(tmpname);
     if (tfd < 0) { passed++; return; }
+    close(tfd);
 
     const char *payload = "sendfile-test-payload-12345";
     size_t plen = strlen(payload);
-    ASSERT(write(tfd, payload, plen) == (ssize_t)plen);
-    close(tfd);
+    sendfile_payload_file(tmpname, payload, plen);
 
     ccsocket_t sv[2];
-    if (pair_create(sv) != 0) { close(tfd); unlink(tmpname); passed++; return; }
+    if (pair_create(sv) != 0) { unlink(tmpname); passed++; return; }
 
     ccev_loop_t *loop = ccev_loop_create(64);
     ASSERT(loop != NULL);
@@ -300,20 +344,157 @@ TEST(stream_sendfile_smoke) {
     ccev_stream_t *st = ccev_stream_open(sock);
     ASSERT(st != NULL);
 
-    write_cb_called = 0;
-    ASSERT(ccev_stream_sendfile(st, tmpname, on_write_complete, NULL) == CCEV_OK);
+    /* Transfer is fully async — the loop drives EPOLLOUT. */
+    sendfile_cb_called = 0;
+    sendfile_cb_status = -1;
+    ASSERT(ccev_stream_sendfile(st, tmpname, on_sendfile_done, loop) == CCEV_OK);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
 
-    /* Drain the receiving end */
+    ASSERT(sendfile_cb_called == 1);
+    ASSERT(sendfile_cb_status == CCEV_OK);
+
+    /* Verify the payload arrived intact. */
     char buf[128];
     int n;
     ccsocket_recv(sv[1], buf, sizeof(buf) - 1, &n);
-
+    ASSERT(n == (int)plen);
     if (n > 0) {
         buf[n] = '\0';
         ASSERT(strcmp(buf, payload) == 0);
     }
 
     ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    ccsocket_close(sv[1]);
+    unlink(tmpname);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_sendfile_after_write_keeps_order) {
+#ifndef _WIN32
+    char tmpname[] = "/tmp/ccev_sendfile_test_XXXXXX";
+    int tfd = mkstemp(tmpname);
+    if (tfd < 0) { passed++; return; }
+    close(tfd);
+
+    const char *payload = "sendfile-test-payload-12345";
+    size_t plen = strlen(payload);
+    sendfile_payload_file(tmpname, payload, plen);
+
+    ccsocket_t sv[2];
+    if (pair_create(sv) != 0) { unlink(tmpname); passed++; return; }
+
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    /* Headers written BEFORE sendfile must arrive before the file. */
+    const char *hdr = "HEAD:";
+    int hlen = (int)strlen(hdr);
+    ASSERT(ccev_stream_write(st, hdr, (size_t)hlen, NULL, NULL) > 0);
+
+    sendfile_cb_called = 0;
+    sendfile_cb_status = -1;
+    ASSERT(ccev_stream_sendfile(st, tmpname, on_sendfile_done, loop) == CCEV_OK);
+    ccev_loop_run(loop, CCEV_RUN_FOREVER);
+    ASSERT(sendfile_cb_called == 1);
+    ASSERT(sendfile_cb_status == CCEV_OK);
+
+    /* Read back: header bytes must precede the file payload. */
+    char buf[512];
+    size_t want = (size_t)hlen + plen;
+    size_t got = 0;
+    while (got < want) {
+        int n = 0;
+        ccsocket_recv(sv[1], buf + got, (int)(want - got), &n);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    ASSERT(got == want);
+    ASSERT(memcmp(buf, hdr, (size_t)hlen) == 0);
+    ASSERT(memcmp(buf + hlen, payload, plen) == 0);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    ccsocket_close(sv[1]);
+    unlink(tmpname);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_sendfile_overlap_rejected) {
+#ifndef _WIN32
+    char tmpname[] = "/tmp/ccev_sendfile_test_XXXXXX";
+    int tfd = mkstemp(tmpname);
+    if (tfd < 0) { passed++; return; }
+    close(tfd);
+    sendfile_payload_file(tmpname, "x", 1);
+
+    ccsocket_t sv[2];
+    if (pair_create(sv) != 0) { unlink(tmpname); passed++; return; }
+
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    /* First transfer is in-flight (async) → second must be rejected. */
+    ASSERT(ccev_stream_sendfile(st, tmpname, NULL, NULL) == CCEV_OK);
+    ASSERT(ccev_stream_sendfile(st, tmpname, NULL, NULL) == CCEV_ERR);
+
+    ccev_stream_close(st);
+    ccev_loop_destroy(loop);
+    ccsocket_close(sv[1]);
+    unlink(tmpname);
+    passed++;
+#else
+    passed++;
+#endif
+}
+
+TEST(stream_sendfile_cancel_on_close) {
+#ifndef _WIN32
+    char tmpname[] = "/tmp/ccev_sendfile_test_XXXXXX";
+    int tfd = mkstemp(tmpname);
+    if (tfd < 0) { passed++; return; }
+    close(tfd);
+    sendfile_big_file(tmpname, 1024 * 1024);   /* > socket send buffer */
+
+    ccsocket_t sv[2];
+    if (pair_create(sv) != 0) { unlink(tmpname); passed++; return; }
+
+    ccev_loop_t *loop = ccev_loop_create(64);
+    ASSERT(loop != NULL);
+    ccev_sock_t *sock = ccev_sock_create(loop, sv[0], NULL);
+    ccev_stream_t *st = ccev_stream_open(sock);
+    ASSERT(st != NULL);
+
+    int close_cb_called = 0;
+    ccev_stream_set_close_cb(st, on_close_marker, &close_cb_called);
+
+    sendfile_cb_called = 0;
+    ASSERT(ccev_stream_sendfile(st, tmpname, on_sendfile_mark, NULL) == CCEV_OK);
+
+    /* Let EPOLLOUT fire once — sendfile drains to EWOULDBLOCK and is
+     * left in-flight (peer never reads). */
+    ccev_loop_run(loop, CCEV_RUN_ONCE);
+    ASSERT(sendfile_cb_called == 0);
+
+    /* User-initiated close cancels the transfer: sf_cb must NOT fire,
+     * only close_cb. */
+    ccev_stream_close(st);
+    ccev_loop_run(loop, CCEV_RUN_ONCE);   /* process closing queue */
+    ASSERT(sendfile_cb_called == 0);
+    ASSERT(close_cb_called == 1);
+
     ccev_loop_destroy(loop);
     ccsocket_close(sv[1]);
     unlink(tmpname);
@@ -490,6 +671,9 @@ int main(void) {
 
     /* stream sendfile */
     RUN(stream_sendfile_smoke);
+    RUN(stream_sendfile_after_write_keeps_order);
+    RUN(stream_sendfile_overlap_rejected);
+    RUN(stream_sendfile_cancel_on_close);
 
     /* stream set_send_cb */
     RUN(stream_set_send_cb_fires_on_drain);

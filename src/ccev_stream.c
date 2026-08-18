@@ -142,18 +142,20 @@ static void ccev__stream_flush(ccev_loop_t *loop, ccev_stream_t *st) {
 static void _stream_on_writable(ccev_sock_t *sock, int events) {
     (void)events;
     ccev_stream_t *st = _sock_to_stream(sock);
+
+    /* 1. Buffered writes go out FIRST — file data must never overtake
+     *    bytes queued earlier (headers before body). */
     ccev__stream_flush(sock->loop, st);
 
-    /* Continue sendfile if in progress */
-    if (st->sendfile_fd >= 0) {
+    /* 2. Advance the file only after the write queue drained. */
+    if (st->sendfile_fd >= 0 && cclink_empty(&st->wlist))
         ccev__stream_sendfile_continue(sock->loop, st);
-        /* If sendfile is still pending, keep wcb and return */
-        if (st->sendfile_fd >= 0) return;
-    }
 
-    /* No pending writes or sendfile — disarm EPOLLOUT so the dispatch
-     * loop does not busy-loop re-arming it on every iteration. */
-    if (!st->pending_write)
+    /* 3. Keep EPOLLOUT armed while work remains, else disarm so the
+     *    dispatch loop does not busy-loop re-arming it. */
+    if (st->pending_write || st->sendfile_fd >= 0)
+        ccev__sock_rearm(sock->loop, sock);
+    else
         sock->wcb = NULL;
 }
 
@@ -161,6 +163,20 @@ static void _stream_on_writable(ccev_sock_t *sock, int events) {
  *  Sendfile support
  * ════════════════════════════════════════════════════════════════ */
 
+/* Fire the termination callback exactly once.  sf_cb is cleared first
+ * so a callback may start a new sendfile (chained transfers). */
+static void _stream_invoke_sf_cb(ccev_stream_t *st, int status) {
+    if (st->sf_cb) {
+        ccev_sendfile_cb cb = st->sf_cb;
+        void *ud = st->sf_udata;
+        st->sf_cb = NULL;
+        cb(ud, status);
+    }
+}
+
+/* Driven exclusively from the stream wcb (EPOLLOUT) — never from the
+ * caller's stack.  Pushes the file until the kernel reports
+ * EWOULDBLOCK (CC_SENDWAIT), then waits for the next EPOLLOUT. */
 static void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st) {
     if (st->sock.closed || st->sendfile_fd < 0) return;
 
@@ -170,21 +186,14 @@ static void ccev__stream_sendfile_continue(ccev_loop_t *loop, ccev_stream_t *st)
     if (rc == CC_SENDALL) {
         close(fd);
         st->sendfile_fd = -1;
-        if (st->sf_cb) {
-            ccev_send_cb cb = st->sf_cb;
-            void *ud = st->sf_udata;
-            st->sf_cb = NULL;
-            cb(ud);
-        }
-        ccev__sock_rearm(loop, &st->sock);
-    } else if (rc == CC_SENDWAIT) {
-        /* Still waiting — next EPOLLOUT will retry */
-    } else {
-        /* CC_SENDERROR */
+        _stream_invoke_sf_cb(st, CCEV_OK);      /* completion */
+    } else if (rc == CC_SENDERROR) {
         close(fd);
         st->sendfile_fd = -1;
+        _stream_invoke_sf_cb(st, CCEV_ERR);     /* failure */
         ccev__sock_schedule_close(loop, &st->sock);
     }
+    /* CC_SENDWAIT — _stream_on_writable re-arms EPOLLOUT */
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -301,7 +310,7 @@ void ccev__stream_cleanup(ccev_stream_t *st) {
     }
 
     /* Close sendfile fd if in progress */
-    if (st->sendfile_fd > 0) {
+    if (st->sendfile_fd >= 0) {
         close(st->sendfile_fd);
         st->sendfile_fd = -1;
     }
@@ -332,9 +341,11 @@ int ccev_stream_write(ccev_stream_t *st, const void *data, size_t len,
     if (!st || st->sock.closed) return CCEV_ERR;
     if (!data || !len) return 0;
 
-    /* Fast path: wlist empty, no callback → try direct send.
-     * Avoids alloc+memcpy+sendv+free for the common small-response case. */
-    if (cclink_empty(&st->wlist) && !st->pending_write && !cb) {
+    /* Fast path: wlist empty, no callback, no sendfile in flight →
+     * try direct send.  Avoids alloc+memcpy+sendv+free for the common
+     * small-response case. */
+    if (cclink_empty(&st->wlist) && !st->pending_write &&
+        st->sendfile_fd < 0 && !cb) {
         int sent = 0;
         ccsocket_stcode_t rc = ccsocket_send(st->sock.fd, data,
                                               len, &sent);
@@ -403,8 +414,9 @@ int ccev_stream_flush(ccev_stream_t *st) {
 }
 
 int ccev_stream_sendfile(ccev_stream_t *st, const char *path,
-                          ccev_send_cb cb, void *udata) {
+                          ccev_sendfile_cb cb, void *udata) {
     if (!st || st->sock.closed) return CCEV_ERR;
+    if (!path || st->sendfile_fd >= 0) return CCEV_ERR;  /* one at a time */
 
     int fd;
 #ifdef _WIN32
@@ -414,29 +426,15 @@ int ccev_stream_sendfile(ccev_stream_t *st, const char *path,
 #endif
     if (fd < 0) return CCEV_ERR;
 
-    if (cb) { st->sf_cb = cb; st->sf_udata = udata; }
-
-    ccsocket_sendf_state_t rc = ccsocket_sendfile(st->sock.fd, fd);
-
-    if (rc == CC_SENDALL) {
-        close(fd);
-        if (st->sf_cb) {
-            ccev_send_cb scb = st->sf_cb;
-            void *sud = st->sf_udata;
-            st->sf_cb = NULL;
-            scb(sud);
-        }
-        return CCEV_OK;
-    }
-
-    if (rc == CC_SENDWAIT) {
-        st->sendfile_fd = fd;
-        ccev__sock_rearm(st->sock.loop, &st->sock);
-        return CCEV_OK;
-    }
-
-    close(fd);
-    return CCEV_ERR;
+    /* Defer ALL I/O to the event loop: arm EPOLLOUT and return.  The
+     * stream wcb (set below) flushes any queued writes first, then
+     * pushes the file, and finally fires @p cb (OK / ERR). */
+    st->sendfile_fd = fd;
+    st->sf_cb       = cb;
+    st->sf_udata    = udata;
+    st->sock.wcb    = _stream_on_writable;
+    ccev__sock_rearm(st->sock.loop, &st->sock);
+    return CCEV_OK;
 }
 
 void ccev_stream_set_send_cb(ccev_stream_t *st, ccev_send_cb cb, void *udata) {

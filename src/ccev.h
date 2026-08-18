@@ -125,6 +125,15 @@ typedef void (*ccev_event_cb)(ccev_sock_t *sock, int events);
  *  @param udata  User-provided context pointer. */
 typedef void (*ccev_send_cb)(void *udata);
 
+/** @brief Sendfile termination callback. Fired exactly once when a file
+ *  transfer ends — either all bytes have been handed to the kernel
+ *  (status CCEV_OK) or a transfer error occurred (status CCEV_ERR).
+ *  A user-initiated close cancels the transfer WITHOUT firing this
+ *  callback — close_cb is invoked instead.
+ *  @param udata  User-provided context pointer.
+ *  @param status CCEV_OK on completion, CCEV_ERR on failure. */
+typedef void (*ccev_sendfile_cb)(void *udata, int status);
+
 /** @brief Socket-closed / error callback. Fired when the peer closes
  *  the connection or an I/O error occurs.  The fd is already dead —
  *  the user should release associated resources inside this callback.
@@ -481,14 +490,24 @@ int ccev_stream_write_batch(ccev_stream_t *st, const void *data, size_t len,
  *  @return CCEV_OK or CCEV_ERR. */
 int ccev_stream_flush(ccev_stream_t *st);
 
-/** @brief Send a file using kernel sendfile (zero-copy).
+/** @brief Send a file asynchronously (zero-copy where the OS supports it).
+ *
+ *  Fully asynchronous: returns immediately after opening the file and
+ *  arming EPOLLOUT — no bytes are sent from the caller's stack.  The
+ *  event loop pushes the file in the background; any data still in the
+ *  write buffer is flushed first, so file bytes never overtake earlier
+ *  writes.
+ *
  *  @param st    Stream handle.
  *  @param path  File path to send.
- *  @param cb    Completion callback, or NULL.
+ *  @param cb    Termination callback, or NULL.  Fires exactly once with
+ *               CCEV_OK (all bytes sent) or CCEV_ERR (transfer failed).
+ *               Not fired on user-initiated close (close_cb is used).
  *  @param udata User pointer for @p cb.
- *  @return CCEV_OK or CCEV_ERR. */
+ *  @return CCEV_OK, or CCEV_ERR (bad args / closed stream / open failure
+ *          / a sendfile is already in progress). */
 int ccev_stream_sendfile(ccev_stream_t *st, const char *path,
-                          ccev_send_cb cb, void *udata);
+                          ccev_sendfile_cb cb, void *udata);
 
 /** @brief Set the global write-drain callback.
  *
