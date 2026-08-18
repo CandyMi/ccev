@@ -26,9 +26,11 @@
 static int ccev_tls__initialized = 0;
 
 /* ── Allocator wrappers for CRYPTO_set_mem_functions ──
- * OpenSSL 3.x added const char *file, int line params.  We provide
- * both signatures via OPENSSL_VERSION_NUMBER, avoiding UB casts. */
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+ * OpenSSL 1.1.0 changed the callback signatures to take
+ * const char *file, int line params (3.x kept them and only
+ * deprecated the setter).  We provide both signatures via
+ * OPENSSL_VERSION_NUMBER, avoiding UB casts. */
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
 static void *_tls_ossl_malloc(size_t sz, const char *file, int line) {
     (void)file; (void)line;
     return ccev__realloc_fn(NULL, sz);
