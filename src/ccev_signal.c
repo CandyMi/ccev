@@ -140,9 +140,13 @@ static int ccev__sig_install(int signum, void (*handler)(int)) {
 #if defined(_WIN32)
     if (signum == SIGINT || signum == SIGBREAK) {
         if (handler == SIG_DFL) {
-            /* Keep the console handler registered — it's shared
-             * between signals.  Without a registered callback,
-             * events are freed by process_queue — harmless. */
+            /* Genuinely restore default disposition: unregister the
+             * shared console handler as well as signal().  Best-effort —
+             * a handler that was never added just fails here, and the
+             * signal() call below is what actually restores disposition.
+             * Ctrl+C / Ctrl+Break then fall through to the CRT, which
+             * raises the (now-default) signal. */
+            SetConsoleCtrlHandler(ccev__console_handler, FALSE);
             goto install_crt;
         }
         if (!SetConsoleCtrlHandler(ccev__console_handler, TRUE))
