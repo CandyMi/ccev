@@ -28,6 +28,13 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
+#include <openssl/opensslv.h>
+
+/* EVP_PKEY_generate() is the OpenSSL 3.0 name; 1.1.x calls it
+ * EVP_PKEY_keygen() with an identical signature. */
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+#  define EVP_PKEY_generate EVP_PKEY_keygen
+#endif
 
 static int passed, failed;
 #define TEST(name) static void test_##name(void)
