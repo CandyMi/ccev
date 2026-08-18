@@ -300,6 +300,9 @@ static void on_close_marker(void *udata) {
     (*p)++;
 }
 
+/* POSIX-only helpers — every caller is inside #ifndef _WIN32. */
+#ifndef _WIN32
+
 /* (Re)create tmpname with the given payload. */
 static void sendfile_payload_file(const char *tmpname,
                                   const char *payload, size_t plen) {
@@ -323,6 +326,8 @@ static void sendfile_big_file(const char *tmpname, size_t bytes) {
     }
     close(tfd);
 }
+
+#endif /* _WIN32 */
 
 TEST(stream_sendfile_smoke) {
 #ifndef _WIN32
