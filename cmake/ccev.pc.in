@@ -1,0 +1,12 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: ccev
+Description: A lightweight, cross-platform reactor event-driven library written in C99
+Version: @PROJECT_VERSION@
+Requires.private: @CCEV_PC_REQUIRES_PRIVATE@
+Libs: -L${libdir} -lccev
+Libs.private: @CCEV_PC_LIBS_PRIVATE@
+Cflags: -I${includedir}

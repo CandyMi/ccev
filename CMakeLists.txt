@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ccev LANGUAGES C)
+project(ccev VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -232,6 +232,24 @@ install(EXPORT ccev-targets
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ccev
     NAMESPACE ccev::
 )
+
+# ── pkg-config (.pc) — POSIX / Apple only ─────────────────
+if(NOT WIN32)
+    set(CCEV_PC_REQUIRES_PRIVATE)
+    set(CCEV_PC_LIBS_PRIVATE)
+    if(CCEV_TLS AND OpenSSL_FOUND)
+        set(CCEV_PC_REQUIRES_PRIVATE "openssl")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
+        set(CCEV_PC_LIBS_PRIVATE "-lsocket -lnsl -lsendfile")
+    endif()
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ccev.pc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/ccev.pc
+        @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ccev.pc
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+endif()
 
 # ── Tests & examples ────────────────────────────────────────
 if(BUILD_TESTING)
