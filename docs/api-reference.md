@@ -607,10 +607,18 @@ Register a signal handler on the default loop. The handler fires inside
 — a second call overwrites the previous one. Returns `CCEV_ERR` if
 `signum` is out of range.
 
-#### `ccev_signal_ignore`
+#### `ccev_signal_restore`
 
 ```c
-int ccev_signal_ignore(int signum);
+int ccev_signal_restore(int signum);
 ```
 
-Restore a signal to its default disposition (`SIG_DFL`).
+Restore a signal to its default disposition (`SIG_DFL`). Removes the
+callback registered by `ccev_signal_handle()`; the next delivery of the
+signal takes the OS default action — e.g. `SIGINT`/`SIGTERM` terminate
+the process, `SIGPIPE` kills it.
+
+> **Deprecated alias:** `ccev_signal_ignore()` is kept with identical
+> behavior for source compatibility. The old name suggested `SIG_IGN`
+> semantics, but this function has always restored the default
+> disposition.

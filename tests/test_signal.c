@@ -52,15 +52,17 @@ TEST(signal_register_and_fire) {
     ASSERT(sig_fired == 1);
 
     /* Restore default disposition so subsequent tests are clean */
-    ccev_signal_ignore(SIGTERM);
+    ccev_signal_restore(SIGTERM);
 }
 
-TEST(signal_ignore_api) {
+TEST(signal_restore_api) {
     ccev_loop_t *loop = ccev_default_loop();
     ASSERT(loop != NULL);
 
     ASSERT(ccev_signal_handle(SIGTERM, on_signal, loop) == CCEV_OK);
-    /* After ignore, the signal has SIG_DFL — don't raise, just verify API */
+    /* After restore, the signal has SIG_DFL — don't raise, just verify API */
+    ASSERT(ccev_signal_restore(SIGTERM) == CCEV_OK);
+    /* Deprecated alias — identical behavior, kept for compatibility */
     ASSERT(ccev_signal_ignore(SIGTERM) == CCEV_OK);
 }
 
@@ -71,16 +73,16 @@ TEST(signal_invalid_signum) {
 
     ASSERT(ccev_signal_handle(0, on_signal, loop) == CCEV_ERR);
     ASSERT(ccev_signal_handle(64, on_signal, loop) == CCEV_ERR);
-    ASSERT(ccev_signal_ignore(0) == CCEV_ERR);
+    ASSERT(ccev_signal_restore(0) == CCEV_ERR);
 
-    ccev_signal_ignore(SIGTERM);
+    ccev_signal_restore(SIGTERM);
 }
 
 TEST(signal_null_cb) {
     ccev_loop_t *loop = ccev_default_loop();
     ASSERT(loop != NULL);
     ASSERT(ccev_signal_handle(SIGTERM, NULL, loop) == CCEV_ERR);
-    ccev_signal_ignore(SIGTERM);
+    ccev_signal_restore(SIGTERM);
 }
 
 /* File-scope state for reregister test */
@@ -109,7 +111,7 @@ TEST(signal_reregister_overwrites) {
     ASSERT(rereg_first_fired == 0);   /* overwritten */
     ASSERT(rereg_second_fired == 1);  /* only the latest fires */
 
-    ccev_signal_ignore(SIGTERM);
+    ccev_signal_restore(SIGTERM);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -120,7 +122,7 @@ int main(void) {
     printf("signal:\n"); fflush(stdout);
 
     RUN(signal_register_and_fire);
-    RUN(signal_ignore_api);
+    RUN(signal_restore_api);
     RUN(signal_invalid_signum);
     RUN(signal_null_cb);
     RUN(signal_reregister_overwrites);

@@ -72,7 +72,7 @@ primary responsibility:
 | `ccev_timer_add/del/reset` | `ccev_timer.c` | Timer subsystem |
 | `ccev_dns_*` | `ccev_dns.c` | DNS resolver |
 | `ccev_icmp_echo` | `ccev_icmp.c` | ICMP echo |
-| `ccev_signal_handle/ignore` | `ccev_signal.c` | Signal handling |
+| `ccev_signal_handle/restore` | `ccev_signal.c` | Signal handling |
 
 Do NOT put functions in `ccev.c` that belong to a sub-module, and vice
 versa.  When a sub-module needs read-access to a core primitive (e.g.

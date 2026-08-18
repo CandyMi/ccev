@@ -188,7 +188,7 @@ int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata) {
     return CCEV_OK;
 }
 
-int ccev_signal_ignore(int signum) {
+int ccev_signal_restore(int signum) {
     if (signum < 1 || signum > 63) return CCEV_ERR;
     ccev_loop_t *loop = ccev_default_loop();
     if (!loop) return CCEV_ERR;
@@ -196,4 +196,11 @@ int ccev_signal_ignore(int signum) {
     loop->signals[signum].cb    = NULL;
     loop->signals[signum].udata = NULL;
     return ccev__sig_install(signum, SIG_DFL);
+}
+
+/* Deprecated alias — the old name suggested SIG_IGN ("ignore")
+ * semantics, but the behavior has always been SIG_DFL: restore the
+ * OS default disposition.  Kept for source compatibility. */
+int ccev_signal_ignore(int signum) {
+    return ccev_signal_restore(signum);
 }

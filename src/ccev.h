@@ -64,7 +64,7 @@ extern "C" {
  *   - ccev_connect(), ccev_listen()
  *   - ccev_dns_* functions
  *   - ccev_icmp_echo()
- *   - ccev_signal_handle(), ccev_signal_ignore()
+ *   - ccev_signal_handle(), ccev_signal_restore()
  *
  * Not thread-safe (must NOT be called concurrently with any other
  * function on the same loop):
@@ -662,7 +662,15 @@ int ccev_icmp_echo(ccev_loop_t *loop, const char *host,
  *  @return CCEV_OK or CCEV_ERR. */
 int ccev_signal_handle(int signum, ccev_signal_cb cb, void *udata);
 
-/** @brief Restore a signal to its default disposition. */
+/** @brief Restore a signal to its default disposition (SIG_DFL).
+ *  @param signum  OS signal number.
+ *  @return CCEV_OK or CCEV_ERR. */
+int ccev_signal_restore(int signum);
+
+/** @brief Deprecated alias of ccev_signal_restore().
+ *  The old name suggested SIG_IGN ("ignore") semantics, but the
+ *  behavior has always been to restore the default disposition.
+ *  Kept for source compatibility. */
 int ccev_signal_ignore(int signum);
 
 /** @brief Register a per-iteration callback.
