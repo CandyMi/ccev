@@ -247,8 +247,57 @@ if(NOT WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ccev.pc.in
         ${CMAKE_CURRENT_BINARY_DIR}/ccev.pc
         @ONLY)
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ccev.pc
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+
+    # pkg-config only looks inside its built-in search path (pc_path) plus
+    # $PKG_CONFIG_PATH.  The default ${libdir}/pkgconfig is NOT in pc_path
+    # on some setups (e.g. MacPorts pkg-config searches only /opt/local),
+    # so a plain install there would leave `pkg-config --libs ccev` unable
+    # to find the file.  Check pc_path FIRST; when the default directory is
+    # not searched, placement is deferred to INSTALL time
+    # (cmake/cc_pc_install.cmake.in) so the writability scan runs with the
+    # privileges of the process that actually installs (e.g. `sudo make
+    # install` can write a root-owned pc_path directory).
+    option(CCEV_PC_FOLLOW_SEARCH_PATH
+        "Install ccev.pc into a directory in pkg-config's search path" ON)
+    set(_cc_pc_default_dir "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+    set(_cc_pc_script_entries "")
+    set(_cc_pc_script_path "")
+    if(CCEV_PC_FOLLOW_SEARCH_PATH AND NOT CMAKE_CROSSCOMPILING)
+        find_program(_cc_pkg_config pkg-config)
+        if(_cc_pkg_config)
+            execute_process(
+                COMMAND "${_cc_pkg_config}" --variable pc_path pkg-config
+                OUTPUT_VARIABLE _cc_pc_path
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                RESULT_VARIABLE _cc_pc_rc)
+            if(_cc_pc_rc EQUAL 0 AND _cc_pc_path)
+                string(REPLACE ":" ";" _cc_pc_path_list "${_cc_pc_path}")
+                list(FIND _cc_pc_path_list
+                    "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" _cc_pc_found)
+                if(_cc_pc_found EQUAL -1)
+                    # Default dir not searched — let the install-time script
+                    # pick the first writable pc_path entry.
+                    set(_cc_pc_script_entries "${_cc_pc_path_list}")
+                    set(_cc_pc_script_path "${_cc_pc_path}")
+                endif()
+            endif()
+            unset(_cc_pkg_config CACHE)
+        endif()
+    endif()
+    if(_cc_pc_script_entries)
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cc_pc_install.cmake.in
+            ${CMAKE_CURRENT_BINARY_DIR}/cc_pc_install.cmake
+            @ONLY)
+        install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/cc_pc_install.cmake)
+    else()
+        install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ccev.pc
+            DESTINATION "${_cc_pc_default_dir}")
+    endif()
+    unset(_cc_pc_default_dir)
+    unset(_cc_pc_script_entries)
+    unset(_cc_pc_script_path)
 endif()
 
 # ── Tests & examples ────────────────────────────────────────

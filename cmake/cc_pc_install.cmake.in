@@ -1,0 +1,34 @@
+# ── ccev.pc install-time placement ─────────────────────────
+# Runs via install(SCRIPT) inside cmake_install.cmake, so:
+#   • CMAKE_INSTALL_PREFIX is already set (honours `cmake --install --prefix`)
+#   • $ENV{DESTDIR} is honoured for staged packaging
+#   • the writability scan uses the privileges of the process that
+#     actually installs (e.g. `sudo make install`), NOT the configure user
+
+set(_cc_default "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_LIBDIR@/pkgconfig")
+set(_cc_entries "@_cc_pc_script_entries@")
+set(_cc_chosen "")
+
+foreach(_cc_entry IN LISTS _cc_entries)
+    if(IS_ABSOLUTE "${_cc_entry}" AND EXISTS "${_cc_entry}")
+        execute_process(COMMAND test -w "${_cc_entry}" RESULT_VARIABLE _cc_wr)
+        if(_cc_wr EQUAL 0)
+            set(_cc_chosen "${_cc_entry}")
+            break()
+        endif()
+    endif()
+endforeach()
+
+# NOTE: file(INSTALL) prepends $ENV{DESTDIR} to absolute destinations at
+# install time by itself — do NOT prefix the destinations manually.
+if(_cc_chosen)
+    file(INSTALL "@CMAKE_CURRENT_BINARY_DIR@/ccev.pc" DESTINATION "${_cc_chosen}")
+    message(STATUS "ccev.pc installed to '${_cc_chosen}' (in pkg-config's search path; default '${_cc_default}' is not)")
+else()
+    file(INSTALL "@CMAKE_CURRENT_BINARY_DIR@/ccev.pc" DESTINATION "${_cc_default}")
+    message(WARNING
+        "ccev.pc installed to '${_cc_default}', which is NOT in pkg-config's search path "
+        "(pc_path: @_cc_pc_script_path@) and no pc_path directory is writable. "
+        "Export PKG_CONFIG_PATH, install with a prefix inside pc_path, or install "
+        "with enough privileges to write a pc_path directory.")
+endif()
