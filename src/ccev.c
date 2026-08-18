@@ -238,7 +238,11 @@ static void _dispatch_one(struct ccev_poll_event *ev, void *arg) {
         if (sock->mode == CCEV_SOCK_INIT) {
             sock->events = 0;
             if (sock->rcb) sock->rcb(sock, ccev_events);
-            ccev__sock_schedule_close(loop, sock);
+            uint32_t nread = 0;
+            bool ok = ccsocket_get_nread(sock->fd, &nread);
+            // printf("HUP : %d, %d\n", ok, nread);
+            if (!ok || nread == 0)
+                ccev__sock_schedule_close(loop, sock);
             return;
         }
         /* LISTEN (or unknown) — just close */
