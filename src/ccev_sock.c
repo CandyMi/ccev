@@ -94,6 +94,16 @@ void ccev__sock_schedule_close(ccev_loop_t *loop, ccev_sock_t *sock) {
         }
     }
 
+    /* 兜底删除 read_timer: HUP/flush 错误等直接关闭路径不经 ccev_stream_close,
+     * 残留读定时器会在 sock free 后触发 _read_timeout_cb (use-after-free). */
+    if (sock->upgraded) {
+        ccev_stream_t *st = (ccev_stream_t *)sock;
+        if (st->read_timer) {
+            ccev_timer_del(loop, st->read_timer);
+            st->read_timer = NULL;
+        }
+    }
+
     sock->closed     = true;
     sock->in_closing = true;
 

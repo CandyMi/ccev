@@ -458,9 +458,16 @@ int ccev_stream_read(ccev_stream_t *st, size_t limit, int timeout_ms,
     st->read_udata = udata;
     st->limit      = limit;
     st->timeout_ms = timeout_ms;
-    if (timeout_ms > 0)
+    if (timeout_ms > 0) {
+        /* 先删除旧读定时器再创建新的, 否则每次 read 都会泄漏一个 active 定时器,
+         * sock 关闭后残留定时器触发 _read_timeout_cb 造成 use-after-free. */
+        if (st->read_timer) {
+            ccev_timer_del(st->sock.loop, st->read_timer);
+            st->read_timer = NULL;
+        }
         st->read_timer = ccev_timer_add(st->sock.loop, (uint64_t)timeout_ms,
                                          CCEV_TIMER_ONCE, _read_timeout_cb, st);
+    }
     st->sock.rcb = _stream_on_readable;
     ccev__sock_rearm(st->sock.loop, &st->sock);
     return CCEV_OK;
