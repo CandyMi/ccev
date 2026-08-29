@@ -199,9 +199,11 @@ void ccev_loop_stop(ccev_loop_t *loop) {
 /* ════════════════════════════════════════════════════════════════
  *  Event dispatch — per-event callback from poll layer
  *
- *  Called by ccev__poll_wait for each ready fd.  Handles HUP/ERR
- *  close, LISTEN accept batching, CONNECT completion, and normal
- *  read/write event callbacks with ONESHOT re-arm.
+ *  Called by ccev__poll_wait for each ready fd.  HUP/ERR is special
+ *  only for CONNECT (completion verdict) and LISTEN (user decides
+ *  via rcb, else auto-close); on data sockets it is delivered through
+ *  the read path.  Handles LISTEN accept batching, CONNECT completion,
+ *  and normal read/write event callbacks with ONESHOT re-arm.
  *
  *  The poll layer owns the wake pipe and drains it internally —
  *  this callback never sees wake events.
@@ -221,10 +223,17 @@ static void _dispatch_one(struct ccev_poll_event *ev, void *arg) {
     if (fired & (CCEV_POLL_ERR | CCEV_POLL_HUP))
         ccev_events |= CCEV_EVENT_HUP;
 
-    /* HUP/ERR — handle by socket mode.
+    /* HUP/ERR is special only for CONNECT and LISTEN.
      *   CONNECT: probe connection state, fire connect_cb, then close.
-     *   INIT:    deliver HUP via rcb so user can read final data, then close.
-     *   LISTEN:  just close. */
+     *   LISTEN:  hand the event to the user's rcb when one is armed —
+     *             the user decides (drain remaining accepts via the fd,
+     *             or close immediately); otherwise auto-close.  The
+     *             accept queue is untouched — ccsocket_accept2 still
+     *             works on the fd inside the callback.
+     *   INIT:    no special handling — HUP/ERR is a READ event.  The
+     *             user's rcb sees the HUP flag; recv()==0 is the EOF
+     *             signal, and the user decides when to close.  No
+     *             auto-close: the reactor never decides for the user. */
     if (ccev_events & CCEV_EVENT_HUP) {
         if (sock->mode == CCEV_SOCK_CONNECT) {
             ccev_sock_any_t *any = (ccev_sock_any_t *)sock;
@@ -235,19 +244,17 @@ static void _dispatch_one(struct ccev_poll_event *ev, void *arg) {
             ccev__sock_schedule_close(loop, sock);
             return;
         }
-        if (sock->mode == CCEV_SOCK_INIT) {
-            sock->events = 0;
-            if (sock->rcb) sock->rcb(sock, ccev_events);
-            uint32_t nread = 0;
-            bool ok = ccsocket_get_nread(sock->fd, &nread);
-            // printf("HUP : %d, %d\n", ok, nread);
-            if (!ok || nread == 0)
-                ccev__sock_schedule_close(loop, sock);
+        if (sock->mode == CCEV_SOCK_LISTEN) {
+            if (sock->rcb) {
+                sock->events = 0;
+                sock->rcb(sock, ccev_events);
+                /* No re-arm — HUP is terminal; the user closes. */
+                return;
+            }
+            ccev__sock_schedule_close(loop, sock);
             return;
         }
-        /* LISTEN (or unknown) — just close */
-        ccev__sock_schedule_close(loop, sock);
-        return;
+        /* INIT: fall through — HUP/ERR is delivered via the read path. */
     }
 
     /* Reset registered events (ONESHOT consumed them) */
@@ -284,6 +291,11 @@ static void _dispatch_one(struct ccev_poll_event *ev, void *arg) {
 
         /* Normal read — fire rcb */
         if (sock->rcb) sock->rcb(sock, ccev_events);
+    } else if ((ccev_events & CCEV_EVENT_HUP) && sock->rcb) {
+        /* Bare HUP/ERR without the READ bit (e.g. RST) — still deliver
+         * EOF through the read callback so the user recv()s (→ error
+         * or 0) and closes. */
+        sock->rcb(sock, ccev_events);
     }
 
     if (fired & CCEV_POLL_WRITE) {

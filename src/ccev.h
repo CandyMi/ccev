@@ -107,8 +107,12 @@ enum {
     CCEV_EVENT_READ  = 1 << 0,   /**< Data available to read.               */
     CCEV_EVENT_WRITE = 1 << 1,   /**< Socket ready for writing.             */
     CCEV_EVENT_HUP   = 1 << 2,   /**< Peer closed / error (fast-path).
-                                  *   select backend may report this as
-                                  *   READ + recv()==0 instead.             */
+                                  *   Delivered through the read callback
+                                  *   on data sockets; the socket is NOT
+                                  *   auto-closed — recv()==0 is the EOF
+                                  *   signal and the user decides when to
+                                  *   close.  select backend may report
+                                  *   this as READ + recv()==0 instead.   */
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -134,9 +138,12 @@ typedef void (*ccev_send_cb)(void *udata);
  *  @param status CCEV_OK on completion, CCEV_ERR on failure. */
 typedef void (*ccev_sendfile_cb)(void *udata, int status);
 
-/** @brief Socket-closed / error callback. Fired when the peer closes
- *  the connection or an I/O error occurs.  The fd is already dead —
- *  the user should release associated resources inside this callback.
+/** @brief Socket-closed callback. Fired exactly once when a socket is
+ *  closed — user-initiated or forced (loop destroy, flush/sendfile
+ *  error, TLS handshake failure, listener fallback).  The fd is
+ *  already dead — release associated resources here.
+ *  Not an EOF signal: peer close arrives via the read callback
+ *  (recv()==0 / CCEV_EVENT_HUP) before this fires.
  *  @param udata  User-provided context pointer. */
 typedef void (*ccev_close_cb)(void *udata);
 
