@@ -362,7 +362,27 @@ static void dns_recv_cb(ccev_sock_t *sock, int events) {
     unsigned char buf[4096];
     int n;
     ccsocket_stcode_t rc = ccsocket_recv(sock->fd, (char*)buf, sizeof(buf), &n);
-    if (rc != CC_OPCODE_OK || n <= 0) return;
+    if (rc != CC_OPCODE_OK || n <= 0) {
+        /* recv error / EOF — treat as failed resolution.  HUP/ERR is now
+         * delivered through the read path with no auto-close, so a bare
+         * return would leave the sock armed and spinning on the
+         * persistent error.  Mirror dns_timeout_cb: notify waiters, then
+         * close (q is freed by close_cb). */
+        if (!q->finished) {
+            q->finished = true;
+            if (q->timer) { ccev_timer_del(q->loop, q->timer); q->timer = NULL; }
+            ccev_dns_pending_t *p = q->pending;
+            if (p) pending_distribute(p, "", CCEV_ERR);
+            if (q->cb) q->cb(q->udata, "", CCEV_ERR);
+            if (p) {
+                pending_distribute(p, "", CCEV_ERR);
+                pending_remove(q->loop, p);
+                q->pending = NULL;
+            }
+        }
+        ccev__sock_schedule_close(q->loop, q->sock);
+        return;
+    }
 
     q->finished = true;
     if (q->timer) { ccev_timer_del(q->loop, q->timer); q->timer = NULL; }
