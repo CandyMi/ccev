@@ -68,31 +68,31 @@ static void ping_recv_ready(ccev_sock_t *sock, int events) {
     (void)events;
     ccev_ping_t *p = (ccev_ping_t *)sock->udata;
 
-    /* Cancel the timeout timer — the ICMP socket is readable, so the
-     * echo exchange is complete (reply, error, or spurious wakeup). */
+    /* Scan the receive queue for our reply (ccicmp_reply keeps reading
+     * past non-matching packets).  Queue exhausted without a match =
+     * our reply has not arrived yet (macOS does not filter by id, so
+     * concurrent replies may arrive out of order) — keep the socket
+     * and timer alive and keep waiting; failure is only judged by the
+     * timeout timer. */
+    p->reply_len = sizeof(p->reply_buf);
+    bool rc = ccicmp_reply(&p->ping, p->reply_buf, &p->reply_len);
+    if (!(rc && p->reply_len > 0))
+        return;
+
+    /* Reply matched: cancel the timer, report success, close */
     if (p->timer) {
         ccev_timer_del(p->loop, p->timer);
         p->timer = NULL;
     }
 
-    /* Try to receive the reply */
-    p->reply_len = sizeof(p->reply_buf);
-    bool rc = ccicmp_reply(&p->ping, p->reply_buf, &p->reply_len);
+    ccev_icmp_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.rtt_ms      = (double)(ccev__now_ms() - p->send_time);
+    result.payload_len = p->reply_len;
+    result.ttl         = p->ping.ttl;
+    snprintf(result.ip, sizeof(result.ip), "%.63s", p->host);
 
-    if (rc && p->reply_len > 0) {
-        ccev_icmp_result_t result;
-        memset(&result, 0, sizeof(result));
-        result.rtt_ms      = (double)(ccev__now_ms() - p->send_time);
-        result.payload_len = p->reply_len;
-        result.ttl         = p->ping.ttl;
-        snprintf(result.ip, sizeof(result.ip), "%.63s", p->host);
-
-        if (p->cb) p->cb(p->udata, &result);
-    } else {
-        /* No valid reply — fire error callback so the caller is
-         * notified even on spurious socket events. */
-        if (p->cb) p->cb(p->udata, NULL);
-    }
+    if (p->cb) p->cb(p->udata, &result);
 
     if (p->sock)
         ccev__sock_schedule_close(p->loop, p->sock);
