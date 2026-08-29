@@ -459,8 +459,10 @@ int ccev_stream_read(ccev_stream_t *st, size_t limit, int timeout_ms,
     st->limit      = limit;
     st->timeout_ms = timeout_ms;
     if (timeout_ms > 0) {
-        /* 先删除旧读定时器再创建新的, 否则每次 read 都会泄漏一个 active 定时器,
-         * sock 关闭后残留定时器触发 _read_timeout_cb 造成 use-after-free. */
+        /* Drop any existing read timer before creating a new one —
+         * otherwise every read leaks an active timer and the stale
+         * timer fires _read_timeout_cb after the sock is closed
+         * (use-after-free). */
         if (st->read_timer) {
             ccev_timer_del(st->sock.loop, st->read_timer);
             st->read_timer = NULL;
