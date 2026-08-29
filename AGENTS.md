@@ -175,7 +175,7 @@ flowchart TD
         DISPATCH --> EVT{"ev dispatch"}
         EVT -->|"null / closed"| SKIP["continue"]
         EVT -->|"wake_sock"| WAKE["drain pipe\ncontinue"]
-        EVT -->|"EPOLLERR|HUP"| HUP["mode dispatch\nCONNECT→is_connected+cb\nINIT→rcb(HUP)+close\nLISTEN→close"]
+        EVT -->|"EPOLLERR|HUP"| HUP["mode dispatch\nCONNECT→is_connected+cb+close\nLISTEN→rcb(HUP)? user decides : auto-close\nINIT→read path (no auto-close)"]
         EVT -->|"LISTEN + IN"| LISTEN["batch accept (≤128)\nfor each: ccev_sock_create\n→ listen_cb\nre-arm EPOLLIN\ncontinue"]
         EVT -->|"CONNECT + OUT"| CONN["ccsocket_is_connected"]
         CONN -->|"CC_CONNECTED"| CONNOK["mode = INIT\ndel connect timer\nconnect_cb(OK)\ncontinue"]
@@ -206,10 +206,10 @@ The reactor loop runs in `ccev_loop_run()`:
 4. **Phase 3 — Poll**: `epoll_wait()` with EINTR retry. Returns `n` ready events.
 5. **Phase 4 — Dispatch**: For each event, route by socket mode:
    - `wake_sock`: Drain the pipe, skip re-arm (handled post-loop).
-   - `HUP/ERR`: Mode-based dispatch:
+   - `HUP/ERR`: special only for CONNECT and LISTEN:
        · `CCEV_SOCK_CONNECT` → `ccsocket_is_connected()` — `CC_CONNECTED` fires `connect_cb(OK)`, otherwise `connect_cb(ERR)`; always schedules close.
-       · `CCEV_SOCK_INIT` → fires `rcb(sock, CCEV_EVENT_HUP)` so user can read final data, then schedules close.
-       · `CCEV_SOCK_LISTEN` → immediate deferred close.
+       · `CCEV_SOCK_LISTEN` → rcb armed? fire `rcb(HUP)` and let the user decide (drain accepts / close) : auto-close.
+       · `CCEV_SOCK_INIT` → no special handling: HUP/ERR is a READ event. rcb sees the HUP flag; `recv()==0` is EOF; the user closes. Never auto-closed.
    - `LISTEN + EPOLLIN`: Batch accept up to `CCEV_MAX_ACCEPT_BATCH` (128), wrap each in `ccev_sock_t`, fire `listen_cb`, then re-arm listener.
    - `CONNECT + EPOLLOUT`: Connect completion — `ccsocket_is_connected()`. `CC_CONNECTED` → transition to `CCEV_SOCK_INIT`, fire `connect_cb(OK)`. `CC_CONNERROR` → fire `connect_cb(ERR)`, schedule close.
    - Normal `EPOLLIN`/`EPOLLOUT`: Fire `rcb`/`wcb`, then re-arm via `ccev__sock_rearm()` (re-registers ONESHOT for whichever callbacks are still set).

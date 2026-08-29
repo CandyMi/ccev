@@ -15,13 +15,18 @@ enum {
     CCEV_EVENT_NONE  = 0,          /* No event. */
     CCEV_EVENT_READ  = 1 << 0,     /* Data available to read. */
     CCEV_EVENT_WRITE = 1 << 1,     /* Socket ready for writing. */
-    CCEV_EVENT_HUP   = 1 << 2,     /* Peer closed (fast-path, not
-                                    * guaranteed on select backend). */
+    CCEV_EVENT_HUP   = 1 << 2,     /* Peer closed / error (fast-path,
+                                    * delivered via the read callback;
+                                    * the socket is NOT auto-closed). */
 };
 ```
 
 Passed to `ccev_event_cb`. `CCEV_EVENT_HUP` is an optimization — on the
 select backend, peer close is detected via `CCEV_EVENT_READ` + `recv()==0`.
+On data sockets the socket is never auto-closed: `recv()==0` is the EOF
+signal and the user decides when to close. HUP/ERR is special-cased only
+for `ccev_listen` listeners (user-decided via rcb, else auto-close) and
+in-flight `ccev_connect` connections (completion verdict).
 
 ## Enumerations
 
@@ -177,8 +182,10 @@ of events processed.
 3. Compute epoll timeout from `next_ms`
 4. `epoll_wait()`
 5. Dispatch events — listeners (batch accept up to 128), connecting
-   (`ccsocket_is_connected`), HUP (mode-based: connect_cb/rcb+close),
-   EPOLLIN/EPOLLOUT (fire callbacks)
+   (`ccsocket_is_connected`), HUP/ERR (CONNECT verdict via connect_cb;
+   LISTEN user-decides via rcb or auto-closes; data sockets deliver it
+   through the read callback, no auto-close), EPOLLIN/EPOLLOUT (fire
+   callbacks)
 6. Re-arm wake pipe
 7. Process closing queue (fire close_cb, free sockets)
 
@@ -266,8 +273,12 @@ Disarm write events.
 void ccev_sock_set_close_cb(ccev_sock_t *sock, ccev_close_cb cb, void *udata);
 ```
 
-Set the close/error callback. Fires when the peer closes, an I/O error
-occurs, or `ccev_sock_close()` is called.
+Set the close callback. Fires exactly once when the socket is closed —
+user-initiated (`ccev_sock_close()`) or forced (loop destroy,
+flush/sendfile error, listener fallback). It is NOT an EOF signal:
+peer close arrives through the read callback (`recv()==0` /
+`CCEV_EVENT_HUP`), and the socket is only closed when the user closes
+it (or a forced path does).
 
 #### `ccev_sock_close`
 
@@ -436,7 +447,7 @@ Completion callback for `ccev_stream_read()`.
 | `status` | Meaning |
 |---|---|
 | `CCEV_OK` | Data available. |
-| `CCEV_ERR` | Connection closed or timeout. |
+| `CCEV_ERR` | Connection closed (EOF) or timeout. The socket is not auto-closed. |
 
 #### `ccev_stream_read`
 
@@ -449,8 +460,10 @@ Read continuously — dispatch data as it arrives (raw dispatch mode).
 
 The callback fires on every chunk of received data, at most `limit`
 bytes per call (0 = unlimited). Zero heap allocation — data is delivered
-directly from a stack buffer. Stays active until `ccev_stream_read_stop()`,
-the timeout fires, or the connection closes.
+directly from a stack buffer. Stays active until `ccev_stream_read_stop()`
+or the timeout fires. On peer close the callback fires with `CCEV_ERR`
+(EOF); the socket is NOT closed automatically — call
+`ccev_stream_close()` when done (or from the error callback).
 
 If `timeout_ms > 0`, the callback fires with `CCEV_ERR` if no data
 arrives within the idle deadline.
